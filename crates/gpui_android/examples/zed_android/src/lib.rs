@@ -72,8 +72,10 @@ fn active_provider(data_path: &std::path::Path) -> Box<dyn RuntimeProvider> {
 /// Make the subscription-backed ACP agents available without asking users to
 /// configure an API provider. Both adapters inherit the active runtime's HOME,
 /// so they reuse the login performed by `codex login` / `claude` in Zdroid's
-/// integrated terminal. CODEX_PATH also prevents the npm adapter from trying
-/// to use its platform-bundled Codex binary, which has no Android target.
+/// integrated terminal. Keep Codex on the version bundled by codex-acp: its
+/// app-server protocol is generated against that version, while pointing
+/// CODEX_PATH at a newer global CLI can initialize successfully but then hang
+/// waiting for turn notifications with a different wire shape.
 fn ensure_cli_subscription_agents(fs: Arc<dyn Fs>, cx: &mut App) {
     cx.global::<SettingsStore>()
         .update_settings_file(fs, move |content, _cx| {
@@ -88,10 +90,13 @@ fn ensure_cli_subscription_agents(fs: Arc<dyn Fs>, cx: &mut App) {
                     favorite_models: Vec::new(),
                     default_config_options: HashMap::default(),
                     favorite_config_option_values: HashMap::default(),
-                });
+            });
             if let settings::CustomAgentServerSettings::Registry { env, .. } = codex {
-                env.entry("CODEX_PATH".to_string())
-                    .or_insert_with(|| "codex".to_string());
+                // Older Zdroid previews added this override. Remove it from
+                // persisted settings so codex-acp uses its own compatible
+                // @openai/codex dependency while still reading the shared
+                // login from HOME/.codex.
+                env.remove("CODEX_PATH");
             }
 
             let claude = agent_servers
