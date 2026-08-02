@@ -13,7 +13,7 @@ use raw_window_handle as rwh;
 
 use gpui::{
     AnyWindowHandle, Bounds, Capslock, DevicePixels, DispatchEventResult, GpuSpecs, Modifiers,
-    PlatformAtlas, PlatformDisplay, PlatformInput, PlatformInputHandler, PlatformWindow, Pixels,
+    Pixels, PlatformAtlas, PlatformDisplay, PlatformInput, PlatformInputHandler, PlatformWindow,
     Point, PromptButton, PromptLevel, RequestFrameOptions, Scene, Size, WindowAppearance,
     WindowBackgroundAppearance, WindowBounds, WindowControlArea, WindowParams, point, px, size,
 };
@@ -171,6 +171,10 @@ pub(crate) struct AndroidWindowState {
     /// spawned window wouldn't trigger show_keyboard because the
     /// global was already true for MainActivity.
     pub(crate) ime_currently_visible: bool,
+    /// Set after a pointer-down leaves a text input focused. Unlike the
+    /// focus-edge mirror above, this lets a second tap re-open an IME that
+    /// Android dismissed while the gpui input handler remained installed.
+    pub(crate) ime_reassert_requested: bool,
     /// Per-window cache of the last classified IME target kind
     /// (terminal vs editor). On change we issue restartInput on this
     /// window's Activity so the IME's EditorInfo reflects the new
@@ -440,10 +444,14 @@ impl AndroidWindowStatePtr {
     /// active `PlatformInputHandler` (gpui's text-input path) when the
     /// callback didn't claim them.
     pub(crate) fn handle_input(&self, input: PlatformInput) {
+        let is_pointer_down = matches!(input, PlatformInput::MouseDown(_));
         let callback = self.callbacks.borrow_mut().input.take();
         if let Some(mut callback) = callback {
             let result = callback(input.clone());
             self.callbacks.borrow_mut().input = Some(callback);
+            if is_pointer_down && self.state.borrow().input_handler.is_some() {
+                self.state.borrow_mut().ime_reassert_requested = true;
+            }
             if !result.propagate {
                 return;
             }
@@ -517,6 +525,7 @@ impl AndroidWindow {
             ime_composition_start: None,
             ime_composition_text: None,
             ime_currently_visible: false,
+            ime_reassert_requested: false,
             last_ime_target_kind: None,
             last_pushed_selection: None,
         };
@@ -714,10 +723,7 @@ impl PlatformWindow for AndroidWindow {
         self.ptr.callbacks.borrow_mut().should_close = Some(callback);
     }
 
-    fn on_hit_test_window_control(
-        &self,
-        _callback: Box<dyn FnMut() -> Option<WindowControlArea>>,
-    ) {
+    fn on_hit_test_window_control(&self, _callback: Box<dyn FnMut() -> Option<WindowControlArea>>) {
     }
 
     fn on_close(&self, callback: Box<dyn FnOnce()>) {
@@ -760,8 +766,7 @@ impl PlatformWindow for AndroidWindow {
         // tapped again. Kotlin's WindowInsetsListener will correct
         // if the OS-side toggle fails for any reason.
         let new_visible = !crate::ime::soft_keyboard_visible();
-        crate::ime::SOFT_KEYBOARD_VISIBLE
-            .store(new_visible, std::sync::atomic::Ordering::Release);
+        crate::ime::SOFT_KEYBOARD_VISIBLE.store(new_visible, std::sync::atomic::Ordering::Release);
         crate::ime::toggle_keyboard(&android_app, extra_window_id);
     }
 

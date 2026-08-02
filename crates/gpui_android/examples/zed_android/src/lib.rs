@@ -94,7 +94,7 @@ fn ensure_cli_subscription_agents(fs: Arc<dyn Fs>, cx: &mut App) {
                     .or_insert_with(|| "codex".to_string());
             }
 
-            agent_servers
+            let claude = agent_servers
                 .entry("claude-acp".to_string())
                 .or_insert_with(|| settings::CustomAgentServerSettings::Registry {
                     env: HashMap::default(),
@@ -104,6 +104,10 @@ fn ensure_cli_subscription_agents(fs: Arc<dyn Fs>, cx: &mut App) {
                     default_config_options: HashMap::default(),
                     favorite_config_option_values: HashMap::default(),
                 });
+            if let settings::CustomAgentServerSettings::Registry { env, .. } = claude {
+                env.entry("CLAUDE_CODE_EXECUTABLE".to_string())
+                    .or_insert_with(|| "claude".to_string());
+            }
         });
 }
 

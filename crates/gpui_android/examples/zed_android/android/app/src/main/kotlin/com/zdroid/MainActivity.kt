@@ -134,6 +134,7 @@ class MainActivity : GameActivity(), ImeHost {
     /// flag the IME would receive show / focus events 60+ times per
     /// second and flicker visibly.
     private var imeShown: Boolean = false
+    private var textInputActive: Boolean = false
 
     /// Set right before we call `imm.hideSoftInputFromWindow` from
     /// our own code (hideIme / toggleIme). The WindowInsets listener
@@ -173,14 +174,16 @@ class MainActivity : GameActivity(), ImeHost {
     }
 
     /// Reconcile the `ExtraKeysView`'s presence in the content view
-    /// against the two gates: the user setting
-    /// (`programmingExtrasRowEnabled`) and the OS-side IME state
-    /// (`imeShown`). Called whenever either input changes. Inflates
+    /// against the focused input kind, the user setting, and the
+    /// OS-side IME state. Terminal input always gets the Termux-style
+    /// row; the setting controls whether editors get it too. Inflates
     /// the view lazily on first enable, then toggles visibility on
     /// subsequent changes, then removes the view when the setting
     /// is turned off entirely so we don't pay the layout cost.
     private fun updateExtrasRowVisibility() {
-        val shouldShow = programmingExtrasRowEnabled && imeShown
+        val extrasEnabledForTarget =
+            currentImeMode == ImeInputMode.TERMINAL || programmingExtrasRowEnabled
+        val shouldShow = extrasEnabledForTarget && imeShown
         if (shouldShow) {
             if (extraKeysView == null) {
                 val view = ExtraKeysView(this) { pending, locked ->
@@ -212,7 +215,7 @@ class MainActivity : GameActivity(), ImeHost {
         runOnUiThread {
             if (programmingExtrasRowEnabled == enabled) return@runOnUiThread
             programmingExtrasRowEnabled = enabled
-            if (!enabled) {
+            if (!enabled && currentImeMode != ImeInputMode.TERMINAL) {
                 // Tear down completely so the disabled state is also
                 // free of layout overhead, not just visually hidden.
                 extraKeysView?.let { (it.parent as? android.view.ViewGroup)?.removeView(it) }
@@ -233,32 +236,38 @@ class MainActivity : GameActivity(), ImeHost {
     @Suppress("unused")
     fun showIme() {
         runOnUiThread {
-            val host = imeHostView ?: run {
-                Log.w("zdroid_ime", "showIme: imeHostView is null, skipping")
-                return@runOnUiThread
-            }
-            if (imeManuallyDismissed) {
-                Log.i("zdroid_ime", "showIme suppressed (user dismissed)")
-                return@runOnUiThread
-            }
-            Log.i(
-                "zdroid_ime",
-                "showIme called imeShown=$imeShown hostFocused=${host.isFocused}"
-            )
-            if (imeShown) return@runOnUiThread
-            if (!host.isFocused) host.requestFocus()
-            // Use WindowInsetsControllerCompat for the show path too
-            // (matches hide). `imm.showSoftInput` requires focused
-            // text-input AND has a documented "first call silently
-            // fails" race when window state is mid-transition — the
-            // observed symptom where toggleIme:showing was followed
-            // by WindowInsets immediately reporting IME hidden because
-            // imm.show didn't actually take effect. InsetsController
-            // routes through the OS-level inset animation directly.
-            programmaticShowPending = true
-            androidx.core.view.WindowInsetsControllerCompat(window, window.decorView)
-                .show(androidx.core.view.WindowInsetsCompat.Type.ime())
-            setImeShown(true)
+            textInputActive = true
+            requestImeShow(clearManualDismiss = false)
+        }
+    }
+
+    @Suppress("unused")
+    fun reassertIme() {
+        runOnUiThread {
+            textInputActive = true
+            requestImeShow(clearManualDismiss = true)
+        }
+    }
+
+    private fun requestImeShow(clearManualDismiss: Boolean, retry: Boolean = false) {
+        val host = imeHostView ?: return
+        if (clearManualDismiss) setImeManuallyDismissed(false)
+        if (imeManuallyDismissed || imeShown || !textInputActive || !hasWindowFocus()) return
+
+        if (!host.isFocused) host.requestFocus()
+        val imm = getSystemService(Context.INPUT_METHOD_SERVICE)
+            as android.view.inputmethod.InputMethodManager
+        programmaticShowPending = true
+        androidx.core.view.WindowInsetsControllerCompat(window, window.decorView)
+            .show(androidx.core.view.WindowInsetsCompat.Type.ime())
+        imm.showSoftInput(host, android.view.inputmethod.InputMethodManager.SHOW_IMPLICIT)
+
+        if (!retry) {
+            host.postDelayed({
+                if (!imeShown && textInputActive && hasWindowFocus() && !imeManuallyDismissed) {
+                    requestImeShow(clearManualDismiss = false, retry = true)
+                }
+            }, 180L)
         }
     }
 
@@ -267,6 +276,7 @@ class MainActivity : GameActivity(), ImeHost {
     @Suppress("unused")
     fun hideIme() {
         runOnUiThread {
+            textInputActive = false
             Log.i("zdroid_ime", "hideIme called imeShown=$imeShown")
             if (!imeShown) return@runOnUiThread
             programmaticHidePending = true
@@ -311,10 +321,9 @@ class MainActivity : GameActivity(), ImeHost {
     @Suppress("unused")
     fun toggleIme() {
         runOnUiThread {
-            val host = imeHostView ?: return@runOnUiThread
-            val imm = getSystemService(Context.INPUT_METHOD_SERVICE)
-                as android.view.inputmethod.InputMethodManager
+            if (imeHostView == null) return@runOnUiThread
             if (imeShown) {
+                textInputActive = false
                 Log.i("zdroid_ime", "toggleIme: hiding (manual dismiss)")
                 programmaticHidePending = true
                 // Modern hide path — see hideIme rationale. Sidesteps
@@ -326,10 +335,8 @@ class MainActivity : GameActivity(), ImeHost {
                 setImeManuallyDismissed(true)
             } else {
                 Log.i("zdroid_ime", "toggleIme: showing (clearing manual-dismiss)")
-                if (!host.isFocused) host.requestFocus()
-                imm.showSoftInput(host, 0)
-                setImeShown(true)
-                setImeManuallyDismissed(false)
+                textInputActive = true
+                requestImeShow(clearManualDismiss = true)
             }
         }
     }
@@ -398,6 +405,7 @@ class MainActivity : GameActivity(), ImeHost {
                 "restartImeForTarget: switching mode ${currentImeMode} -> $modeId"
             )
             currentImeMode = modeId
+            updateExtrasRowVisibility()
             // Focus moved to a different input target — fresh
             // auto-show budget. Any prior manual dismiss applied
             // to the outgoing target, not this one.
@@ -524,6 +532,8 @@ class MainActivity : GameActivity(), ImeHost {
                         "zdroid_ime",
                         "WindowInsets: IME hidden (programmatic, keeping manual-dismiss flag)"
                     )
+                } else if (!hasWindowFocus()) {
+                    Log.i("zdroid_ime", "WindowInsets: IME hidden while window inactive")
                 } else {
                     Log.i(
                         "zdroid_ime",
@@ -983,6 +993,9 @@ class MainActivity : GameActivity(), ImeHost {
         // the cursor when the user was in touch mode.
         if (hasFocus && trackpadModeActive) {
             cursorOverlay?.move(cursorX, cursorY)
+        }
+        if (hasFocus && textInputActive && !imeManuallyDismissed) {
+            imeHostView?.postDelayed({ requestImeShow(clearManualDismiss = false) }, 120L)
         }
         applyCursorVisibility()
     }

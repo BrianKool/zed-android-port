@@ -79,6 +79,7 @@ class ExtraWindowActivity : AppCompatActivity(), ImeHost {
     /// `take_input_handler` fires per paint, so we filter repeats
     /// before touching `InputMethodManager`.
     private var imeShown: Boolean = false
+    private var textInputActive: Boolean = false
     private var programmaticHidePending: Boolean = false
     private var programmaticShowPending: Boolean = false
     private var lastImeInsetBottom: Int = 0
@@ -272,6 +273,8 @@ class ExtraWindowActivity : AppCompatActivity(), ImeHost {
                 if (programmaticHidePending) {
                     programmaticHidePending = false
                     Log.i(TAG_IME, "WindowInsets[w=$extraWindowId]: IME hidden (programmatic)")
+                } else if (!hasWindowFocus()) {
+                    Log.i(TAG_IME, "WindowInsets[w=$extraWindowId]: IME hidden while window inactive")
                 } else {
                     Log.i(
                         TAG_IME,
@@ -321,24 +324,38 @@ class ExtraWindowActivity : AppCompatActivity(), ImeHost {
     @Suppress("unused")
     fun showIme() {
         runOnUiThread {
-            val host = imeHostView ?: run {
-                Log.w(TAG_IME, "showIme[w=$extraWindowId]: imeHostView is null, skipping")
-                return@runOnUiThread
-            }
-            if (imeManuallyDismissed) {
-                Log.i(TAG_IME, "showIme[w=$extraWindowId] suppressed (user dismissed)")
-                return@runOnUiThread
-            }
-            Log.i(
-                TAG_IME,
-                "showIme[w=$extraWindowId] imeShown=$imeShown hostFocused=${host.isFocused}"
-            )
-            if (imeShown) return@runOnUiThread
-            if (!host.isFocused) host.requestFocus()
-            programmaticShowPending = true
-            WindowInsetsControllerCompat(window, window.decorView)
-                .show(WindowInsetsCompat.Type.ime())
-            setImeShown(true)
+            textInputActive = true
+            requestImeShow(clearManualDismiss = false)
+        }
+    }
+
+    @Suppress("unused")
+    fun reassertIme() {
+        runOnUiThread {
+            textInputActive = true
+            requestImeShow(clearManualDismiss = true)
+        }
+    }
+
+    private fun requestImeShow(clearManualDismiss: Boolean, retry: Boolean = false) {
+        val host = imeHostView ?: return
+        if (clearManualDismiss) setImeManuallyDismissed(false)
+        if (imeManuallyDismissed || imeShown || !textInputActive || !hasWindowFocus()) return
+
+        if (!host.isFocused) host.requestFocus()
+        val imm = getSystemService(Context.INPUT_METHOD_SERVICE)
+            as android.view.inputmethod.InputMethodManager
+        programmaticShowPending = true
+        WindowInsetsControllerCompat(window, window.decorView)
+            .show(WindowInsetsCompat.Type.ime())
+        imm.showSoftInput(host, android.view.inputmethod.InputMethodManager.SHOW_IMPLICIT)
+
+        if (!retry) {
+            host.postDelayed({
+                if (!imeShown && textInputActive && hasWindowFocus() && !imeManuallyDismissed) {
+                    requestImeShow(clearManualDismiss = false, retry = true)
+                }
+            }, 180L)
         }
     }
 
@@ -346,6 +363,7 @@ class ExtraWindowActivity : AppCompatActivity(), ImeHost {
     @Suppress("unused")
     fun hideIme() {
         runOnUiThread {
+            textInputActive = false
             Log.i(TAG_IME, "hideIme[w=$extraWindowId] imeShown=$imeShown")
             if (!imeShown) return@runOnUiThread
             programmaticHidePending = true
@@ -359,10 +377,9 @@ class ExtraWindowActivity : AppCompatActivity(), ImeHost {
     @Suppress("unused")
     fun toggleIme() {
         runOnUiThread {
-            val host = imeHostView ?: return@runOnUiThread
-            val imm = getSystemService(Context.INPUT_METHOD_SERVICE)
-                as android.view.inputmethod.InputMethodManager
+            if (imeHostView == null) return@runOnUiThread
             if (imeShown) {
+                textInputActive = false
                 Log.i(TAG_IME, "toggleIme[w=$extraWindowId]: hiding (manual dismiss)")
                 programmaticHidePending = true
                 WindowInsetsControllerCompat(window, window.decorView)
@@ -371,10 +388,8 @@ class ExtraWindowActivity : AppCompatActivity(), ImeHost {
                 setImeManuallyDismissed(true)
             } else {
                 Log.i(TAG_IME, "toggleIme[w=$extraWindowId]: showing (clearing manual-dismiss)")
-                if (!host.isFocused) host.requestFocus()
-                imm.showSoftInput(host, 0)
-                setImeShown(true)
-                setImeManuallyDismissed(false)
+                textInputActive = true
+                requestImeShow(clearManualDismiss = true)
             }
         }
     }
@@ -455,6 +470,9 @@ class ExtraWindowActivity : AppCompatActivity(), ImeHost {
         if (::surfaceView.isInitialized && trackpadModeActive && hasFocus) {
             ensureCursorOverlay()
             cursorOverlay?.move(cursorX, cursorY)
+        }
+        if (hasFocus && textInputActive && !imeManuallyDismissed) {
+            imeHostView?.postDelayed({ requestImeShow(clearManualDismiss = false) }, 120L)
         }
         applyCursorVisibility()
     }

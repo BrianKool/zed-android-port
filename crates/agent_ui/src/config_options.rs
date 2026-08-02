@@ -234,6 +234,9 @@ impl Render for ConfigOptionsView {
 
         h_flex()
             .gap_1()
+            .flex_wrap()
+            .min_w_0()
+            .max_w_full()
             .children(self.selectors.iter().cloned())
             .into_any_element()
     }

@@ -723,12 +723,19 @@ impl AndroidPlatform {
         extra_window_id: Option<u64>,
         window_ptr: &crate::window::AndroidWindowStatePtr,
     ) {
-        let (currently_visible, app, was_visible) = {
-            let state = window_ptr.state.borrow();
+        let (currently_visible, target_kind, app, was_visible, reassert_requested) = {
+            let mut state = window_ptr.state.borrow_mut();
+            let reassert_requested = std::mem::take(&mut state.ime_reassert_requested);
+            let target_kind = state
+                .input_handler
+                .as_mut()
+                .map(crate::ime::probe_target_kind);
             (
                 state.input_handler.is_some(),
+                target_kind,
                 state.android_app.clone(),
                 state.ime_currently_visible,
+                reassert_requested,
             )
         };
         let visibility_changed = currently_visible != was_visible;
@@ -742,11 +749,14 @@ impl AndroidPlatform {
                 // mirror seeded so if they later flip the setting
                 // on and tap the keyboard button, the IME has
                 // current state.
-                if crate::ime::on_screen_keyboard_enabled() {
+                if crate::ime::on_screen_keyboard_enabled()
+                    && target_kind != Some(crate::ime::ImeTargetKind::Terminal)
+                {
                     crate::ime::show_keyboard(&app, extra_window_id);
                 } else {
                     log::info!(
-                        "ime::reconcile auto-show suppressed by android_input.on_screen_keyboard=false"
+                        "ime::reconcile auto-show suppressed (target={target_kind:?}, enabled={})",
+                        crate::ime::on_screen_keyboard_enabled()
                     );
                 }
                 crate::ime::notify_text_state(window_ptr);
@@ -756,6 +766,12 @@ impl AndroidPlatform {
                 window_ptr.state.borrow_mut().last_pushed_selection = None;
                 crate::ime::hide_keyboard(&app, extra_window_id);
             }
+        } else if currently_visible
+            && reassert_requested
+            && crate::ime::on_screen_keyboard_enabled()
+            && target_kind != Some(crate::ime::ImeTargetKind::Terminal)
+        {
+            crate::ime::reassert_keyboard(&app, extra_window_id);
         }
 
         if !currently_visible {
