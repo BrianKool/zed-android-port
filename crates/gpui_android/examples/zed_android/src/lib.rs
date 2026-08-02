@@ -222,7 +222,9 @@ fn android_main(app: AndroidApp) {
     // spawns. Idempotent: subsequent android_main re-entries (activity
     // recreation) get the same overlay; the registration is OnceLock-
     // guarded inside util::env.
-    util::env::register_terminal_env_overlay(provider.env_for_terminal(&data_path));
+    let mut terminal_env = provider.env_for_terminal(&data_path);
+    terminal_env.extend(gpui_android::github_credentials::terminal_env(&data_path));
+    util::env::register_terminal_env_overlay(terminal_env);
 
     // Publish adapter-specific filesystem hints for editor code that
     // historically read TERMUX__HOME / TERMUX__PREFIX env vars
@@ -337,6 +339,9 @@ fn android_main(app: AndroidApp) {
              abort under SELinux",
             askpass_path.display()
         );
+    }
+    if let Err(err) = gpui_android::github_credentials::start(&app, &data_path) {
+        log::warn!("zed_android: terminal GitHub credential bridge failed: {err:#}");
     }
 
     gpui_android::run(app, assets::Assets, move |cx: &mut App| {

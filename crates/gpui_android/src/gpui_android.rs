@@ -13,6 +13,7 @@ mod display;
 pub mod dns_bridge;
 mod events;
 mod frame_timing;
+pub mod github_credentials;
 mod ime;
 mod keyboard;
 mod multi_window;

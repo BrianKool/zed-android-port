@@ -76,19 +76,37 @@ async fn validate_token(http_client: &Arc<dyn HttpClient>, token: &str) -> Resul
 
 async fn request_device_code(
     http_client: &Arc<dyn HttpClient>,
+    executor: &BackgroundExecutor,
 ) -> Result<DeviceCodeResponse> {
-    let body = format!("client_id={GITHUB_CLIENT_ID}&scope=repo%20read%3Aorg");
-    let request = Request::builder()
-        .method(Method::POST)
-        .uri(DEVICE_CODE_URL)
-        .header("Accept", "application/json")
-        .header("Content-Type", "application/x-www-form-urlencoded")
-        .body(AsyncBody::from(body.into_bytes()))?;
-    let (status, body) = response_text(http_client, request).await?;
-    if !status.is_success() {
-        bail!("GitHub device login failed ({status}): {body}");
+    let mut last_error = None;
+    for attempt in 1..=3 {
+        let body = format!("client_id={GITHUB_CLIENT_ID}&scope=repo%20read%3Aorg");
+        let request = Request::builder()
+            .method(Method::POST)
+            .uri(DEVICE_CODE_URL)
+            .header("Accept", "application/json")
+            .header("Content-Type", "application/x-www-form-urlencoded")
+            .body(AsyncBody::from(body.into_bytes()))?;
+        match response_text(http_client, request).await {
+            Ok((status, body)) => {
+                if !status.is_success() {
+                    bail!("GitHub device login failed ({status}): {body}");
+                }
+                return serde_json::from_str(&body)
+                    .context("GitHub returned an invalid device login response");
+            }
+            Err(error) => {
+                log::warn!("GitHub device login request attempt {attempt} failed: {error:#}");
+                last_error = Some(error);
+                if attempt < 3 {
+                    executor.timer(Duration::from_secs(1)).await;
+                }
+            }
+        }
     }
-    serde_json::from_str(&body).context("GitHub returned an invalid device login response")
+
+    Err(last_error.expect("device login must record a failed request"))
+        .context("Could not connect to GitHub after 3 attempts")
 }
 
 async fn poll_for_access_token(
@@ -114,7 +132,15 @@ async fn poll_for_access_token(
             .header("Accept", "application/json")
             .header("Content-Type", "application/x-www-form-urlencoded")
             .body(AsyncBody::from(body.into_bytes()))?;
-        let (status, body) = response_text(http_client, request).await?;
+        let (status, body) = match response_text(http_client, request).await {
+            Ok(response) => response,
+            Err(error) => {
+                // Android may suspend Zdroid while the browser handles OAuth.
+                // Retry stale connections after the app returns to the foreground.
+                log::warn!("GitHub token polling request failed; retrying: {error:#}");
+                continue;
+            }
+        };
         if !status.is_success() {
             bail!("GitHub token request failed ({status}): {body}");
         }
@@ -176,13 +202,13 @@ impl GithubAccountsModal {
         let read_credentials = cx.read_credentials(GITHUB_CREDENTIALS_KEY);
         cx.spawn(async move |this, cx| {
             let state = match read_credentials.await {
-                Ok(Some((username, _))) => AuthState::SignedIn(
-                    if username == GITHUB_GIT_USERNAME {
+                Ok(Some((username, _))) => {
+                    AuthState::SignedIn(if username == GITHUB_GIT_USERNAME {
                         "GitHub".into()
                     } else {
                         username.into()
-                    },
-                ),
+                    })
+                }
                 Ok(None) => AuthState::SignedOut,
                 Err(error) => AuthState::Error(error.to_string().into()),
             };
@@ -217,7 +243,8 @@ impl GithubAccountsModal {
             cx.notify();
             return;
         }
-        self.token_editor.update(cx, |editor, cx| editor.clear(window, cx));
+        self.token_editor
+            .update(cx, |editor, cx| editor.clear(window, cx));
         self.state = AuthState::Working("Validating token...".into());
         cx.notify();
 
@@ -252,7 +279,7 @@ impl GithubAccountsModal {
 
         cx.spawn(async move |this, cx| {
             let result: Result<GithubUser> = async {
-                let device = request_device_code(&http_client).await?;
+                let device = request_device_code(&http_client, &executor).await?;
                 let code: SharedString = device.user_code.clone().into();
                 let verification_uri: SharedString = device.verification_uri.clone().into();
                 this.update(cx, |this, cx| {
@@ -281,6 +308,10 @@ impl GithubAccountsModal {
                 })
             }
             .await;
+
+            if let Err(error) = &result {
+                log::error!("GitHub device login failed: {error:#}");
+            }
 
             this.update(cx, |this, cx| {
                 this.state = match result {
@@ -386,7 +417,11 @@ impl Render for GithubAccountsModal {
             AuthState::Working(message) => v_flex()
                 .items_center()
                 .gap_3()
-                .child(Button::new("github-working", message.clone()).loading(true).disabled(true))
+                .child(
+                    Button::new("github-working", message.clone())
+                        .loading(true)
+                        .disabled(true),
+                )
                 .into_any_element(),
             AuthState::DeviceCode {
                 code,
@@ -406,15 +441,27 @@ impl Render for GithubAccountsModal {
                             }
                         }),
                 )
-                .child(Label::new(verification_uri.clone()).size(LabelSize::Small).color(Color::Muted))
-                .child(Button::new("github-waiting", "Waiting for GitHub...").loading(true).disabled(true))
+                .child(
+                    Label::new(verification_uri.clone())
+                        .size(LabelSize::Small)
+                        .color(Color::Muted),
+                )
+                .child(
+                    Button::new("github-waiting", "Waiting for GitHub...")
+                        .loading(true)
+                        .disabled(true),
+                )
                 .into_any_element(),
             AuthState::SignedIn(login) => v_flex()
                 .gap_3()
                 .child(
                     h_flex()
                         .gap_2()
-                        .child(Icon::new(IconName::Github).size(IconSize::Small).color(Color::Success))
+                        .child(
+                            Icon::new(IconName::Github)
+                                .size(IconSize::Small)
+                                .color(Color::Success),
+                        )
                         .child(Label::new(format!("Signed in as {login}"))),
                 )
                 .child(
@@ -427,9 +474,20 @@ impl Render for GithubAccountsModal {
                 .gap_3()
                 .child(
                     h_flex()
+                        .items_start()
                         .gap_2()
-                        .child(Icon::new(IconName::XCircle).size(IconSize::Small).color(Color::Error))
-                        .child(Label::new(message.clone()).color(Color::Error)),
+                        .child(
+                            Icon::new(IconName::XCircle)
+                                .size(IconSize::Small)
+                                .color(Color::Error),
+                        )
+                        .child(
+                            div()
+                                .min_w_0()
+                                .w_full()
+                                .whitespace_normal()
+                                .child(Label::new(message.clone()).color(Color::Error)),
+                        ),
                 )
                 .child(self.signed_out_actions(cx))
                 .into_any_element(),
@@ -449,18 +507,19 @@ impl Render for GithubAccountsModal {
                     .header(
                         ModalHeader::new()
                             .headline("GitHub Accounts")
-                            .description("Use GitHub authentication for HTTPS clone, fetch, pull, and push.")
+                            .description(
+                                "Use GitHub authentication for HTTPS clone, fetch, pull, and push.",
+                            )
                             .show_dismiss_button(true),
                     )
                     .section(Section::new().child(content))
-                    .footer(
-                        ModalFooter::new().end_slot(
-                            Button::new("close-github-accounts", "Close")
-                                .on_click(cx.listener(|this, _, window, cx| {
-                                    this.dismiss(&menu::Cancel, window, cx);
-                                })),
-                        ),
-                    ),
+                    .footer(ModalFooter::new().end_slot(
+                        Button::new("close-github-accounts", "Close").on_click(cx.listener(
+                            |this, _, window, cx| {
+                                this.dismiss(&menu::Cancel, window, cx);
+                            },
+                        )),
+                    )),
             )
     }
 }
