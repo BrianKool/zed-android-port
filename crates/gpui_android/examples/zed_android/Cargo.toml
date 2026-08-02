@@ -15,6 +15,11 @@ android-activity = { version = "0.6", features = ["game-activity"] }
 android_logger = "0.13"
 anyhow = "1"
 jni = "0.21"
+acp_tools = { path = "../../../acp_tools" }
+agent = { path = "../../../agent" }
+agent_servers = { path = "../../../agent_servers" }
+agent_settings = { path = "../../../agent_settings" }
+agent_ui = { path = "../../../agent_ui" }
 askpass = { path = "../../../askpass" }
 assets = { path = "../../../assets" }
 client = { path = "../../../client" }
@@ -45,6 +50,7 @@ json_schema_store = { path = "../../../json_schema_store" }
 keymap_editor = { path = "../../../keymap_editor" }
 language = { path = "../../../language" }
 language_model = { path = "../../../language_model" }
+language_models = { path = "../../../language_models" }
 language_selector = { path = "../../../language_selector" }
 language_tools = { path = "../../../language_tools" }
 languages = { path = "../../../languages", features = ["load-grammars"] }
@@ -61,6 +67,7 @@ paths = { path = "../../../paths" }
 project = { path = "../../../project" }
 project_panel = { path = "../../../project_panel" }
 project_symbols = { path = "../../../project_symbols" }
+prompt_store = { path = "../../../prompt_store" }
 recent_projects = { path = "../../../recent_projects" }
 remote = { path = "../../../remote" }
 settings_profile_selector = { path = "../../../settings_profile_selector" }
@@ -78,6 +85,8 @@ which_key = { path = "../../../which_key" }
 shellexpand = "3.1"
 util = { path = "../../../util" }
 watch = { path = "../../../watch" }
+web_search = { path = "../../../web_search" }
+web_search_providers = { path = "../../../web_search_providers" }
 workspace = { path = "../../../workspace" }
 zdroid_runtime = { path = "../../../zdroid_runtime" }
 platform_title_bar = { path = "../../../platform_title_bar" }

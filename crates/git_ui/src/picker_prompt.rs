@@ -79,6 +79,7 @@ impl Render for PickerPrompt {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         v_flex()
             .w(rems(self.rem_width))
+            .max_w_full()
             .child(self.picker.clone())
             .on_mouse_down_out(cx.listener(|this, _, window, cx| {
                 this.picker.update(cx, |this, cx| {

@@ -1169,6 +1169,7 @@ impl Render for ProjectPickerModal {
             .key_context("ProjectPickerModal")
             .elevation_3(cx)
             .w(rems(34.))
+            .max_w_full()
             .on_action(cx.listener(|this, _: &workspace::Open, window, cx| {
                 this.picker.update(cx, |picker, cx| {
                     picker.delegate.open_local_folder(window, cx)

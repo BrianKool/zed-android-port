@@ -1,3 +1,4 @@
+use askpass::{AskPassDelegate, AskPassSession};
 use gpui::{App, Context, DismissEvent, WeakEntity, Window};
 use notifications::status_toast::StatusToast;
 use std::path::Path;
@@ -25,12 +26,17 @@ fn run_git_clone(
     url: &str,
     cwd: &Path,
     cancel: &AtomicBool,
+    askpass_script: &std::ffi::OsStr,
 ) -> anyhow::Result<CloneOutcome> {
     let mut child = Command::new("git")
         .arg("clone")
         .arg("--progress")
         .arg(url)
         .current_dir(cwd)
+        .env("GIT_ASKPASS", askpass_script)
+        .env("SSH_ASKPASS", askpass_script)
+        .env("SSH_ASKPASS_REQUIRE", "force")
+        .env("GIT_TERMINAL_PROMPT", "0")
         .spawn()
         .map_err(|err| anyhow::anyhow!("spawn git clone for {url}: {err}"))?;
     loop {
@@ -57,6 +63,7 @@ fn run_git_clone(
 pub fn clone_and_open(
     repo_url: SharedString,
     workspace: WeakEntity<Workspace>,
+    askpass: AskPassDelegate,
     window: &mut Window,
     cx: &mut App,
     on_success: Arc<
@@ -74,6 +81,32 @@ pub fn clone_and_open(
         .spawn(cx, async move |cx| {
             let mut paths = destination_prompt.await.ok()?.ok()??;
             let mut destination_dir = paths.pop()?;
+
+            let askpass_session = match AskPassSession::new(
+                cx.background_executor().clone(),
+                askpass,
+            )
+            .await
+            {
+                Ok(session) => session,
+                Err(error) => {
+                    workspace
+                        .update(cx, |workspace, cx| {
+                            let toast = StatusToast::new(error.to_string(), cx, |this, _| {
+                                this.icon(
+                                    Icon::new(IconName::XCircle)
+                                        .size(IconSize::Small)
+                                        .color(Color::Error),
+                                )
+                                .dismiss_button(true)
+                            });
+                            workspace.toggle_status_toast(toast, cx);
+                        })
+                        .log_err();
+                    return None;
+                }
+            };
+            let askpass_script = askpass_session.script_path().as_ref().to_owned();
 
             let repo_name = repo_url
                 .split('/')
@@ -123,10 +156,18 @@ pub fn clone_and_open(
                 let cancel_for_worker = cancel.clone();
                 cx.background_executor()
                     .spawn(async move {
-                        run_git_clone(&url_for_worker, &cwd_for_worker, &cancel_for_worker)
+                        run_git_clone(
+                            &url_for_worker,
+                            &cwd_for_worker,
+                            &cancel_for_worker,
+                            &askpass_script,
+                        )
                     })
                     .await
             };
+
+            // Keep the socket-backed AskPass proxy alive until git exits.
+            drop(askpass_session);
 
             // Always dismiss the progress toast — completion, cancel, or error.
             let _ = progress_toast.update(cx, |_, cx| cx.emit(DismissEvent));

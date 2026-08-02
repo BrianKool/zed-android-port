@@ -192,7 +192,7 @@ impl ModalLayer {
 }
 
 impl Render for ModalLayer {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let Some(active_modal) = &self.active_modal else {
             return div().into_any_element();
         };
@@ -219,12 +219,22 @@ impl Render for ModalLayer {
             )
             .child(
                 v_flex()
-                    .h(px(0.0))
-                    .top_20()
+                    .id("modal-layer-content")
+                    .when(cfg!(target_os = "android"), |this| {
+                        this.size_full().p_2().overflow_y_scroll()
+                    })
+                    .when(!cfg!(target_os = "android"), |this| {
+                        this.h(px(0.0)).top_20()
+                    })
                     .items_center()
                     .track_focus(&active_modal.focus_handle)
                     .child(
                         h_flex()
+                            .when(cfg!(target_os = "android"), |this| {
+                                this.w_full()
+                                    .max_h(window.viewport_size().height - px(16.0))
+                                    .justify_center()
+                            })
                             .occlude()
                             .child(active_modal.modal.view())
                             .on_mouse_down(MouseButton::Left, |_, _, cx| {

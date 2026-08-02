@@ -655,7 +655,13 @@ pub fn open_settings_editor(
         .find_map(|window| window.downcast::<SettingsWindow>());
 
     if let Some(existing_window) = existing_window {
-        activate_existing(existing_window, workspace_handle, path, target_worktree_id, cx);
+        activate_existing(
+            existing_window,
+            workspace_handle,
+            path,
+            target_worktree_id,
+            cx,
+        );
         return;
     }
 
@@ -1552,17 +1558,11 @@ impl SettingsWindow {
                 EditorEvent::Focused => "Focused",
                 EditorEvent::Blurred => "Blurred",
                 EditorEvent::InputHandled { text, .. } => {
-                    log::info!(
-                        "settings_ui::search_bar: InputHandled text={:?}",
-                        text
-                    );
+                    log::info!("settings_ui::search_bar: InputHandled text={:?}", text);
                     "InputHandled"
                 }
                 EditorEvent::InputIgnored { text } => {
-                    log::info!(
-                        "settings_ui::search_bar: InputIgnored text={:?}",
-                        text
-                    );
+                    log::info!("settings_ui::search_bar: InputIgnored text={:?}", text);
                     "InputIgnored"
                 }
                 _ => "<other>",
@@ -2720,6 +2720,7 @@ impl SettingsWindow {
 
     fn render_nav(
         &self,
+        compact: bool,
         window: &mut Window,
         cx: &mut Context<SettingsWindow>,
     ) -> impl IntoElement {
@@ -2864,12 +2865,16 @@ impl SettingsWindow {
                     cx,
                 );
             }))
-            .w_56()
-            .h_full()
+            .when(compact, |this| {
+                this.w_full()
+                    .h_1_3()
+                    .min_h(px(180.0))
+                    .border_b_1()
+            })
+            .when(!compact, |this| this.w_56().h_full().border_r_1())
             .p_2p5()
             .when(cfg!(target_os = "macos"), |this| this.pt_10())
             .flex_none()
-            .border_r_1()
             .border_color(cx.theme().colors().border)
             .bg(cx.theme().colors().panel_background)
             .child(self.render_search(window, cx))
@@ -3964,6 +3969,7 @@ impl SettingsWindow {
 impl Render for SettingsWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let ui_font = theme_settings::setup_ui_font(window, cx);
+        let compact = cfg!(target_os = "android") && window.viewport_size().width.as_f32() < 700.0;
 
         client_side_decorations(
             v_flex()
@@ -4032,7 +4038,8 @@ impl Render for SettingsWindow {
                             window.focus_prev(cx);
                         })
                         .flex()
-                        .flex_row()
+                        .when(compact, |this| this.flex_col())
+                        .when(!compact, |this| this.flex_row())
                         .flex_1()
                         .min_h_0()
                         .font(ui_font)
@@ -4041,7 +4048,7 @@ impl Render for SettingsWindow {
                         .when(!cfg!(target_os = "macos"), |this| {
                             this.border_t_1().border_color(cx.theme().colors().border)
                         })
-                        .child(self.render_nav(window, cx))
+                        .child(self.render_nav(compact, window, cx))
                         .child(self.render_page(window, cx)),
                 ),
             window,

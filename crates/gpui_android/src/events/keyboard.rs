@@ -18,16 +18,17 @@ use gpui::{
 pub(crate) fn translate_key_event(event: &KeyEvent) -> Option<PlatformInput> {
     let action = event.action();
     let keycode = event.key_code();
-    let modifiers = modifiers_from_meta(event.meta_state());
+    let meta_state = event.meta_state();
+    let modifiers = modifiers_from_meta(meta_state);
 
     if is_modifier_key(keycode) {
         return Some(PlatformInput::ModifiersChanged(ModifiersChangedEvent {
             modifiers,
-            capslock: capslock_from_meta(event.meta_state()),
+            capslock: capslock_from_meta(meta_state),
         }));
     }
 
-    let keystroke = build_keystroke(keycode, modifiers);
+    let keystroke = build_keystroke(keycode, modifiers, capslock_from_meta(meta_state));
 
     match action {
         KeyAction::Down => Some(PlatformInput::KeyDown(KeyDownEvent {
@@ -69,7 +70,7 @@ pub(crate) fn translate_extra_key_event(
         }));
     }
 
-    let keystroke = build_keystroke(keycode, modifiers);
+    let keystroke = build_keystroke(keycode, modifiers, capslock_from_meta(meta));
 
     // Android KeyEvent.ACTION_DOWN = 0, ACTION_UP = 1, ACTION_MULTIPLE = 2.
     // Same translation policy as `translate_key_event`: only Down/Up
@@ -110,7 +111,7 @@ fn is_modifier_key(code: Keycode) -> bool {
     )
 }
 
-fn build_keystroke(code: Keycode, mut modifiers: Modifiers) -> Keystroke {
+fn build_keystroke(code: Keycode, mut modifiers: Modifiers, capslock: Capslock) -> Keystroke {
     let (key, key_char) = if let Some(named) = named_key(code) {
         // Space is the one named key where gpui still wants a printable
         // key_char so text-input paths can insert " ".
@@ -118,7 +119,12 @@ fn build_keystroke(code: Keycode, mut modifiers: Modifiers) -> Keystroke {
         (named.to_string(), key_char)
     } else if let Some(ch) = lowercased_key(code) {
         let key = ch.to_string();
-        let typed = if modifiers.shift {
+        let shifted = if ch.is_ascii_alphabetic() {
+            modifiers.shift ^ capslock.on
+        } else {
+            modifiers.shift
+        };
+        let typed = if shifted {
             apply_shift(ch)
         } else {
             ch

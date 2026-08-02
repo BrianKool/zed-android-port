@@ -160,6 +160,7 @@ impl Render for ConfigureContextServerToolsModal {
             .occlude()
             .elevation_3(cx)
             .w(rems(34.))
+            .max_w_full()
             .on_action(cx.listener(Self::cancel))
             .track_focus(&self.focus_handle)
             .child(

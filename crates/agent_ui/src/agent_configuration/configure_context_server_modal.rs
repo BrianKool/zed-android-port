@@ -1219,6 +1219,7 @@ impl Render for ConfigureContextServerModal {
         div()
             .elevation_3(cx)
             .w(rems(40.))
+            .max_w_full()
             .key_context("ConfigureContextServerModal")
             .on_action(
                 cx.listener(|this, _: &menu::Cancel, _window, cx| this.cancel(&menu::Cancel, cx)),

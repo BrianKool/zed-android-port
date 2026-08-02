@@ -446,19 +446,9 @@ class ExtraWindowActivity : AppCompatActivity(), ImeHost {
 
     override fun onWindowFocusChanged(hasFocus: Boolean) {
         super.onWindowFocusChanged(hasFocus)
-        // Mirror MainActivity: request capture when this window gains
-        // focus and a trackpad/mouse is connected, release when focus
-        // is lost. Without this, spawned windows fall back to
-        // Samsung's gesture filter which mangles trackpad gestures
-        // into single-finger fake-mouse events.
-        if (hasFocus) {
-            if (hasIndirectPointer()) {
-                Log.i(TAG, "requestPointerCapture() windowId=$extraWindowId")
-                window.decorView.requestPointerCapture()
-            }
-        } else {
-            window.decorView.releasePointerCapture()
-        }
+        // Keep DeX's system cursor available for moving and resizing both
+        // the main app window and auxiliary Zdroid windows.
+        window.decorView.releasePointerCapture()
         // Maintain SurfaceControl lifecycle on focus change but let
         // visibility derive from the input modality. See
         // `MainActivity.onWindowFocusChanged` for the rationale.

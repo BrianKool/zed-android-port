@@ -10,6 +10,7 @@ mod runtime_picker;
 mod title_bar;
 
 use std::borrow::Cow;
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -19,23 +20,20 @@ use client::{Client, UserStore};
 use db::AppDatabase;
 use db::kvp::KeyValueStore;
 use fs::{Fs, RealFs};
-use node_runtime::NodeRuntime;
-use project::Project;
-use session::{AppSession, Session};
 use gpui::{App, AppContext as _, TaskExt as _, UpdateGlobal as _};
 use log::{error, info};
+use node_runtime::NodeRuntime;
+use project::Project;
+use prompt_store::PromptBuilder;
+use reqwest_client::ReqwestClient;
+use session::{AppSession, Session};
 use settings::{Settings as _, SettingsStore};
 use util::ResultExt as _;
 use workspace::{
     AppState, CloseIntent, CloseProject, MultiWorkspace, OpenOptions, SerializedWorkspaceLocation,
     Workspace, WorkspaceStore, open_new, workspace_windows_for_location,
 };
-use reqwest_client::ReqwestClient;
-use zdroid_runtime::{
-    RuntimeId, RuntimeProvider,
-    adapters,
-    config::RuntimeFile,
-};
+use zdroid_runtime::{RuntimeId, RuntimeProvider, adapters, config::RuntimeFile};
 
 fn minimal_window_options(_: Option<uuid::Uuid>, _cx: &mut App) -> gpui::WindowOptions {
     gpui::WindowOptions::default()
@@ -46,9 +44,7 @@ fn minimal_window_options(_: Option<uuid::Uuid>, _cx: &mut App) -> gpui::WindowO
 /// adapter-derived metadata. Returns None when no toml exists or the
 /// adapter construction fails (defaults are filled in by the picker
 /// the first time the user opens it).
-fn build_active_provider(
-    data_path: &std::path::Path,
-) -> Option<Box<dyn RuntimeProvider>> {
+fn build_active_provider(data_path: &std::path::Path) -> Option<Box<dyn RuntimeProvider>> {
     let file = RuntimeFile::load(&data_path.join("usr/etc/zd-runtime.toml"))
         .ok()
         .flatten()?;
@@ -70,10 +66,46 @@ fn active_provider(data_path: &std::path::Path) -> Box<dyn RuntimeProvider> {
     let resolved = file
         .resolve()
         .expect("default Bootstrap RuntimeFile must resolve");
-    adapters::for_config(&resolved)
-        .expect("default Bootstrap adapter must construct")
+    adapters::for_config(&resolved).expect("default Bootstrap adapter must construct")
 }
 
+/// Make the subscription-backed ACP agents available without asking users to
+/// configure an API provider. Both adapters inherit the active runtime's HOME,
+/// so they reuse the login performed by `codex login` / `claude` in Zdroid's
+/// integrated terminal. CODEX_PATH also prevents the npm adapter from trying
+/// to use its platform-bundled Codex binary, which has no Android target.
+fn ensure_cli_subscription_agents(fs: Arc<dyn Fs>, cx: &mut App) {
+    cx.global::<SettingsStore>()
+        .update_settings_file(fs, move |content, _cx| {
+            let agent_servers = content.agent_servers.get_or_insert_default();
+
+            let codex = agent_servers
+                .entry("codex-acp".to_string())
+                .or_insert_with(|| settings::CustomAgentServerSettings::Registry {
+                    env: HashMap::default(),
+                    default_mode: None,
+                    default_model: None,
+                    favorite_models: Vec::new(),
+                    default_config_options: HashMap::default(),
+                    favorite_config_option_values: HashMap::default(),
+                });
+            if let settings::CustomAgentServerSettings::Registry { env, .. } = codex {
+                env.entry("CODEX_PATH".to_string())
+                    .or_insert_with(|| "codex".to_string());
+            }
+
+            agent_servers
+                .entry("claude-acp".to_string())
+                .or_insert_with(|| settings::CustomAgentServerSettings::Registry {
+                    env: HashMap::default(),
+                    default_mode: None,
+                    default_model: None,
+                    favorite_models: Vec::new(),
+                    default_config_options: HashMap::default(),
+                    favorite_config_option_values: HashMap::default(),
+                });
+        });
+}
 
 // Bundled fonts. Upstream Zed walks `assets/fonts/` via `AssetSource`
 // at boot (see `load_embedded_fonts` in crates/zed/src/main.rs) and
@@ -200,9 +232,7 @@ fn android_main(app: AndroidApp) {
     // its Termux-flavored paths, chroot publishes the bionic-clean
     // equivalents, external Termux publishes None.
     util::env::register_workspace_root(provider.workspace_root(&data_path));
-    util::env::register_npm_libtermux_exec_path(
-        provider.npm_libtermux_exec_path(&data_path),
-    );
+    util::env::register_npm_libtermux_exec_path(provider.npm_libtermux_exec_path(&data_path));
 
     // Surface the SELinux domain in logcat — this is the canary for the
     // targetSdk pin. If `untrusted_app_27` flips to `untrusted_app_all`
@@ -229,9 +259,7 @@ fn android_main(app: AndroidApp) {
     // zd-exec and `terminal.shell` (which the chroot adapter sets to
     // `<data>/files/bin/zd-exec`) fails with ENOENT. Phase 4 of the
     // Termux-divestment refactor moved this off `$PREFIX/bin/`.
-    if let Err(err) =
-        gpui_android::zd_exec_install::ensure_installed(&app, &data_path)
-    {
+    if let Err(err) = gpui_android::zd_exec_install::ensure_installed(&app, &data_path) {
         log::warn!(
             "zed_android: zd-exec install failed: {err:#}; \
              chroot adapter's integrated terminal will fail to spawn"
@@ -380,9 +408,7 @@ fn run_update_check(
         };
         match result {
             gpui_android::updater::UpdateCheck::UpToDate { current, latest } => {
-                info!(
-                    "zed_android: update check up to date (current={current} latest={latest})"
-                );
+                info!("zed_android: update check up to date (current={current} latest={latest})");
                 if !silent_when_up_to_date {
                     let _ = cx.update(|window, cx| {
                         window.prompt(
@@ -464,10 +490,8 @@ fn run_update_check(
 
 fn reload_zdroid_keymaps(cx: &mut App) {
     cx.clear_key_bindings();
-    match settings::KeymapFile::load_asset_allow_partial_failure(
-        settings::DEFAULT_KEYMAP_PATH,
-        cx,
-    ) {
+    match settings::KeymapFile::load_asset_allow_partial_failure(settings::DEFAULT_KEYMAP_PATH, cx)
+    {
         Ok(bindings) => {
             info!(
                 "zed_android: loaded {} key bindings from default keymap",
@@ -480,10 +504,8 @@ fn reload_zdroid_keymaps(cx: &mut App) {
     let vim_enabled = vim_mode_setting::VimModeSetting::is_enabled(cx)
         || vim_mode_setting::HelixModeSetting::is_enabled(cx);
     if vim_enabled {
-        match settings::KeymapFile::load_asset_allow_partial_failure(
-            settings::VIM_KEYMAP_PATH,
-            cx,
-        ) {
+        match settings::KeymapFile::load_asset_allow_partial_failure(settings::VIM_KEYMAP_PATH, cx)
+        {
             Ok(bindings) => {
                 info!(
                     "zed_android: loaded {} vim/helix key bindings",
@@ -634,6 +656,12 @@ fn boot(cx: &mut App, data_path: &std::path::Path) -> Result<()> {
         }
     }
 
+    // Android has a real Keystore-backed gpui credential implementation.
+    // Debug Zed builds otherwise select DevelopmentCredentialsProvider,
+    // which writes API keys and OAuth refresh tokens to a plain JSON file.
+    unsafe {
+        std::env::set_var("ZED_DEVELOPMENT_USE_KEYCHAIN", "1");
+    }
     release_channel::init(semver::Version::new(0, 1, 0), cx);
     info!("zed_android: release_channel init");
 
@@ -670,12 +698,10 @@ fn boot(cx: &mut App, data_path: &std::path::Path) -> Result<()> {
     // anything. Read the toml directly: `None` flows to the label as
     // "Not configured yet" and disappears the instant the picker
     // writes a selection via `cx.set_global` (see runtime_picker.rs).
-    let current_from_toml = RuntimeFile::load(
-        &data_path.join("usr/etc/zd-runtime.toml"),
-    )
-    .ok()
-    .flatten()
-    .map(|f| f.runtime.kind);
+    let current_from_toml = RuntimeFile::load(&data_path.join("usr/etc/zd-runtime.toml"))
+        .ok()
+        .flatten()
+        .map(|f| f.runtime.kind);
     cx.set_global(onboarding::runtime_global::ActiveRuntime {
         current: current_from_toml,
     });
@@ -689,7 +715,10 @@ fn boot(cx: &mut App, data_path: &std::path::Path) -> Result<()> {
     info!("zed_android: Session opened");
 
     let client = Client::production(cx);
-    info!("zed_android: Client::production constructed (id={})", client.id());
+    info!(
+        "zed_android: Client::production constructed (id={})",
+        client.id()
+    );
 
     // Initialize auto_update so the remote_server CDN-fetch path can
     // resolve the right binary URL via `GlobalAutoUpdate`. The
@@ -734,10 +763,7 @@ fn boot(cx: &mut App, data_path: &std::path::Path) -> Result<()> {
     // function.
     cx.observe_new(|workspace: &mut Workspace, _window, _cx| {
         workspace.register_action(
-            |_workspace: &mut Workspace,
-             _: &auto_update::Check,
-             window,
-             cx| {
+            |_workspace: &mut Workspace, _: &auto_update::Check, window, cx| {
                 run_update_check(/*silent_when_up_to_date=*/ false, window, cx);
             },
         );
@@ -773,12 +799,11 @@ fn boot(cx: &mut App, data_path: &std::path::Path) -> Result<()> {
             allow_path_lookup: !settings.ignore_system_version,
             allow_binary_download: true,
             use_paths: settings.path.as_ref().map(|node_path| {
-                let node_path = std::path::PathBuf::from(
-                    shellexpand::tilde(node_path).as_ref(),
-                );
-                let npm_path = settings.npm_path.as_ref().map(|p| {
-                    std::path::PathBuf::from(shellexpand::tilde(&p).as_ref())
-                });
+                let node_path = std::path::PathBuf::from(shellexpand::tilde(node_path).as_ref());
+                let npm_path = settings
+                    .npm_path
+                    .as_ref()
+                    .map(|p| std::path::PathBuf::from(shellexpand::tilde(&p).as_ref()));
                 (
                     node_path.clone(),
                     npm_path.unwrap_or_else(|| {
@@ -805,9 +830,7 @@ fn boot(cx: &mut App, data_path: &std::path::Path) -> Result<()> {
     settings::SettingsStore::update_global(cx, |store, cx| {
         store.watch_settings_files(fs.clone(), cx, |settings_file, result, _cx| {
             if let settings::ParseStatus::Failed { error } = &result.parse_status {
-                log::error!(
-                    "zed_android: settings parse failed ({settings_file:?}): {error}"
-                );
+                log::error!("zed_android: settings parse failed ({settings_file:?}): {error}");
             }
         });
     });
@@ -864,13 +887,17 @@ fn boot(cx: &mut App, data_path: &std::path::Path) -> Result<()> {
     cx.observe_new::<vim::Vim>(move |_, _window, cx| {
         let vim = cx.entity();
         vim_ime_router.update(cx, |_, cx| {
-            cx.subscribe(&vim, |router: &mut VimImeRouter, vim, event, cx| match event {
-                vim::VimEvent::Focused => {
-                    push_vim_route(vim.read(cx).mode());
-                    router.focused_vim =
-                        Some(cx.observe(&vim, |_, vim, cx| push_vim_route(vim.read(cx).mode())));
-                }
-            })
+            cx.subscribe(
+                &vim,
+                |router: &mut VimImeRouter, vim, event, cx| match event {
+                    vim::VimEvent::Focused => {
+                        push_vim_route(vim.read(cx).mode());
+                        router.focused_vim = Some(
+                            cx.observe(&vim, |_, vim, cx| push_vim_route(vim.read(cx).mode())),
+                        );
+                    }
+                },
+            )
             .detach();
         });
     })
@@ -884,8 +911,7 @@ fn boot(cx: &mut App, data_path: &std::path::Path) -> Result<()> {
             .collect(),
     )?;
 
-    let mut language_registry =
-        language::LanguageRegistry::new(cx.background_executor().clone());
+    let mut language_registry = language::LanguageRegistry::new(cx.background_executor().clone());
     language_registry.set_language_server_download_dir(paths::languages_dir().clone());
     let language_registry = Arc::new(language_registry);
 
@@ -929,7 +955,7 @@ fn boot(cx: &mut App, data_path: &std::path::Path) -> Result<()> {
     let app_state = Arc::new(AppState {
         languages: language_registry,
         client: client.clone(),
-        user_store,
+        user_store: user_store.clone(),
         workspace_store,
         fs: fs.clone(),
         build_window_options: minimal_window_options,
@@ -944,7 +970,9 @@ fn boot(cx: &mut App, data_path: &std::path::Path) -> Result<()> {
     // on theme changes so theme toggles actually recolour text. Bracket
     // matching, indents, and outline don't depend on this and would have
     // worked already; syntax colors and rainbow brackets do.
-    app_state.languages.set_theme(theme::GlobalTheme::theme(cx).clone());
+    app_state
+        .languages
+        .set_theme(theme::GlobalTheme::theme(cx).clone());
     cx.observe_global::<theme::GlobalTheme>({
         let languages = app_state.languages.clone();
         move |cx| {
@@ -1015,18 +1043,17 @@ fn boot(cx: &mut App, data_path: &std::path::Path) -> Result<()> {
     // db was preserving it correctly — every relaunch re-prompted the
     // restricted-mode trust dialog. Fall back to empty on fetch failure
     // (typically only happens if the db schema upgrade is mid-flight).
-    let db_trusted_paths =
-        match workspace::WorkspaceDb::global(cx).fetch_trusted_worktrees() {
-            Ok(paths) => paths,
-            Err(err) => {
-                error!(
-                    "zed_android: fetch_trusted_worktrees failed at boot: \
+    let db_trusted_paths = match workspace::WorkspaceDb::global(cx).fetch_trusted_worktrees() {
+        Ok(paths) => paths,
+        Err(err) => {
+            error!(
+                "zed_android: fetch_trusted_worktrees failed at boot: \
                      {err:#} — starting with empty trust map; user will \
                      be re-prompted for any previously trusted projects"
-                );
-                std::collections::HashMap::default()
-            }
-        };
+            );
+            std::collections::HashMap::default()
+        }
+    };
     project::trusted_worktrees::init(db_trusted_paths, cx);
     Project::init(&client, cx);
 
@@ -1123,6 +1150,32 @@ fn boot(cx: &mut App, data_path: &std::path::Path) -> Result<()> {
     // panics at first paint with "no state of type
     // language_model::registry::GlobalLanguageModelRegistry exists".
     language_model::init(cx);
+    client::RefreshLlmTokenListener::register(client.clone(), user_store.clone(), cx);
+    language_models::init(user_store.clone(), client.clone(), cx);
+    acp_tools::init(cx);
+    web_search::init(cx);
+    web_search_providers::init(client.clone(), user_store.clone(), cx);
+    let prompt_builder = PromptBuilder::load(app_state.fs.clone(), false, cx);
+    ensure_cli_subscription_agents(app_state.fs.clone(), cx);
+    project::AgentRegistryStore::init_global(
+        cx,
+        app_state.fs.clone(),
+        app_state.client.http_client(),
+    );
+    agent_ui::init(
+        app_state.fs.clone(),
+        prompt_builder,
+        app_state.languages.clone(),
+        false,
+        false,
+        cx,
+    );
+    agent::init_user_agents_md(app_state.fs.clone(), cx, |state, _cx| {
+        if let Some(error) = state.error() {
+            log::warn!("zed_android: failed to load AGENTS.md: {error}");
+        }
+    });
+    info!("zed_android: agent_ui + language model providers initialized");
     git_ui::init(cx);
     // Mirror production zed/src/main.rs:733 — register the git graph
     // (commit history) view's serializable item, action handlers
@@ -1164,14 +1217,9 @@ fn boot(cx: &mut App, data_path: &std::path::Path) -> Result<()> {
     // the deep-link.
     cx.observe_new(|workspace: &mut Workspace, _window, _cx| {
         workspace.register_action(
-            |_workspace: &mut Workspace,
-             _: &zed_actions::OpenSettings,
-             window,
-             cx| {
-                if std::path::Path::new(
-                    "/data/data/com.zdroid/files/usr/etc/zd-runtime.toml",
-                )
-                .exists()
+            |_workspace: &mut Workspace, _: &zed_actions::OpenSettings, window, cx| {
+                if std::path::Path::new("/data/data/com.zdroid/files/usr/etc/zd-runtime.toml")
+                    .exists()
                 {
                     // Runtime configured: let settings_ui's handler open
                     // the normal settings editor.
@@ -1232,6 +1280,11 @@ fn boot(cx: &mut App, data_path: &std::path::Path) -> Result<()> {
         let Some(window) = window else { return };
 
         workspace.register_action(editor::open_project_settings_file);
+        workspace
+            .register_action(agent_ui::AgentPanel::toggle_focus)
+            .register_action(agent_ui::AgentPanel::focus)
+            .register_action(agent_ui::AgentPanel::toggle)
+            .register_action(agent_ui::InlineAssistant::inline_assist);
 
         // CloseProject: action wired in production at
         // `crates/zed/src/zed.rs:1123-1180`. Production binds it inside
@@ -1260,8 +1313,7 @@ fn boot(cx: &mut App, data_path: &std::path::Path) -> Result<()> {
         workspace.register_action({
             let app_state = observe_app_state.clone();
             move |workspace: &mut Workspace, _: &CloseProject, window, cx| {
-                let Some(window_handle) =
-                    window.window_handle().downcast::<MultiWorkspace>()
+                let Some(window_handle) = window.window_handle().downcast::<MultiWorkspace>()
                 else {
                     return;
                 };
@@ -1270,11 +1322,7 @@ fn boot(cx: &mut App, data_path: &std::path::Path) -> Result<()> {
                 cx.spawn_in(window, async move |this, cx| {
                     let should_continue = this
                         .update_in(cx, |workspace, window, cx| {
-                            workspace.prepare_to_close(
-                                CloseIntent::ReplaceWindow,
-                                window,
-                                cx,
-                            )
+                            workspace.prepare_to_close(CloseIntent::ReplaceWindow, window, cx)
                         })?
                         .await?;
                     if !should_continue {
@@ -1327,8 +1375,7 @@ fn boot(cx: &mut App, data_path: &std::path::Path) -> Result<()> {
             cx.new(|cx| git_ui::MergeConflictIndicator::new(workspace, cx));
 
         // LspButton needs a handle for the toggle action, same as production.
-        let lsp_button_menu_handle =
-            ui::PopoverMenuHandle::<ui::ContextMenu>::default();
+        let lsp_button_menu_handle = ui::PopoverMenuHandle::<ui::ContextMenu>::default();
         let lsp_button = cx.new(|cx| {
             language_tools::lsp_button::LspButton::new(
                 workspace,
@@ -1385,11 +1432,7 @@ fn boot(cx: &mut App, data_path: &std::path::Path) -> Result<()> {
         active_pane.update(cx, |pane, cx| {
             pane.toolbar().update(cx, |toolbar, cx| {
                 let buffer_search_bar = cx.new(|cx| {
-                    search::BufferSearchBar::new(
-                        Some(toolbar_languages.clone()),
-                        window,
-                        cx,
-                    )
+                    search::BufferSearchBar::new(Some(toolbar_languages.clone()), window, cx)
                 });
                 toolbar.add_item(buffer_search_bar, window, cx);
                 let project_search_bar =
@@ -1404,12 +1447,11 @@ fn boot(cx: &mut App, data_path: &std::path::Path) -> Result<()> {
                 let languages = pane_added_languages.clone();
                 pane.update(cx, |pane, cx| {
                     pane.toolbar().update(cx, |toolbar, cx| {
-                        let buffer_search_bar = cx.new(|cx| {
-                            search::BufferSearchBar::new(Some(languages), window, cx)
-                        });
+                        let buffer_search_bar =
+                            cx.new(|cx| search::BufferSearchBar::new(Some(languages), window, cx));
                         toolbar.add_item(buffer_search_bar, window, cx);
-                        let project_search_bar = cx
-                            .new(|_| search::project_search::ProjectSearchBar::new());
+                        let project_search_bar =
+                            cx.new(|_| search::project_search::ProjectSearchBar::new());
                         toolbar.add_item(project_search_bar, window, cx);
                     });
                 });
@@ -1432,11 +1474,7 @@ fn boot(cx: &mut App, data_path: &std::path::Path) -> Result<()> {
         // two-finger tap opens the Settings/Keymap/Themes/Icon
         // Themes/Extensions dropdown.
         let title_bar = cx.new(|inner_cx| {
-            title_bar::TitleBar::new(
-                weak_workspace.clone(),
-                menu_bar.downgrade(),
-                inner_cx,
-            )
+            title_bar::TitleBar::new(weak_workspace.clone(), menu_bar.downgrade(), inner_cx)
         });
         let header = cx.new(|_| header::Header::new(menu_bar, title_bar));
         workspace.set_titlebar_item(header.into(), window, cx);
@@ -1458,14 +1496,15 @@ fn boot(cx: &mut App, data_path: &std::path::Path) -> Result<()> {
                 terminal_view::terminal_panel::TerminalPanel::load(weak.clone(), cx.clone());
             let git_panel =
                 git_ui::git_panel::GitPanel::load(weak.clone(), cx.clone());
-            let (project_panel, outline_panel, terminal_panel, git_panel) =
-                futures::future::join4(
+            let agent_panel = agent_ui::AgentPanel::load(weak.clone(), cx.clone());
+            let (project_panel, outline_panel, terminal_panel, git_panel, agent_panel) =
+                futures::join!(
                     project_panel,
                     outline_panel,
                     terminal_panel,
                     git_panel,
-                )
-                .await;
+                    agent_panel,
+                );
             weak.update_in(cx, |workspace, window, cx| {
                 if let Ok(panel) = project_panel {
                     workspace.add_panel(panel, window, cx);
@@ -1477,6 +1516,9 @@ fn boot(cx: &mut App, data_path: &std::path::Path) -> Result<()> {
                     workspace.add_panel(panel, window, cx);
                 }
                 if let Ok(panel) = git_panel {
+                    workspace.add_panel(panel, window, cx);
+                }
+                if let Ok(panel) = agent_panel {
                     workspace.add_panel(panel, window, cx);
                 }
             })?;
@@ -1517,6 +1559,22 @@ fn boot(cx: &mut App, data_path: &std::path::Path) -> Result<()> {
     // Onboarding/WelcomePage items naturally because the workspace gets
     // replaced.
     cx.on_action(|_: &workspace::Open, cx: &mut App| {
+        // Capture the destination before launching Android DocumentsUI.
+        // While its Activity result is transitioning back to Zdroid,
+        // `active_window()` can briefly be None (or still point at a picker
+        // window), which used to discard the selected directory.
+        let active = cx.active_window();
+        let target_multi_workspace = active
+            .as_ref()
+            .and_then(|window| window.downcast::<MultiWorkspace>());
+        let target_workspace = active
+            .as_ref()
+            .and_then(|window| window.downcast::<workspace::Workspace>());
+        let fallback_multi_workspace =
+            workspace_windows_for_location(&SerializedWorkspaceLocation::Local, cx)
+                .into_iter()
+                .next();
+
         let paths = cx.prompt_for_paths(gpui::PathPromptOptions {
             files: true,
             directories: true,
@@ -1542,13 +1600,7 @@ fn boot(cx: &mut App, data_path: &std::path::Path) -> Result<()> {
             // fall through to plain Workspace; the previous code silently
             // no-op'd ("no active MultiWorkspace for Open" log + return)
             // when invoked on the welcome screen of a fresh install.
-            let active = cx.update(|cx| cx.active_window());
-            let Some(active) = active else {
-                error!("zed_android: no active window for Open");
-                return;
-            };
-
-            if let Some(mw) = active.downcast::<MultiWorkspace>() {
+            if let Some(mw) = target_multi_workspace {
                 let task = mw.update(cx, |mw, window, cx| {
                     mw.open_project(picked, workspace::OpenMode::Activate, window, cx)
                 });
@@ -1557,7 +1609,7 @@ fn boot(cx: &mut App, data_path: &std::path::Path) -> Result<()> {
                         error!("zed_android: open_project failed: {err:#}");
                     }
                 }
-            } else if let Some(ws) = active.downcast::<workspace::Workspace>() {
+            } else if let Some(ws) = target_workspace {
                 // Fall-through path: add the picked folder as a worktree
                 // of the current workspace. The welcome page tab survives
                 // alongside (user can close it). Not as polished as the
@@ -1565,13 +1617,7 @@ fn boot(cx: &mut App, data_path: &std::path::Path) -> Result<()> {
                 // unblocks Open Project from the welcome screen on every
                 // boot path.
                 let task = ws.update(cx, |ws, window, cx| {
-                    ws.open_paths(
-                        picked,
-                        workspace::OpenOptions::default(),
-                        None,
-                        window,
-                        cx,
-                    )
+                    ws.open_paths(picked, workspace::OpenOptions::default(), None, window, cx)
                 });
                 if let Ok(task) = task {
                     let _ = task.await;
@@ -1589,12 +1635,7 @@ fn boot(cx: &mut App, data_path: &std::path::Path) -> Result<()> {
                 // Fall back to the first local MultiWorkspace window. Same
                 // recovery the upstream `prompt_and_open_paths` does for its
                 // own scheduling.
-                let fallback = cx.update(|cx| {
-                    workspace_windows_for_location(&SerializedWorkspaceLocation::Local, cx)
-                        .into_iter()
-                        .next()
-                });
-                if let Some(mw) = fallback {
+                if let Some(mw) = fallback_multi_workspace {
                     log::warn!(
                         "zed_android: Open action active_window was not a workspace; \
                          falling back to the first local MultiWorkspace"
@@ -1632,8 +1673,7 @@ fn boot(cx: &mut App, data_path: &std::path::Path) -> Result<()> {
     let kvp = KeyValueStore::global(cx);
     if matches!(kvp.read_kvp(onboarding::FIRST_OPEN), Ok(None)) {
         info!("zed_android: first launch → show_onboarding_view");
-        onboarding::show_onboarding_view(app_state.clone(), cx)
-            .detach_and_log_err(cx);
+        onboarding::show_onboarding_view(app_state.clone(), cx).detach_and_log_err(cx);
     } else {
         info!("zed_android: returning launch → workspace::open_new");
         workspace::open_new(

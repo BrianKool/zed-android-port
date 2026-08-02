@@ -14,6 +14,7 @@ import android.os.Handler
 import android.os.Looper
 import android.os.Process
 import android.provider.DocumentsContract
+import android.provider.OpenableColumns
 import android.util.Log
 import android.view.InputDevice
 import android.view.KeyEvent
@@ -24,6 +25,7 @@ import android.view.ViewGroup
 import android.view.animation.AccelerateDecelerateInterpolator
 import android.widget.FrameLayout
 import android.widget.ImageView
+import android.widget.Toast
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import androidx.core.content.FileProvider
@@ -32,6 +34,7 @@ import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import com.google.androidgamesdk.GameActivity
 import java.io.File
+import java.io.FileOutputStream
 
 /// SAF flows go through legacy `startActivityForResult` instead of
 /// `ActivityResultLauncher` because `ActivityResultRegistry` silently
@@ -51,6 +54,18 @@ import java.io.File
 class MainActivity : GameActivity(), ImeHost {
     /// MainActivity is always gpui's primary window — id 0.
     override val imeWindowId: Long = 0L
+
+    @Suppress("unused")
+    fun writeCredential(url: String, username: String, password: ByteArray): Boolean =
+        SecureCredentialStore.write(this, url, username, password)
+
+    @Suppress("unused")
+    fun readCredential(url: String): ByteArray? =
+        SecureCredentialStore.read(this, url)
+
+    @Suppress("unused")
+    fun deleteCredential(url: String): Boolean =
+        SecureCredentialStore.delete(this, url)
     /// Splash overlay shown from `super.onCreate` until the gpui-side
     /// flips `nativeIsZedReady` after first paint. Sits above the
     /// GameActivity `SurfaceView` so the animated Zdroid sigil is
@@ -913,7 +928,35 @@ class MainActivity : GameActivity(), ImeHost {
             InputModality.setNonPointer()
             applyCursorVisibility()
         }
+        if (event != null) offsetEventToSurface(event)
         return super.dispatchTouchEvent(event)
+    }
+
+    override fun dispatchGenericMotionEvent(event: MotionEvent): Boolean {
+        offsetEventToSurface(event)
+        return super.dispatchGenericMotionEvent(event)
+    }
+
+    private var lastSurfaceOffsetX = Int.MIN_VALUE
+    private var lastSurfaceOffsetY = Int.MIN_VALUE
+
+    /** GameActivity reports freeform-window events in decor coordinates. */
+    private fun offsetEventToSurface(event: MotionEvent) {
+        val surface = findSurfaceView(window.decorView) ?: return
+        val surfaceLocation = IntArray(2)
+        val decorLocation = IntArray(2)
+        surface.getLocationInWindow(surfaceLocation)
+        window.decorView.getLocationInWindow(decorLocation)
+        val offsetX = surfaceLocation[0] - decorLocation[0]
+        val offsetY = surfaceLocation[1] - decorLocation[1]
+        if (offsetX != lastSurfaceOffsetX || offsetY != lastSurfaceOffsetY) {
+            Log.i("zdroid_input", "surface input origin offset=($offsetX,$offsetY)")
+            lastSurfaceOffsetX = offsetX
+            lastSurfaceOffsetY = offsetY
+        }
+        if (offsetX != 0 || offsetY != 0) {
+            event.offsetLocation(-offsetX.toFloat(), -offsetY.toFloat())
+        }
     }
 
     override fun dispatchKeyEvent(event: KeyEvent): Boolean {
@@ -929,14 +972,9 @@ class MainActivity : GameActivity(), ImeHost {
 
     override fun onWindowFocusChanged(hasFocus: Boolean) {
         super.onWindowFocusChanged(hasFocus)
-        if (hasFocus) {
-            if (hasIndirectPointer()) {
-                Log.i(TAG_CAPTURE, "requestPointerCapture()")
-                window.decorView.requestPointerCapture()
-            }
-        } else {
-            window.decorView.releasePointerCapture()
-        }
+        // DeX needs the system cursor to remain free so the user can reach
+        // window borders and controls. Never acquire relative pointer capture.
+        window.decorView.releasePointerCapture()
         // Move the sprite to the current cursor position so the
         // first visible-frame after a focus regain is correct, but
         // visibility itself is determined by `InputModality.isPointer()`
@@ -1261,7 +1299,127 @@ class MainActivity : GameActivity(), ImeHost {
                 Log.w(TAG, "takePersistableUriPermission failed", t)
             }
         }
-        onPickerResult(uri?.toString() ?: "")
+        if (requestCode == REQ_OPEN_TREE && uri != null && !isDirectlyAccessibleTree(uri)) {
+            importAndReturnTree(uri)
+        } else {
+            onPickerResult(uri?.toString() ?: "")
+        }
+    }
+
+    /**
+     * RealFs needs a POSIX path. Shared storage and Zdroid's own provider can
+     * be translated directly; another app's provider (notably Termux) cannot
+     * because Android prevents this process from traversing that app's data
+     * directory even after the user grants a SAF URI.
+     */
+    private fun isDirectlyAccessibleTree(uri: Uri): Boolean =
+        uri.authority == "com.android.externalstorage.documents" ||
+            uri.authority == "com.zdroid.documents"
+
+    /** Import a foreign SAF tree into Zdroid's private home, then return it
+     * through our own provider URI so the Rust side can open it normally. */
+    private fun importAndReturnTree(treeUri: Uri) {
+        Toast.makeText(this, "Importing project into Zdroid...", Toast.LENGTH_SHORT).show()
+        Thread({
+            try {
+                val imported = importDocumentTree(treeUri)
+                val encodedPath = Uri.encode(imported.absolutePath)
+                Log.i(TAG, "Imported SAF tree $treeUri to ${imported.absolutePath}")
+                runOnUiThread {
+                    Toast.makeText(this, "Project imported", Toast.LENGTH_SHORT).show()
+                }
+                onPickerResult("content://com.zdroid.documents/tree/$encodedPath")
+            } catch (t: Throwable) {
+                Log.e(TAG, "Failed to import SAF tree $treeUri", t)
+                runOnUiThread {
+                    Toast.makeText(
+                        this,
+                        "Could not import project: ${t.message ?: "unknown error"}",
+                        Toast.LENGTH_LONG,
+                    ).show()
+                }
+                onPickerResult("zdroid-error:${Uri.encode(t.message ?: t.javaClass.simpleName)}")
+            }
+        }, "zdroid-saf-import").start()
+    }
+
+    private fun importDocumentTree(treeUri: Uri): File {
+        val rootId = DocumentsContract.getTreeDocumentId(treeUri)
+        val rootUri = DocumentsContract.buildDocumentUriUsingTree(treeUri, rootId)
+        val displayName = queryDisplayName(rootUri).ifBlank { "imported-project" }
+        val safeName = sanitizeDocumentName(displayName)
+        val importsRoot = File(filesDir, "home/imported-projects").apply { mkdirs() }
+        val destination = uniqueDestination(importsRoot, safeName)
+        if (!destination.mkdirs()) {
+            error("Could not create ${destination.absolutePath}")
+        }
+
+        try {
+            copyDocumentChildren(treeUri, rootId, destination)
+        } catch (t: Throwable) {
+            destination.deleteRecursively()
+            throw t
+        }
+        return destination
+    }
+
+    private fun copyDocumentChildren(treeUri: Uri, parentId: String, destination: File) {
+        val childrenUri = DocumentsContract.buildChildDocumentsUriUsingTree(treeUri, parentId)
+        val projection = arrayOf(
+            DocumentsContract.Document.COLUMN_DOCUMENT_ID,
+            DocumentsContract.Document.COLUMN_DISPLAY_NAME,
+            DocumentsContract.Document.COLUMN_MIME_TYPE,
+        )
+        contentResolver.query(childrenUri, projection, null, null, null)?.use { cursor ->
+            val idColumn = cursor.getColumnIndexOrThrow(projection[0])
+            val nameColumn = cursor.getColumnIndexOrThrow(projection[1])
+            val mimeColumn = cursor.getColumnIndexOrThrow(projection[2])
+            while (cursor.moveToNext()) {
+                val documentId = cursor.getString(idColumn)
+                val name = sanitizeDocumentName(cursor.getString(nameColumn) ?: "unnamed")
+                val mime = cursor.getString(mimeColumn)
+                val target = File(destination, name)
+                if (mime == DocumentsContract.Document.MIME_TYPE_DIR) {
+                    if (!target.mkdirs() && !target.isDirectory) {
+                        error("Could not create ${target.absolutePath}")
+                    }
+                    copyDocumentChildren(treeUri, documentId, target)
+                } else {
+                    val documentUri =
+                        DocumentsContract.buildDocumentUriUsingTree(treeUri, documentId)
+                    val input = contentResolver.openInputStream(documentUri)
+                        ?: error("Could not read $name")
+                    input.use { source ->
+                        FileOutputStream(target).use { sink -> source.copyTo(sink) }
+                    }
+                }
+            }
+        } ?: error("The selected provider did not expose the folder contents")
+    }
+
+    private fun queryDisplayName(documentUri: Uri): String {
+        val projection = arrayOf(OpenableColumns.DISPLAY_NAME)
+        return contentResolver.query(documentUri, projection, null, null, null)?.use { cursor ->
+            if (cursor.moveToFirst()) cursor.getString(0) ?: "" else ""
+        } ?: ""
+    }
+
+    private fun sanitizeDocumentName(name: String): String {
+        val sanitized = name.replace(Regex("[\\u0000/\\\\]"), "_").trim()
+        return when (sanitized) {
+            "", ".", ".." -> "unnamed"
+            else -> sanitized
+        }
+    }
+
+    private fun uniqueDestination(parent: File, baseName: String): File {
+        var candidate = File(parent, baseName)
+        var suffix = 2
+        while (candidate.exists()) {
+            candidate = File(parent, "$baseName-$suffix")
+            suffix += 1
+        }
+        return candidate
     }
 
     private external fun onPickerResult(uriString: String)

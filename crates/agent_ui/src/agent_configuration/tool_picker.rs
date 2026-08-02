@@ -49,7 +49,10 @@ impl Focusable for ToolPicker {
 
 impl Render for ToolPicker {
     fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
-        v_flex().w(rems(34.)).child(self.picker.clone())
+        v_flex()
+            .w(rems(34.))
+            .max_w_full()
+            .child(self.picker.clone())
     }
 }
 

@@ -38,6 +38,7 @@ mod conflict_view;
 pub mod file_diff_view;
 pub mod git_panel;
 mod git_panel_settings;
+mod github_auth;
 pub mod git_picker;
 mod git_runtime_diagnostics;
 pub mod multi_diff_view;
@@ -52,6 +53,7 @@ pub mod worktree_picker;
 pub mod worktree_service;
 
 pub use conflict_view::MergeConflictIndicator;
+pub use github_auth::OpenGithubAccounts;
 
 pub fn init(cx: &mut App) {
     editor::set_blame_renderer(blame_ui::GitBlameRenderer, cx);
@@ -68,6 +70,10 @@ pub fn init(cx: &mut App) {
         git_panel::register(workspace);
         repository_selector::register(workspace);
         git_picker::register(workspace);
+
+        workspace.register_action(|workspace, _: &OpenGithubAccounts, window, cx| {
+            github_auth::GithubAccountsModal::toggle(workspace, window, cx);
+        });
 
         workspace.register_action(
             |workspace, action: &zed_actions::CreateWorktree, window, cx| {
@@ -387,6 +393,7 @@ impl Render for RenameBranchModal {
             .on_action(cx.listener(Self::confirm))
             .elevation_2(cx)
             .w(rems(34.))
+            .max_w_full()
             .child(
                 h_flex()
                     .px_3()
@@ -641,6 +648,7 @@ impl Render for RefPickerModal {
             .on_action(cx.listener(Self::confirm))
             .elevation_2(cx)
             .w(rems(34.))
+            .max_w_full()
             .child(
                 h_flex()
                     .px_3()
@@ -1096,6 +1104,7 @@ impl Render for GitCloneModal {
         div()
             .elevation_3(cx)
             .w(rems(34.))
+            .max_w_full()
             .flex_1()
             .overflow_hidden()
             .child(

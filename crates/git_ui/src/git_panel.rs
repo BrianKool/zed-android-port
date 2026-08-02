@@ -12,7 +12,7 @@ use crate::{
 use agent_settings::AgentSettings;
 use alacritty_terminal::vte::ansi;
 use anyhow::Context as _;
-use askpass::AskPassDelegate;
+use askpass::{AskPassDelegate, EncryptedPassword};
 use collections::{BTreeMap, HashMap, HashSet};
 use db::kvp::KeyValueStore;
 use editor::{
@@ -2941,10 +2941,12 @@ impl GitPanel {
 
     pub(crate) fn git_clone(&mut self, repo: String, window: &mut Window, cx: &mut Context<Self>) {
         let workspace = self.workspace.clone();
+        let askpass = self.askpass_delegate("git clone", window, cx);
 
         crate::clone::clone_and_open(
             repo.into(),
             workspace,
+            askpass,
             window,
             cx,
             Arc::new(|_workspace: &mut workspace::Workspace, _window, _cx| {}),
@@ -3286,6 +3288,56 @@ impl GitPanel {
         let operation = operation.into();
         let window = window.window_handle();
         AskPassDelegate::new(&mut cx.to_async(), move |prompt, tx, cx| {
+            let normalized_prompt = prompt.to_ascii_lowercase();
+            let is_github_https = normalized_prompt.contains("github.com")
+                && (normalized_prompt.contains("username")
+                    || normalized_prompt.contains("password"));
+
+            if is_github_https {
+                let credentials = cx.update(|cx| {
+                    cx.read_credentials(crate::github_auth::GITHUB_CREDENTIALS_KEY)
+                });
+                let workspace = workspace.clone();
+                let operation = operation.clone();
+                let window = window.clone();
+                cx.spawn(async move |cx| {
+                    let credential = match credentials.await {
+                        Ok(Some((username, _))) if normalized_prompt.contains("username") => {
+                            EncryptedPassword::try_from(username.as_str()).ok()
+                        }
+                        Ok(Some((_, token))) if normalized_prompt.contains("password") => {
+                            String::from_utf8(token)
+                                .ok()
+                                .and_then(|token| EncryptedPassword::try_from(token.as_str()).ok())
+                        }
+                        _ => None,
+                    };
+
+                    if let Some(credential) = credential {
+                        tx.send(credential).ok();
+                        return;
+                    }
+
+                    window
+                        .update(cx, |_, window, cx| {
+                            workspace.update(cx, |workspace, cx| {
+                                workspace.toggle_modal(window, cx, |window, cx| {
+                                    AskPassModal::new(
+                                        operation,
+                                        prompt.into(),
+                                        tx,
+                                        window,
+                                        cx,
+                                    )
+                                });
+                            })
+                        })
+                        .ok();
+                })
+                .detach();
+                return;
+            }
+
             window
                 .update(cx, |_, window, cx| {
                     workspace.update(cx, |workspace, cx| {

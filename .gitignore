@@ -64,3 +64,7 @@ crates/docs_preprocessor/actions.json
 *.aab
 release-notes-draft*.md
 /release-staging/
+
+# Local Zdroid build transcripts.
+/crates/gpui_android/examples/zed_android/*.log
+/crates/gpui_android/examples/zed_android/android/*.log

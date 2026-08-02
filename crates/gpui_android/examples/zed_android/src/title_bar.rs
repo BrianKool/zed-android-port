@@ -12,8 +12,8 @@ use std::path::PathBuf;
 
 use gpui::{
     Action, Anchor, AnyElement, App, AppContext, Context, DismissEvent, Entity, FocusHandle,
-    Focusable, InteractiveElement, IntoElement, MouseButton, MouseDownEvent, ParentElement,
-    Pixels, Point, Render, SharedString, Styled, WeakEntity, Window, anchored, deferred, div,
+    Focusable, InteractiveElement, IntoElement, MouseButton, MouseDownEvent, ParentElement, Pixels,
+    Point, Render, SharedString, Styled, WeakEntity, Window, anchored, deferred, div,
     prelude::FluentBuilder,
 };
 use log::error;
@@ -80,10 +80,11 @@ impl TitleBar {
             return None;
         }
         let basename = abs_path.file_name()?.to_string_lossy().to_string();
-        let tooltip_text =
-            format!("Project lives on shared storage (FUSE noexec) — \
+        let tooltip_text = format!(
+            "Project lives on shared storage (FUSE noexec) — \
                     cargo / go / make / native build tools will EACCES on run. \
-                    Tap to copy into ~/projects/{basename} or suppress this warning.");
+                    Tap to copy into ~/projects/{basename} or suppress this warning."
+        );
         let click_path = abs_path.clone();
         Some(
             Button::new("zed-android-noexec-banner", "Builds won't run · Move")
@@ -103,9 +104,7 @@ impl TitleBar {
                         return;
                     };
                     workspace.update(cx, |workspace, cx| {
-                        workspace.toggle_modal(window, cx, |_, cx| {
-                            NoexecMoveModal::new(path, cx)
-                        });
+                        workspace.toggle_modal(window, cx, |_, cx| NoexecMoveModal::new(path, cx));
                     });
                 }))
                 .into_any_element(),
@@ -138,10 +137,7 @@ impl TitleBar {
                         .color(Color::Warning),
                 )
                 .tooltip(|_, cx| {
-                    Tooltip::simple(
-                        "You're in Restricted Mode — tap to trust this project",
-                        cx,
-                    )
+                    Tooltip::simple("You're in Restricted Mode — tap to trust this project", cx)
                 })
                 .on_click(move |_, window, cx| {
                     let _ = workspace_for_click.update(cx, |workspace, cx| {
@@ -170,10 +166,7 @@ impl TitleBar {
     /// `View Server Options`. Persistence is handled by the shared
     /// `settings::RemoteSettings.ssh_connections` array — same one
     /// production reads.
-    fn render_remote_project_connection(
-        &self,
-        cx: &mut Context<Self>,
-    ) -> Option<AnyElement> {
+    fn render_remote_project_connection(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let workspace = self.workspace.upgrade()?;
         let project = workspace.read(cx).project().clone();
 
@@ -276,7 +269,10 @@ impl TitleBar {
         // RelPath has no Display; production calls `.display(path_style)`
         // which returns a Cow<str>. We pass the worktree's own path style.
         let worktree = first.read(cx);
-        let root = worktree.root_name().display(worktree.path_style()).to_string();
+        let root = worktree
+            .root_name()
+            .display(worktree.path_style())
+            .to_string();
         Some(
             Label::new(root)
                 .size(LabelSize::Small)

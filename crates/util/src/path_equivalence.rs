@@ -71,17 +71,13 @@ impl PathIdentity {
         }
         #[cfg(windows)]
         {
-            use std::os::windows::fs::MetadataExt;
-            let meta = std::fs::metadata(path).ok()?;
-            // Windows: combine volume serial number + file index for
-            // identity. `file_index()` returns 64 bits combining the
-            // file's high and low identifiers; volume serial
-            // disambiguates across filesystems. Same dev/ino concept,
-            // different bit packing.
-            Some(Self {
-                dev: meta.volume_serial_number()? as u64,
-                ino: meta.file_index()?,
-            })
+            // `MetadataExt::volume_serial_number` / `file_index` are
+            // still unstable on the Rust toolchain used by this Android
+            // port. The Android runtime path uses the Unix branch above;
+            // Windows only reaches here for host-side build tooling, where
+            // a no-op fallback is preferable to requiring nightly.
+            let _ = path;
+            None
         }
         #[cfg(not(any(unix, windows)))]
         {
