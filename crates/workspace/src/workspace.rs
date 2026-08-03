@@ -6096,20 +6096,25 @@ impl Workspace {
         self.update_window_edited(window, cx);
     }
 
-    fn render_notifications(&self, _window: &mut Window, _cx: &mut Context<Self>) -> Option<Div> {
+    fn render_notifications(&self, window: &mut Window, _cx: &mut Context<Self>) -> Option<Div> {
         if self.notifications.is_empty() {
             None
         } else {
+            let compact = cfg!(target_os = "android") && window.viewport_size().width.as_f32() < 520.0;
             Some(
                 div()
                     .absolute()
                     .right_3()
-                    .bottom_3()
+                    .when(compact, |this| this.left_3().top_3())
+                    .when(!compact, |this| this.bottom_3())
                     .w_112()
+                    .when(compact, |this| this.w_auto())
                     .h_full()
+                    .when(compact, |this| this.h_auto())
                     .flex()
                     .flex_col()
                     .justify_end()
+                    .when(compact, |this| this.justify_start())
                     .gap_2()
                     .children(
                         self.notifications

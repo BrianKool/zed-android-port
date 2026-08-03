@@ -505,7 +505,7 @@ impl WelcomePage {
 }
 
 impl Render for WelcomePage {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let (first_section, second_section) = CONTENT;
         let first_section_entries = first_section.entries.len();
         let mut next_tab_index = first_section_entries + second_section.entries.len();
@@ -602,6 +602,7 @@ impl Render for WelcomePage {
         } else {
             "Welcome to Zdroid-B"
         };
+        let compact = cfg!(target_os = "android") && window.viewport_size().width.as_f32() < 520.0;
 
         h_flex()
             .key_context("Welcome")
@@ -616,10 +617,13 @@ impl Render for WelcomePage {
                 v_flex()
                     .id("welcome-content")
                     .p_8()
+                    .when(compact, |this| this.p_4())
                     .max_w_128()
                     .size_full()
+                    .min_h_0()
                     .gap_6()
-                    .justify_center()
+                    .when(compact, |this| this.gap_4())
+                    .when(!compact, |this| this.justify_center())
                     .overflow_y_scroll()
                     .child(
                         h_flex()
@@ -627,9 +631,10 @@ impl Render for WelcomePage {
                             .justify_center()
                             .mb_4()
                             .gap_4()
+                            .when(compact, |this| this.flex_col().items_center().text_center())
                             .child(Vector::square(VectorName::ZedLogo, rems_from_px(45.)))
                             .child(
-                                v_flex().child(Headline::new(welcome_label)).child(
+                                v_flex().min_w_0().child(Headline::new(welcome_label)).child(
                                     v_flex()
                                         .gap_1()
                                         .child(

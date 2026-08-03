@@ -1260,6 +1260,8 @@ impl GitCloneModal {
 
     fn render_repository_url(&self, cx: &mut Context<Self>) -> AnyElement {
         v_flex()
+            .h_full()
+            .min_h_0()
             .child(
                 h_flex()
                     .w_full()
@@ -1276,6 +1278,7 @@ impl GitCloneModal {
                     )
                     .child(div().min_w_0().flex_1().child(self.repo_input.clone())),
             )
+            .child(div().flex_1().min_h_0())
             .child(
                 h_flex().w_full().p_2().justify_end().child(
                     Button::new("clone-url-confirm", "Clone")
@@ -1297,11 +1300,15 @@ impl GitCloneModal {
     ) -> AnyElement {
         let body = match &self.github_state {
             GithubRepositoriesState::NotLoaded | GithubRepositoriesState::Loading => v_flex()
+                .flex_1()
+                .min_h_0()
                 .p_4()
                 .items_center()
                 .child(Label::new("Loading GitHub repositories…").color(Color::Muted))
                 .into_any_element(),
             GithubRepositoriesState::SignedOut => v_flex()
+                .flex_1()
+                .min_h_0()
                 .p_4()
                 .gap_2()
                 .child(Label::new("No GitHub account is signed in."))
@@ -1311,6 +1318,8 @@ impl GitCloneModal {
                 )
                 .into_any_element(),
             GithubRepositoriesState::Error(error) => v_flex()
+                .flex_1()
+                .min_h_0()
                 .p_4()
                 .gap_2()
                 .child(Label::new("Could not load GitHub repositories."))
@@ -1549,21 +1558,26 @@ impl Focusable for GitCloneModal {
 
 impl Render for GitCloneModal {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let viewport_size = window.viewport_size();
+        let is_narrow = viewport_size.width / window.rem_size() < 42.;
+        let narrow_modal_width = viewport_size.width - gpui::px(16.0);
+        let narrow_modal_height = viewport_size.height - gpui::px(16.0);
+
         div()
             .elevation_3(cx)
             .w(rems(34.))
+            .when(is_narrow, |this| this.w(narrow_modal_width))
             .max_w_full()
             .max_h(rems(40.))
+            .when(is_narrow, |this| this.max_h(narrow_modal_height))
             .when(self.mode == GitCloneMode::Github, |this| this.h(rems(40.)))
+            .when(is_narrow, |this| this.h(narrow_modal_height))
             .overflow_hidden()
             .track_focus(&self.focus_handle)
             .child(match self.mode {
                 GitCloneMode::ChooseSource => self.render_source_choice(cx),
                 GitCloneMode::RepositoryUrl => self.render_repository_url(cx),
-                GitCloneMode::Github => {
-                    let is_narrow = window.viewport_size().width / window.rem_size() < 42.;
-                    self.render_github(is_narrow, window, cx)
-                }
+                GitCloneMode::Github => self.render_github(is_narrow, window, cx),
             })
             .on_action(cx.listener(|_, _: &menu::Cancel, _, cx| {
                 cx.emit(DismissEvent);

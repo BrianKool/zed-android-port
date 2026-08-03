@@ -313,7 +313,7 @@ fn general_page(cx: &App) -> SettingsPage {
             SettingsPageItem::StaticInfo(StaticInfo {
                 title: "Zdroid-B Version".into(),
                 description: Some("Edition ID: zdroid-b. Android package: com.zdroid.b".into()),
-                value: "beta-1c".into(),
+                value: "beta-1d".into(),
                 files: USER,
             }),
             SettingsPageItem::ActionLink(ActionLink {

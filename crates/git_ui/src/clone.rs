@@ -1,5 +1,5 @@
 use askpass::{AskPassDelegate, AskPassSession};
-use gpui::{App, Context, DismissEvent, WeakEntity, Window};
+use gpui::{App, AppContext, Context, DismissEvent, WeakEntity, Window};
 use notifications::status_toast::StatusToast;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -8,12 +8,25 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use ui::{Color, Icon, IconName, IconSize, SharedString};
 use util::ResultExt;
-use workspace::{self, Workspace};
+use workspace::{
+    self, Workspace,
+    notifications::{ErrorMessagePrompt, NotificationId},
+};
 
 /// Outcome of a single `git clone` invocation.
 enum CloneOutcome {
     Completed,
     Cancelled,
+}
+
+struct GitCloneErrorNotification;
+
+fn show_clone_error(workspace: &mut Workspace, message: String, cx: &mut Context<Workspace>) {
+    workspace.show_notification(
+        NotificationId::unique::<GitCloneErrorNotification>(),
+        cx,
+        |cx| cx.new(|cx| ErrorMessagePrompt::new(format!("Git Clone failed: {message}"), cx)),
+    );
 }
 
 fn redacted_repo_url(url: &str) -> String {
@@ -173,15 +186,7 @@ fn clone_and_open_with_destination(
                         log::error!("git clone: failed to start askpass session: {error:#}");
                         workspace
                             .update(cx, |workspace, cx| {
-                                let toast = StatusToast::new(error.to_string(), cx, |this, _| {
-                                    this.icon(
-                                        Icon::new(IconName::XCircle)
-                                            .size(IconSize::Small)
-                                            .color(Color::Error),
-                                    )
-                                    .dismiss_button(true)
-                                });
-                                workspace.toggle_status_toast(toast, cx);
+                                show_clone_error(workspace, error.to_string(), cx);
                             })
                             .log_err();
                         return None;
@@ -282,15 +287,7 @@ fn clone_and_open_with_destination(
                     }
                     workspace
                         .update(cx, |workspace, cx| {
-                            let toast = StatusToast::new(error.to_string(), cx, |this, _| {
-                                this.icon(
-                                    Icon::new(IconName::XCircle)
-                                        .size(IconSize::Small)
-                                        .color(Color::Error),
-                                )
-                                .dismiss_button(true)
-                            });
-                            workspace.toggle_status_toast(toast, cx);
+                            show_clone_error(workspace, error.to_string(), cx);
                         })
                         .log_err();
                     return None;
