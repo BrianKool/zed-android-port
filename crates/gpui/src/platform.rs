@@ -167,6 +167,8 @@ pub trait Platform: 'static {
     }
 
     fn open_url(&self, url: &str);
+    fn start_background_task(&self, _task_id: &str, _description: &str) {}
+    fn finish_background_task(&self, _task_id: &str, _description: &str, _successful: bool) {}
     fn on_open_urls(&self, callback: Box<dyn FnMut(Vec<String>)>);
     fn register_url_scheme(&self, url: &str) -> Task<Result<()>>;
 

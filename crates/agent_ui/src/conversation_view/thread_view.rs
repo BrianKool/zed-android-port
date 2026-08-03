@@ -1421,6 +1421,12 @@ impl ThreadView {
                 this.clear_external_source_prompt_warning(cx);
                 let generation = this.start_turn(cx);
                 this.in_flight_prompt = Some(contents.clone());
+                if parent_session_id.is_none() {
+                    cx.start_background_task(
+                        &session_id.to_string(),
+                        &format!("{} is working", this.agent_id.0),
+                    );
+                }
                 generation
             })?;
 

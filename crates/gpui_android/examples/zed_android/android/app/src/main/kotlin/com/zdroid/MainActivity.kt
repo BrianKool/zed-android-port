@@ -56,6 +56,36 @@ class MainActivity : GameActivity(), ImeHost {
     override val imeWindowId: Long = 0L
 
     @Suppress("unused")
+    fun startAgentBackgroundTask(taskId: String, description: String) {
+        runOnUiThread {
+            requestAgentNotificationPermissionIfNeeded()
+            AgentForegroundService.startTask(this, taskId, description)
+        }
+    }
+
+    @Suppress("unused")
+    fun finishAgentBackgroundTask(taskId: String, description: String, successful: Boolean) {
+        runOnUiThread {
+            AgentForegroundService.finishTask(this, taskId, description, successful)
+        }
+    }
+
+    private fun requestAgentNotificationPermissionIfNeeded() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) return
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) ==
+            PackageManager.PERMISSION_GRANTED) return
+
+        val preferences = getSharedPreferences("zdroid_permissions", Context.MODE_PRIVATE)
+        if (preferences.getBoolean("asked_agent_notifications", false)) return
+        preferences.edit().putBoolean("asked_agent_notifications", true).apply()
+        ActivityCompat.requestPermissions(
+            this,
+            arrayOf(Manifest.permission.POST_NOTIFICATIONS),
+            REQ_AGENT_NOTIFICATIONS,
+        )
+    }
+
+    @Suppress("unused")
     fun writeCredential(url: String, username: String, password: ByteArray): Boolean =
         SecureCredentialStore.write(this, url, username, password)
 
@@ -1461,6 +1491,7 @@ class MainActivity : GameActivity(), ImeHost {
         private const val REQ_OPEN_TREE = 0xA1
         private const val REQ_CREATE_DOCUMENT = 0xA2
         private const val REQ_STORAGE_PERMS = 0xA3
+        private const val REQ_AGENT_NOTIFICATIONS = 0xA4
         /// Software cursor side length in dp. Scaled by display
         /// density at instantiation time to give the sprite a
         /// consistent visual size across devices.

@@ -1545,9 +1545,19 @@ impl ConversationView {
                 self.load_subagent_session(subagent_session_id.clone(), session_id, window, cx)
             }
             AcpThreadEvent::ToolAuthorizationRequested(_) => {
+                if !is_subagent {
+                    cx.start_background_task(
+                        &session_id.to_string(),
+                        "Agent is waiting for tool confirmation",
+                    );
+                }
                 self.notify_with_sound("Waiting for tool confirmation", IconName::Info, window, cx);
             }
-            AcpThreadEvent::ToolAuthorizationReceived(_) => {}
+            AcpThreadEvent::ToolAuthorizationReceived(_) => {
+                if !is_subagent {
+                    cx.start_background_task(&session_id.to_string(), "Agent is working");
+                }
+            }
             AcpThreadEvent::Retry(retry) => {
                 if let Some(active) = self.thread_view(&session_id) {
                     active.update(cx, |active, _cx| {
@@ -1607,6 +1617,13 @@ impl ConversationView {
                 // is not actually idle and a notification here would fire just before the
                 // next turn starts.
                 if !should_send_queued {
+                    let successful = *stop_reason == acp::StopReason::EndTurn;
+                    let description = if successful {
+                        "Agent task completed"
+                    } else {
+                        "Agent task stopped"
+                    };
+                    cx.finish_background_task(&session_id.to_string(), description, successful);
                     let used_tools = thread.read(cx).used_tools_since_last_user_message();
                     self.notify_with_sound(
                         if used_tools {
@@ -1631,6 +1648,11 @@ impl ConversationView {
                     });
                 }
                 if !is_subagent {
+                    cx.finish_background_task(
+                        &session_id.to_string(),
+                        "Agent refused the request",
+                        false,
+                    );
                     let model_or_agent_name = self.current_model_name(cx);
                     let notification_message =
                         format!("{} refused to respond to this request", model_or_agent_name);
@@ -1652,6 +1674,11 @@ impl ConversationView {
                     });
                 }
                 if !is_subagent {
+                    cx.finish_background_task(
+                        &session_id.to_string(),
+                        "Agent stopped due to an error",
+                        false,
+                    );
                     self.notify_with_sound(
                         "Agent stopped due to an error",
                         IconName::Warning,
@@ -2645,6 +2672,11 @@ impl ConversationView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if cfg!(target_os = "android") {
+            let _ = (&caption, &icon, &*window, &*cx);
+            return;
+        }
+
         if !self.notifications.is_empty() {
             return;
         }

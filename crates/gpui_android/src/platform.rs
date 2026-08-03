@@ -323,6 +323,61 @@ fn jni_open_url(android_app: &AndroidApp, url: &str) -> Result<()> {
     Ok(())
 }
 
+fn jni_start_background_task(
+    android_app: &AndroidApp,
+    task_id: &str,
+    description: &str,
+) -> Result<()> {
+    use anyhow::Context;
+    use jni::{JavaVM, objects::JObject};
+
+    let vm = unsafe { JavaVM::from_raw(android_app.vm_as_ptr().cast())? };
+    let mut env = vm
+        .attach_current_thread()
+        .context("attach_current_thread for background task")?;
+    let activity = unsafe { JObject::from_raw(android_app.activity_as_ptr() as _) };
+    let task_id = env.new_string(task_id).context("alloc background task id")?;
+    let description = env
+        .new_string(description)
+        .context("alloc background task description")?;
+    env.call_method(
+        &activity,
+        "startAgentBackgroundTask",
+        "(Ljava/lang/String;Ljava/lang/String;)V",
+        &[(&task_id).into(), (&description).into()],
+    )
+    .context("MainActivity.startAgentBackgroundTask")?;
+    Ok(())
+}
+
+fn jni_finish_background_task(
+    android_app: &AndroidApp,
+    task_id: &str,
+    description: &str,
+    successful: bool,
+) -> Result<()> {
+    use anyhow::Context;
+    use jni::{JavaVM, objects::JObject};
+
+    let vm = unsafe { JavaVM::from_raw(android_app.vm_as_ptr().cast())? };
+    let mut env = vm
+        .attach_current_thread()
+        .context("attach_current_thread for background task completion")?;
+    let activity = unsafe { JObject::from_raw(android_app.activity_as_ptr() as _) };
+    let task_id = env.new_string(task_id).context("alloc background task id")?;
+    let description = env
+        .new_string(description)
+        .context("alloc background task completion description")?;
+    env.call_method(
+        &activity,
+        "finishAgentBackgroundTask",
+        "(Ljava/lang/String;Ljava/lang/String;Z)V",
+        &[(&task_id).into(), (&description).into(), successful.into()],
+    )
+    .context("MainActivity.finishAgentBackgroundTask")?;
+    Ok(())
+}
+
 pub struct AndroidPlatform {
     pub(crate) common: RefCell<AndroidCommon>,
     pub(crate) android_app: AndroidApp,
@@ -1380,6 +1435,29 @@ impl Platform for AndroidPlatform {
             log::warn!("AndroidPlatform::open_url({url:?}) failed: {err:#}");
         }
     }
+
+    fn start_background_task(&self, task_id: &str, description: &str) {
+        if let Err(err) = jni_start_background_task(&self.android_app, task_id, description) {
+            log::warn!("Android foreground task start failed: {err:#}");
+        }
+    }
+
+    fn finish_background_task(
+        &self,
+        task_id: &str,
+        description: &str,
+        successful: bool,
+    ) {
+        if let Err(err) = jni_finish_background_task(
+            &self.android_app,
+            task_id,
+            description,
+            successful,
+        ) {
+            log::warn!("Android foreground task completion failed: {err:#}");
+        }
+    }
+
     fn on_open_urls(&self, callback: Box<dyn FnMut(Vec<String>)>) {
         self.common.borrow_mut().callbacks.open_urls = Some(callback);
     }
