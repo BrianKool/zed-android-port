@@ -1333,6 +1333,7 @@ impl GitCloneModal {
                     .collect::<Vec<_>>();
 
                 v_flex()
+                    .flex_1()
                     .min_h_0()
                     .mx_2()
                     .mt_2()
@@ -1374,7 +1375,8 @@ impl GitCloneModal {
                     .child(
                         v_flex()
                             .id("github-repository-list")
-                            .max_h(rems(22.))
+                            .flex_1()
+                            .min_h_0()
                             .overflow_y_scroll()
                             .when(matches.is_empty(), |this| {
                                 this.p_4().child(
@@ -1471,6 +1473,7 @@ impl GitCloneModal {
         };
 
         v_flex()
+            .h_full()
             .min_h_0()
             .child(
                 h_flex()
@@ -1488,7 +1491,7 @@ impl GitCloneModal {
                     )
                     .child(Label::new("GitHub Repositories")),
             )
-            .child(body)
+            .child(div().flex_1().min_h_0().overflow_hidden().child(body))
             .child(
                 v_flex()
                     .mx_2()
@@ -1531,6 +1534,7 @@ impl Render for GitCloneModal {
             .w(rems(34.))
             .max_w_full()
             .max_h(rems(40.))
+            .when(self.mode == GitCloneMode::Github, |this| this.h(rems(40.)))
             .overflow_hidden()
             .track_focus(&self.focus_handle)
             .child(match self.mode {
