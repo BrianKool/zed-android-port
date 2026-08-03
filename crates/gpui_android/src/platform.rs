@@ -336,7 +336,9 @@ fn jni_start_background_task(
         .attach_current_thread()
         .context("attach_current_thread for background task")?;
     let activity = unsafe { JObject::from_raw(android_app.activity_as_ptr() as _) };
-    let task_id = env.new_string(task_id).context("alloc background task id")?;
+    let task_id = env
+        .new_string(task_id)
+        .context("alloc background task id")?;
     let description = env
         .new_string(description)
         .context("alloc background task description")?;
@@ -364,7 +366,9 @@ fn jni_finish_background_task(
         .attach_current_thread()
         .context("attach_current_thread for background task completion")?;
     let activity = unsafe { JObject::from_raw(android_app.activity_as_ptr() as _) };
-    let task_id = env.new_string(task_id).context("alloc background task id")?;
+    let task_id = env
+        .new_string(task_id)
+        .context("alloc background task id")?;
     let description = env
         .new_string(description)
         .context("alloc background task completion description")?;
@@ -778,7 +782,14 @@ impl AndroidPlatform {
         extra_window_id: Option<u64>,
         window_ptr: &crate::window::AndroidWindowStatePtr,
     ) {
-        let (currently_visible, target_kind, should_auto_show, app, was_visible, reassert_requested) = {
+        let (
+            currently_visible,
+            target_kind,
+            should_auto_show,
+            app,
+            was_visible,
+            reassert_requested,
+        ) = {
             let mut state = window_ptr.state.borrow_mut();
             let reassert_requested = std::mem::take(&mut state.ime_reassert_requested);
             let (target_kind, should_auto_show) = state
@@ -921,8 +932,8 @@ impl AndroidPlatform {
                     (f32::from(start_bounds.origin.y + start_bounds.size.height) * scale_factor)
                         .round() as i32,
                     (f32::from(end_bounds.origin.x) * scale_factor).round() as i32,
-                    (f32::from(end_bounds.origin.y + end_bounds.size.height) * scale_factor)
-                        .round() as i32,
+                    (f32::from(end_bounds.origin.y + end_bounds.size.height) * scale_factor).round()
+                        as i32,
                 ))
             });
             // If the editor still has a marked range from a prior
@@ -944,11 +955,7 @@ impl AndroidPlatform {
         }
 
         if selection_overlay != last_selection_overlay {
-            crate::ime::update_selection_ui(
-                android_app,
-                extra_window_id,
-                selection_overlay,
-            );
+            crate::ime::update_selection_ui(android_app, extra_window_id, selection_overlay);
             window_ptr.state.borrow_mut().last_selection_overlay = selection_overlay;
         }
 
@@ -1442,18 +1449,10 @@ impl Platform for AndroidPlatform {
         }
     }
 
-    fn finish_background_task(
-        &self,
-        task_id: &str,
-        description: &str,
-        successful: bool,
-    ) {
-        if let Err(err) = jni_finish_background_task(
-            &self.android_app,
-            task_id,
-            description,
-            successful,
-        ) {
+    fn finish_background_task(&self, task_id: &str, description: &str, successful: bool) {
+        if let Err(err) =
+            jni_finish_background_task(&self.android_app, task_id, description, successful)
+        {
             log::warn!("Android foreground task completion failed: {err:#}");
         }
     }
@@ -1467,13 +1466,18 @@ impl Platform for AndroidPlatform {
 
     fn prompt_for_paths(
         &self,
-        _options: PathPromptOptions,
+        options: PathPromptOptions,
     ) -> oneshot::Receiver<Result<Option<Vec<PathBuf>>>> {
         // Fire ACTION_OPEN_DOCUMENT_TREE via MainActivity. The result
         // arrives async through the JNI callback in `saf.rs`.
-        log::info!("AndroidPlatform::prompt_for_paths invoked");
+        let import_foreign_trees = options.files && options.directories;
+        log::info!(
+            "AndroidPlatform::prompt_for_paths invoked prompt={:?} import_foreign_trees={}",
+            options.prompt,
+            import_foreign_trees
+        );
         let (tx, rx) = oneshot::channel();
-        crate::saf::pick_folder(&self.android_app, tx);
+        crate::saf::pick_folder(&self.android_app, tx, import_foreign_trees);
         rx
     }
 

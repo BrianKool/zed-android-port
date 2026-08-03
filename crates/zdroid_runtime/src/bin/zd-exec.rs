@@ -1,22 +1,22 @@
-﻿//! `zd-exec` â€” generic spawn wrapper. Routes every PATH-resolved
-//! invocation (bash, git, rust-analyzer, â€¦) through the configured
+//! `zd-exec` — generic spawn wrapper. Routes every PATH-resolved
+//! invocation (bash, git, rust-analyzer, …) through the configured
 //! `RuntimeProvider`.
 //!
 //! Three invocation shapes:
 //!
 //!   1. **Symlink** at `$PREFIX/zd-runtime/<name>`. argv[0] basename
 //!      *is* the target program name. This is how Zed's `Command::new`
-//!      lands here â€” kernel resolves PATH, finds the symlink, exec's
+//!      lands here — kernel resolves PATH, finds the symlink, exec's
 //!      this binary. We dispatch to `<name>`.
 //!
 //!   2. **Shell** invocation: `zd-exec` with no positional program, or
 //!      with leading `-c`/`-l`-style flags. Happens when alacritty
 //!      exec's us as `$SHELL` (`execve(zd-exec, ["zd-exec"], envp)` or
 //!      `["zd-exec", "-c", "cmd"]`). We dispatch to `bash` with whatever
-//!      flags the caller passed â€” the integrated terminal lands in the
+//!      flags the caller passed — the integrated terminal lands in the
 //!      configured adapter's bash this way.
 //!
-//!   3. **Direct** target invocation: `zd-exec <program> [argsâ€¦]`. First
+//!   3. **Direct** target invocation: `zd-exec <program> [args…]`. First
 //!      positional is the target binary. Used for testing and one-off
 //!      tool invocations from a script.
 //!
@@ -27,7 +27,7 @@
 //! matching bash semantics).
 //!
 //! No `su` fallback. If the chroot adapter can't reach `zd-spawnd`,
-//! we fail loudly with a hint â€” silently re-execing through `su` is
+//! we fail loudly with a hint — silently re-execing through `su` is
 //! how the per-spawn fork-bomb regression sneaks back in (see memory:
 //! `project_runtime_swap_architecture`).
 
@@ -42,11 +42,11 @@ use zdroid_runtime::adapters;
 use zdroid_runtime::config::RuntimeFile;
 use zdroid_runtime::port::SpawnRequest;
 
-/// Same path the picker writes to. Hardcoded â€” the wrapper has no way
+/// Same path the picker writes to. Hardcoded — the wrapper has no way
 /// to discover `$PREFIX` other than by reading the env, and we want
 /// the wrapper's behavior to be deterministic regardless of who
 /// invoked it (Zed, an interactive shell, a daemon).
-const RUNTIME_TOML: &str = "/data/data/com.zdroid.b/files/usr/etc/zd-runtime.toml";
+const RUNTIME_TOML: &str = "/data/data/com.zdroid/files/usr/etc/zd-runtime.toml";
 
 fn main() -> ExitCode {
     let argv: Vec<String> = env::args().collect();
@@ -63,7 +63,7 @@ fn main() -> ExitCode {
         match argv.get(1) {
             None => {
                 // Login shell so the chrooted bash sources /etc/profile
-                // and ~/.profile in addition to ~/.bashrc â€” debian /
+                // and ~/.profile in addition to ~/.bashrc — debian /
                 // kali put `~/.local/bin` and similar on PATH from
                 // ~/.profile, which a non-login interactive shell
                 // wouldn't pick up. Without -l: claude (and any other
@@ -129,11 +129,12 @@ fn main() -> ExitCode {
 
 fn build_provider() -> anyhow::Result<Box<dyn zdroid_runtime::port::RuntimeProvider>> {
     let path = PathBuf::from(RUNTIME_TOML);
-    let file = RuntimeFile::load(&path)?
-        .ok_or_else(|| anyhow::anyhow!(
+    let file = RuntimeFile::load(&path)?.ok_or_else(|| {
+        anyhow::anyhow!(
             "{} not found. Open Zdroid and pick a runtime in Settings first.",
             path.display(),
-        ))?;
+        )
+    })?;
     let resolved = file.resolve()?;
     adapters::for_config(&resolved)
 }

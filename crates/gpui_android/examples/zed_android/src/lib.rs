@@ -1,7 +1,7 @@
-﻿#![cfg(target_os = "android")]
+#![cfg(target_os = "android")]
 //! Zed Workspace running on Android. Boots up the full client/project/
 //! workspace stack and shows the WelcomePage on first launch (no auto-
-//! opened project) â€” matches official Zed's first-run behaviour.
+//! opened project) — matches official Zed's first-run behaviour.
 
 mod header;
 mod menu_bar;
@@ -35,10 +35,42 @@ use workspace::{
     SessionWorkspace, Workspace, WorkspaceDb, WorkspaceStore, open_new,
     workspace_windows_for_location,
 };
-use zdroid_runtime::{RuntimeId, RuntimeProvider, adapters, config::RuntimeFile};
+use zdroid_runtime::{
+    RuntimeId, RuntimeProvider, adapters,
+    config::{ResolvedConfig, RuntimeFile},
+};
 
 fn minimal_window_options(_: Option<uuid::Uuid>, _cx: &mut App) -> gpui::WindowOptions {
     gpui::WindowOptions::default()
+}
+
+fn show_open_project_error(
+    multi_workspace: Option<&gpui::WindowHandle<MultiWorkspace>>,
+    workspace: Option<&gpui::WindowHandle<Workspace>>,
+    message: &str,
+    cx: &mut gpui::AsyncApp,
+) {
+    if let Some(multi_workspace) = multi_workspace {
+        let _ = multi_workspace.update(cx, |_, window, cx| {
+            window.prompt(
+                gpui::PromptLevel::Warning,
+                "Could not open project",
+                Some(message),
+                &["OK"],
+                cx,
+            )
+        });
+    } else if let Some(workspace) = workspace {
+        let _ = workspace.update(cx, |_, window, cx| {
+            window.prompt(
+                gpui::PromptLevel::Warning,
+                "Could not open project",
+                Some(message),
+                &["OK"],
+                cx,
+            )
+        });
+    }
 }
 
 /// Build the active adapter from `runtime.toml`, returning the boxed
@@ -47,10 +79,22 @@ fn minimal_window_options(_: Option<uuid::Uuid>, _cx: &mut App) -> gpui::WindowO
 /// adapter construction fails (defaults are filled in by the picker
 /// the first time the user opens it).
 fn build_active_provider(data_path: &std::path::Path) -> Option<Box<dyn RuntimeProvider>> {
-    let file = RuntimeFile::load(&data_path.join("usr/etc/zd-runtime.toml"))
-        .ok()
-        .flatten()?;
-    let resolved = file.resolve().ok()?;
+    let runtime_path = data_path.join("usr/etc/zd-runtime.toml");
+    let file = RuntimeFile::load(&runtime_path).ok().flatten()?;
+    let mut resolved = file.resolve().ok()?;
+    if matches!(&resolved, ResolvedConfig::ExternalTermux(_)) {
+        log::warn!(
+            "zed_android: External Termux was selected, but its interactive stdio bridge is not implemented; using Bootstrap"
+        );
+        let fallback = RuntimeFile::with_defaults(RuntimeId::Bootstrap);
+        if let Err(err) = fallback.save(&runtime_path) {
+            log::warn!(
+                "zed_android: could not repair unsupported External Termux selection at {}: {err:#}",
+                runtime_path.display()
+            );
+        }
+        resolved = fallback.resolve().ok()?;
+    }
     adapters::for_config(&resolved).ok()
 }
 
@@ -363,7 +407,7 @@ fn ensure_cli_subscription_agents(fs: Arc<dyn Fs>, cx: &mut App) {
 // at a different family silently no-op'd.
 //
 // `include_bytes!` baked into the .so means the fonts ship in the APK
-// without going through AAssetManager â€” they're literally in the .so's
+// without going through AAssetManager — they're literally in the .so's
 // rodata, so first read is mmap-direct with no extract / decompress
 // step. Total budget across the 8 weights is ~3 MB, irrelevant against
 // the bundled bootstrap zip.
@@ -387,7 +431,7 @@ fn android_main(app: AndroidApp) {
             // android-activity 0.6.1 hard-codes an `error!` log for
             // "Spurious ALOOPER_POLL_CALLBACK from ALooper_pollOnce()
             // (ignored)" every time the looper dispatches our
-            // Choreographer FD callback â€” which is once per vsync, so
+            // Choreographer FD callback — which is once per vsync, so
             // 120 lines/sec of logcat noise on Tab S9. The upstream
             // comment says the NDK docs claim this can't happen; it
             // does on real hardware. Silencing the module entirely
@@ -404,7 +448,7 @@ fn android_main(app: AndroidApp) {
 
     let data_path = app
         .internal_data_path()
-        .unwrap_or_else(|| PathBuf::from("/data/data/com.zdroid.b/files"));
+        .unwrap_or_else(|| PathBuf::from("/data/data/com.zdroid/files"));
     info!("zed_android: data_path = {}", data_path.display());
 
     // The Zed-Rust process env is now adapter-owned. Every set_var/
@@ -414,7 +458,7 @@ fn android_main(app: AndroidApp) {
     //   - Chroot adapter ships a bionic-clean env (no PREFIX, no
     //     TERMUX__*, no libtermux-exec preload). PATH front-loaded with
     //     the zd-runtime symlink farm so `Command::new("java")` finds
-    //     zd-exec â†’ zd-spawnd â†’ chroot dispatch.
+    //     zd-exec → zd-spawnd → chroot dispatch.
     //
     //   - Bootstrap adapter keeps the historical Termux-flavored env
     //     so dpkg patches, apt Post-Invoke hooks, and bootstrap-side
@@ -429,7 +473,7 @@ fn android_main(app: AndroidApp) {
     //
     // SAFETY: `set_var` / `remove_var` mutate libc-shared process
     // state. The invariant is "no other thread reads/writes libc env
-    // via getenv/setenv at this point" â€” JVM service threads exist by
+    // via getenv/setenv at this point" — JVM service threads exist by
     // android_main but don't touch libc env. OnceLock makes activity-
     // recreation re-entry a deterministic no-op.
     //
@@ -476,19 +520,19 @@ fn android_main(app: AndroidApp) {
     // historically read TERMUX__HOME / TERMUX__PREFIX env vars
     // directly. Now those readers (workspace::welcome,
     // node_runtime::node_runtime, gpui_android::storage) ask the
-    // active adapter via these registry slots â€” Bootstrap publishes
+    // active adapter via these registry slots — Bootstrap publishes
     // its Termux-flavored paths, chroot publishes the bionic-clean
     // equivalents, external Termux publishes None.
     util::env::register_workspace_root(provider.workspace_root(&data_path));
     util::env::register_npm_libtermux_exec_path(provider.npm_libtermux_exec_path(&data_path));
 
-    // Surface the SELinux domain in logcat â€” this is the canary for the
+    // Surface the SELinux domain in logcat — this is the canary for the
     // targetSdk pin. If `untrusted_app_27` flips to `untrusted_app_all`
     // every subsequent execve into $PREFIX/bin/* will EACCES.
     gpui_android::termux_bootstrap::check_selinux_context();
 
     // Best-effort runtime READ/WRITE_EXTERNAL_STORAGE prompt. Replaces the
-    // MANAGE_EXTERNAL_STORAGE â†’ Settings deep-link flow we used at
+    // MANAGE_EXTERNAL_STORAGE → Settings deep-link flow we used at
     // targetSdk=35. Fire-and-forget: dialog shows on first launch, user
     // grants once, RealFs reads of /storage/emulated/0/... start working.
     gpui_android::storage::request_once(&app);
@@ -520,7 +564,7 @@ fn android_main(app: AndroidApp) {
     // `Command::new("java")` and routes through the bridge to wherever
     // the binary actually lives. The adapter inspects its OWN
     // filesystem (chroot walks the rootfs's /usr/bin etc.; bootstrap
-    // walks $PREFIX/bin) â€” no hardcoded list anywhere. apt-installing
+    // walks $PREFIX/bin) — no hardcoded list anywhere. apt-installing
     // a new tool inside the chroot makes it show up after the next
     // launch; switching adapters rewrites the set to match the new
     // env (stale entries get swept). Pre-Phase-4 this lived at
@@ -549,7 +593,7 @@ fn android_main(app: AndroidApp) {
 
     // Wire askpass to the standalone helper. Must happen BEFORE any
     // AskPassSession is created (Open Remote, git auth prompts, etc.)
-    // â€” the askpass crate's ASKPASS_PROGRAM OnceLock initializes on
+    // — the askpass crate's ASKPASS_PROGRAM OnceLock initializes on
     // first read with current_exe() (= /system/bin/app_process64 on
     // Android) and subsequent set_program calls are silently ignored.
     let askpass_path = match gpui_android::askpass_install::ensure_installed(&app, &data_path) {
@@ -561,7 +605,7 @@ fn android_main(app: AndroidApp) {
                  current_exe() (= app_process64) and SIGABRT on Android"
             );
             // Construct the expected path anyway so set_program isn't
-            // skipped â€” if the binary materializes later (next boot
+            // skipped — if the binary materializes later (next boot
             // after the install issue is resolved) it'll be picked up.
             data_path.join("zed-askpass-helper")
         }
@@ -574,7 +618,7 @@ fn android_main(app: AndroidApp) {
             ),
             Err(_) => log::warn!(
                 "zed_android: askpass::set_program rejected (OnceLock \
-                 already initialized â€” set_program must run BEFORE first \
+                 already initialized — set_program must run BEFORE first \
                  AskPassSession)"
             ),
         }
@@ -616,7 +660,7 @@ fn android_main(app: AndroidApp) {
 ///   1. Background-fetch the latest GitHub release tag + compare
 ///      against the running app version.
 ///   2. If newer is available: prompt the user on the foreground
-///      thread â†’ if they accept, background-download the APK â†’ hand
+///      thread → if they accept, background-download the APK → hand
 ///      to Android's installer via `MainActivity.launchPackageInstaller`.
 ///   3. If up to date and not silent: prompt informationally.
 ///   4. On any error: log + show a prompt with the error text (or
@@ -779,15 +823,15 @@ fn boot(cx: &mut App, data_path: &std::path::Path) -> Result<()> {
         // Each runtime adapter (chroot / bootstrap / external Termux)
         // gets a FULLY ISOLATED Zed install: its own config, keymap,
         // themes, sqlite db, language servers, extensions, history,
-        // logs â€” everything. Switching adapters via the runtime picker
+        // logs — everything. Switching adapters via the runtime picker
         // is a workspace switch the way booting from a different SSD
         // is a workspace switch: nothing bleeds across.
         //
         // We do this by setting `paths::set_custom_data_dir` to the
         // active adapter's `environment_root` instead of the generic
-        // app data dir. Every `paths::*` function â€” `config_dir`,
+        // app data dir. Every `paths::*` function — `config_dir`,
         // `database_dir`, `logs_dir`, `languages_dir`,
-        // `extensions_dir`, the lot â€” derives from this single root.
+        // `extensions_dir`, the lot — derives from this single root.
         // Zed never has to know about adapters.
         //
         // First launch (no runtime.toml yet) falls back to the plain
@@ -834,7 +878,7 @@ fn boot(cx: &mut App, data_path: &std::path::Path) -> Result<()> {
             // absolute-path spawn from a bootstrap user (PATH-resolved
             // rust-analyzer at $PREFIX/bin/rust-analyzer, downloaded
             // LSPs under <data>/languages/, etc.) would rewrite to
-            // `zd-exec <abs>` and fail with ENOENT â€” bootstrap mode
+            // `zd-exec <abs>` and fail with ENOENT — bootstrap mode
             // doesn't put zd-exec on PATH.
             if provider.needs_command_bridge() {
                 util::command::register_environment_root(env_root.clone());
@@ -860,7 +904,7 @@ fn boot(cx: &mut App, data_path: &std::path::Path) -> Result<()> {
     // them, anything using `update_settings_file` (Onboarding theme /
     // keymap toggles, settings_ui writes, workspace serialization)
     // tries to atomic_write into a directory that doesn't exist, fails,
-    // and short-circuits before even applying the in-memory mutation â€”
+    // and short-circuits before even applying the in-memory mutation —
     // so toggles look like no-ops.
     let termux_home = data_path.join("home");
     let projects_dir = termux_home.join("projects");
@@ -933,7 +977,7 @@ fn boot(cx: &mut App, data_path: &std::path::Path) -> Result<()> {
     // `extension::init` creates the global ExtensionHostProxy that all
     // extension contribution registries (theme, language, debug-adapter)
     // hang off of. Has to run BEFORE any of those `*_extension::init`
-    // calls. Cheap â€” just installs a default proxy global; the real
+    // calls. Cheap — just installs a default proxy global; the real
     // store gets created later by `extension_host::init` once fs/client
     // /node_runtime are available.
     extension::init(cx);
@@ -941,7 +985,7 @@ fn boot(cx: &mut App, data_path: &std::path::Path) -> Result<()> {
     editor::init(cx);
 
     // Seed the `onboarding::runtime_global::ActiveRuntime` global with
-    // the user's runtime.toml selection â€” NOT `active_provider`'s
+    // the user's runtime.toml selection — NOT `active_provider`'s
     // result. `active_provider` falls back to a default Bootstrap
     // adapter when no toml exists so env init has something to ask;
     // that fallback is NOT a user selection and the onboarding label
@@ -979,7 +1023,7 @@ fn boot(cx: &mut App, data_path: &std::path::Path) -> Result<()> {
     // with "auto-update not initialized" before any download starts.
     //
     // We deliberately set `ZED_UPDATE_EXPLANATION` ahead of `init` so
-    // the polling subscription (auto_update.rs:248-262) is suppressed â€”
+    // the polling subscription (auto_update.rs:248-262) is suppressed —
     // we DO NOT want Zed periodically self-updating the APK at runtime
     // (Android distribution = user reinstalls the APK, not in-app
     // update). The explanation string is shown if the user manually
@@ -1032,12 +1076,12 @@ fn boot(cx: &mut App, data_path: &std::path::Path) -> Result<()> {
     <dyn Fs>::set_global(fs.clone(), cx);
     // Real NodeRuntime, mirroring crates/zed/src/main.rs:496-518. The
     // earlier port stage stubbed this out as `NodeRuntime::unavailable()`
-    // back when Termux's Node didn't run on bionic â€” pre L3 npm intercept
+    // back when Termux's Node didn't run on bionic — pre L3 npm intercept
     // architecture (project_l3_npm_intercept memory). The intercept layer
     // (patched node platform string, npm wrapper, launcher-gen RUNPATH
     // fixup, libtermux-exec LD_PRELOAD) plus the bundled musl loader make
     // a Termux-installed Node usable. Wire NodeRuntime against settings
-    // so PATH-resolved Node (`pkg install nodejs` â†’ $PREFIX/bin/node)
+    // so PATH-resolved Node (`pkg install nodejs` → $PREFIX/bin/node)
     // works, and Zed's managed-node fallback download path is available
     // for users without termux Node. Without this, npm-based LSPs
     // (TypeScript / JavaScript / Pyright / etc.) fail at the install step
@@ -1075,7 +1119,7 @@ fn boot(cx: &mut App, data_path: &std::path::Path) -> Result<()> {
 
     // Mirror production zed::watch_settings_files. Without this, edits to
     // ~/.config/zed/settings.json on disk never propagate into the running
-    // app â€” themes, keybindings, terminal.shell etc. only honoured on
+    // app — themes, keybindings, terminal.shell etc. only honoured on
     // restart. Production also wires migration notifications; we skip those
     // because we don't ship the upgrade path UI yet.
     settings::SettingsStore::update_global(cx, |store, cx| {
@@ -1090,7 +1134,7 @@ fn boot(cx: &mut App, data_path: &std::path::Path) -> Result<()> {
     // Mirror `android_input.*` settings into gpui_android's runtime
     // atomics directly via observe_global, NOT via per-paint
     // `window.set_*` writes from `workspace::pane`. The pane path
-    // only fires when a Pane renders â€” during onboarding (before a
+    // only fires when a Pane renders — during onboarding (before a
     // project is open) there is no Pane, so the atomics stay at
     // their `true`/`false` defaults regardless of what the user
     // toggles in Settings. Symptom: opening Settings during
@@ -1117,7 +1161,7 @@ fn boot(cx: &mut App, data_path: &std::path::Path) -> Result<()> {
     // mode (Normal / Visual / operator-pending / Helix) soft-keyboard
     // text has to arrive as key *events* so vim's keymap reads `j`/`d`/
     // `w` as motions and operators; only Insert and Replace insert the
-    // literal characters. Replace is the trap â€” it feels like a command
+    // literal characters. Replace is the trap — it feels like a command
     // mode but is text entry, so it routes as text like Insert.
     //
     // Mirrors `vim::ModeIndicator`: a holder entity keeps a single
@@ -1125,7 +1169,7 @@ fn boot(cx: &mut App, data_path: &std::path::Path) -> Result<()> {
     // event, so an unfocused split-pane editor flipping its own mode
     // can't clobber the gate. The holder is owned by the detached
     // `observe_new` closure, so it lives for the whole process. Desktop
-    // never reaches this â€” it has no soft keyboard â€” which is why the
+    // never reaches this — it has no soft keyboard — which is why the
     // mode read sits behind the tiny `Vim::mode()` accessor.
     struct VimImeRouter {
         focused_vim: Option<gpui::Subscription>,
@@ -1182,7 +1226,7 @@ fn boot(cx: &mut App, data_path: &std::path::Path) -> Result<()> {
     //
     // Production passes `LspAccess::ViaWorkspaces(...)` so extension-
     // installed LSPs get auto-registered against every active workspace.
-    // We use `Noop` for now â€” extensions can still contribute languages,
+    // We use `Noop` for now — extensions can still contribute languages,
     // grammars, and themes; LSP-from-extension will require wiring
     // `ViaWorkspaces` against the multi-workspace scope, which is its
     // own follow-up because Android's `MultiWorkspace` differs in shape
@@ -1216,7 +1260,7 @@ fn boot(cx: &mut App, data_path: &std::path::Path) -> Result<()> {
     AppState::set_global(app_state.clone(), cx);
     info!("zed_android: AppState assembled + set as global");
 
-    // Mirror production zed/src/main.rs:785 â€” without this every language's
+    // Mirror production zed/src/main.rs:785 — without this every language's
     // tree-sitter captures parse but render with no syntax styling. Re-apply
     // on theme changes so theme toggles actually recolour text. Bracket
     // matching, indents, and outline don't depend on this and would have
@@ -1238,7 +1282,7 @@ fn boot(cx: &mut App, data_path: &std::path::Path) -> Result<()> {
     // adapter actually changes where the integrated terminal lands.
     //
     // Why overwrite even when the user already has a shell set: the
-    // picker IS the user's terminal-target choice in this app â€”
+    // picker IS the user's terminal-target choice in this app —
     // picking chroot means "I want the terminal in the chroot's bash".
     // Honoring a stale settings.shell from a prior adapter would
     // silently contradict the picker. A user who wants something
@@ -1286,12 +1330,12 @@ fn boot(cx: &mut App, data_path: &std::path::Path) -> Result<()> {
     // defaults to false, which routes every repo into the
     // dubious-ownership UI in git_panel.rs:4862.
     //
-    // Mirror production zed/src/main.rs:450-457 â€” fetch the persisted
+    // Mirror production zed/src/main.rs:450-457 — fetch the persisted
     // trust grants from `WorkspaceDb::fetch_trusted_worktrees()` so a
     // user's prior "Trust" choice survives across launches and
     // reinstalls. Previously we passed `HashMap::default()` here, which
     // wiped the in-memory trust map every boot even though the SQLite
-    // db was preserving it correctly â€” every relaunch re-prompted the
+    // db was preserving it correctly — every relaunch re-prompted the
     // restricted-mode trust dialog. Fall back to empty on fetch failure
     // (typically only happens if the db schema upgrade is mid-flight).
     let db_trusted_paths = match workspace::WorkspaceDb::global(cx).fetch_trusted_worktrees() {
@@ -1299,7 +1343,7 @@ fn boot(cx: &mut App, data_path: &std::path::Path) -> Result<()> {
         Err(err) => {
             error!(
                 "zed_android: fetch_trusted_worktrees failed at boot: \
-                     {err:#} â€” starting with empty trust map; user will \
+                     {err:#} — starting with empty trust map; user will \
                      be re-prompted for any previously trusted projects"
             );
             std::collections::HashMap::default()
@@ -1308,19 +1352,19 @@ fn boot(cx: &mut App, data_path: &std::path::Path) -> Result<()> {
     project::trusted_worktrees::init(db_trusted_paths, cx);
     Project::init(&client, cx);
 
-    // Extensions (Phase L3 â€” previously deferred). Mirrors production
-    // zed/src/main.rs:623, 631â€“637, 741. The store creates the
+    // Extensions (Phase L3 — previously deferred). Mirrors production
+    // zed/src/main.rs:623, 631–637, 741. The store creates the
     // global ExtensionStore, watches `paths::extensions_dir()` for new
     // installations, and asynchronously fetches the registry from
     // Zed's API. Theme/debug-adapter proxies register against the
     // already-installed `ExtensionHostProxy` from `extension::init`
     // earlier in boot. extensions_ui registers the workspace observer
-    // that handles the `zed_actions::Extensions` action â€” taps from
+    // that handles the `zed_actions::Extensions` action — taps from
     // the title-bar settings menu open the browse/install pane.
     //
     // Wasmtime engine init (`crates/extension_host/src/wasm_host.rs:564`)
     // currently uses Cranelift JIT. Whether that survives Android's
-    // `untrusted_app_27` SELinux W^X policy is open â€” modern Android
+    // `untrusted_app_27` SELinux W^X policy is open — modern Android
     // (API 30+) typically allows anonymous executable mappings for
     // app processes, so it MAY just work; if not, the engine init
     // will panic at first extension load and we switch wasmtime's
@@ -1351,7 +1395,7 @@ fn boot(cx: &mut App, data_path: &std::path::Path) -> Result<()> {
     command_palette::init(cx);
     search::init(cx);
     // Mirror production zed/src/main.rs:710. setup_search_bar is fired
-    // from `terminal_panel.rs::TerminalPanel::new` ONLY â€” i.e. when the
+    // from `terminal_panel.rs::TerminalPanel::new` ONLY — i.e. when the
     // terminal panel adds its own internal buffer search. It is NOT
     // called for editor panes; production wires those via initialize_pane
     // in zed/src/zed.rs:1234, which we mirror further down inside the
@@ -1367,7 +1411,7 @@ fn boot(cx: &mut App, data_path: &std::path::Path) -> Result<()> {
         wrap_div_with_search_actions: search::buffer_search::register_pane_search_actions,
     });
     vim::init(cx);
-    // Modal pickers / panels â€” mirror production zed/src/main.rs init order.
+    // Modal pickers / panels — mirror production zed/src/main.rs init order.
     // Each registers its own actions + a SettingsStore observer if needed.
     // Skipped from production (non-portable on Android): audio/call/livekit
     // (collab), agent_ui/copilot/language_models (AI), debugger_ui/repl
@@ -1395,7 +1439,7 @@ fn boot(cx: &mut App, data_path: &std::path::Path) -> Result<()> {
     settings_profile_selector::init(cx);
     language_tools::init(cx);
     feedback::init(cx);
-    // language_model::init only registers the GlobalLanguageModelRegistry â€”
+    // language_model::init only registers the GlobalLanguageModelRegistry —
     // no actual AI runtime spins up. git_panel.rs reads from this registry
     // for the optional commit-message generation; without it, the panel
     // panics at first paint with "no state of type
@@ -1428,7 +1472,7 @@ fn boot(cx: &mut App, data_path: &std::path::Path) -> Result<()> {
     });
     info!("zed_android: agent_ui + language model providers initialized");
     git_ui::init(cx);
-    // Mirror production zed/src/main.rs:733 â€” register the git graph
+    // Mirror production zed/src/main.rs:733 — register the git graph
     // (commit history) view's serializable item, action handlers
     // (git::FileHistory, git_panel::Open, OpenAtCommit), and database
     // domain. Action-driven: shows up as a workspace pane item when the
@@ -1437,7 +1481,7 @@ fn boot(cx: &mut App, data_path: &std::path::Path) -> Result<()> {
     // project.git_store() so remote-SSH projects work transparently.
     git_graph::init(cx);
     // Production zed/src/main.rs:741. Registers the workspace observer
-    // that handles `zed_actions::Extensions::default()` â€” opens the
+    // that handles `zed_actions::Extensions::default()` — opens the
     // browse/install/manage pane (an `ExtensionsPage` workspace item).
     // The settings-menu chevron in the Android title bar already
     // dispatches `zed_actions::Extensions` (see title_bar.rs); without
@@ -1469,7 +1513,7 @@ fn boot(cx: &mut App, data_path: &std::path::Path) -> Result<()> {
     cx.observe_new(|workspace: &mut Workspace, _window, _cx| {
         workspace.register_action(
             |_workspace: &mut Workspace, _: &zed_actions::OpenSettings, window, cx| {
-                if std::path::Path::new("/data/data/com.zdroid.b/files/usr/etc/zd-runtime.toml")
+                if std::path::Path::new("/data/data/com.zdroid/files/usr/etc/zd-runtime.toml")
                     .exists()
                 {
                     // Runtime configured: let settings_ui's handler open
@@ -1493,7 +1537,7 @@ fn boot(cx: &mut App, data_path: &std::path::Path) -> Result<()> {
     // Onboarding reads `AllAgentServersSettings` from the SettingsStore;
     // `SettingsStore::get` panics if the type isn't registered, so register
     // it before any onboarding render. agent_settings doesn't expose a
-    // separate init function â€” registering the type is the whole step.
+    // separate init function — registering the type is the whole step.
     project::agent_server_store::AllAgentServersSettings::register(cx);
     onboarding::init(cx);
     menu_bar::register_actions(cx);
@@ -1512,7 +1556,7 @@ fn boot(cx: &mut App, data_path: &std::path::Path) -> Result<()> {
     // change: without this, toggling vim mode (via `ToggleVimMode`
     // action or settings.json edit) flips the setting and updates
     // the mode indicator, but no vim keybindings are bound to the
-    // action dispatcher â€” `hjkl`/`i`/`:w` etc. fire nothing.
+    // action dispatcher — `hjkl`/`i`/`:w` etc. fire nothing.
     cx.observe_global::<settings::SettingsStore>(|cx| {
         reload_zdroid_keymaps(cx);
     })
@@ -1546,11 +1590,11 @@ fn boot(cx: &mut App, data_path: &std::path::Path) -> Result<()> {
         //
         // Flow, identical to production except the new-workspace init
         // closure is a no-op (we don't auto-create an empty Editor on
-        // close â€” same shape as the returning-launch path at
+        // close — same shape as the returning-launch path at
         // `workspace::open_new(Default::default(), app_state, cx,
         // |_, _, _| {})` lower in this file):
         //
-        //   1. prepare_to_close(ReplaceWindow) â€” checks dirty buffers,
+        //   1. prepare_to_close(ReplaceWindow) — checks dirty buffers,
         //      pops the standard "Save changes?" modal if needed.
         //   2. If the user proceeds, open_new() builds a fresh empty
         //      workspace within the same MultiWorkspace tab, reusing
@@ -1605,7 +1649,7 @@ fn boot(cx: &mut App, data_path: &std::path::Path) -> Result<()> {
 
         // Status bar items, mirroring production zed/src/zed.rs:537-586.
         // Skipped: edit_prediction_ui (AI), activity_indicator (collab),
-        // merge_conflict_indicator (git_ui â€” pulls collab), image_info
+        // merge_conflict_indicator (git_ui — pulls collab), image_info
         // (image-viewer specific). The rest are plumbed identically.
         let search_button = cx.new(|_| search::search_status_button::SearchButton::new());
         let diagnostic_summary =
@@ -1661,20 +1705,20 @@ fn boot(cx: &mut App, data_path: &std::path::Path) -> Result<()> {
         // invokes from a workspace observer at zed.rs:444-451 for the
         // initial active pane and on every PaneAdded event.
         //
-        //   - BufferSearchBar â€” the in-editor Ctrl-F find/replace bar.
+        //   - BufferSearchBar — the in-editor Ctrl-F find/replace bar.
         //     Already registered for terminal panels via the global
         //     PaneSearchBarCallbacks above; production registers a SECOND
         //     instance on each editor pane's toolbar (different toolbar,
         //     different visibility scope), and we mirror that here.
         //
-        //   - ProjectSearchBar â€” the toolbar that holds the actual query
+        //   - ProjectSearchBar — the toolbar that holds the actual query
         //     input field, regex/case/whole-word toggles, replace UI,
         //     and match navigation for the Project Search view.
         //     ProjectSearchView's render() draws only the results body;
         //     the input field lives in this toolbar item. Without it
         //     registered on the pane's toolbar, the project-search view
         //     shows the empty-state heading but no input field, and the
-        //     toolbar slot stays in a half-rendered state â€” visible as
+        //     toolbar slot stays in a half-rendered state — visible as
         //     a flickering tab at vsync rate.
         //
         // Subscribe to PaneAdded so split panes get the same setup.
@@ -1712,7 +1756,7 @@ fn boot(cx: &mut App, data_path: &std::path::Path) -> Result<()> {
 
         // Custom always-on application menu bar. On Android there's no
         // native menu surface and the production `title_bar` crate pulls
-        // in audio/livekit/auto_update/git_ui â€” too heavy for this stage.
+        // in audio/livekit/auto_update/git_ui — too heavy for this stage.
         // The bar dispatches the same actions production's menus do, and
         // can be hidden via the chevron-up button or the
         // `ToggleAppMenuBar` action (Ctrl+Alt+M).
@@ -1781,7 +1825,7 @@ fn boot(cx: &mut App, data_path: &std::path::Path) -> Result<()> {
 
     // Quit action handler. Upstream `crates/zed/src/zed.rs` wires
     // `zed_actions::Quit` to `cx.quit()` in several places, but none of
-    // those registration paths run in the Android entry â€” we don't pull
+    // those registration paths run in the Android entry — we don't pull
     // in `crates/zed`'s init code. Without this handler the Zdroid
     // menu's "Quit" item dispatches the action and nothing responds, so
     // the user just sees no effect. `cx.quit()` triggers gpui's
@@ -1804,7 +1848,7 @@ fn boot(cx: &mut App, data_path: &std::path::Path) -> Result<()> {
     // opens a new window via `Workspace::new_local(.., None, ..)`. Single-
     // window Android rejects the second `cx.open_window`, so we replace
     // the `Open` action with the same call production makes once it's
-    // already inside the right window â€” `MultiWorkspace::open_project`,
+    // already inside the right window — `MultiWorkspace::open_project`,
     // which `find_or_create_local_workspace`s and reuses the empty
     // workspace as the slot to swap. That path also dismisses any open
     // Onboarding/WelcomePage items naturally because the workspace gets
@@ -1821,10 +1865,15 @@ fn boot(cx: &mut App, data_path: &std::path::Path) -> Result<()> {
         let target_workspace = active
             .as_ref()
             .and_then(|window| window.downcast::<workspace::Workspace>());
-        let fallback_multi_workspace =
+        // The active handle can downcast to the inner Workspace on the
+        // welcome screen. Prefer the owning MultiWorkspace whenever one
+        // exists so open_project replaces the welcome view and activates
+        // the selected project instead of merely adding a hidden worktree.
+        let target_multi_workspace = target_multi_workspace.or_else(|| {
             workspace_windows_for_location(&SerializedWorkspaceLocation::Local, cx)
                 .into_iter()
-                .next();
+                .next()
+        });
 
         let paths = cx.prompt_for_paths(gpui::PathPromptOptions {
             files: true,
@@ -1838,12 +1887,20 @@ fn boot(cx: &mut App, data_path: &std::path::Path) -> Result<()> {
                 Ok(Ok(None)) => return,
                 Ok(Err(err)) => {
                     error!("zed_android: Open picker failed: {err:#}");
+                    let message = format!("{err:#}");
+                    show_open_project_error(
+                        target_multi_workspace.as_ref(),
+                        target_workspace.as_ref(),
+                        &message,
+                        cx,
+                    );
                     return;
                 }
                 Err(_) => return,
             };
+            info!("zed_android: Open picker selected paths={picked:?}");
 
-            // The first-launch onboarding path (show_onboarding_view â†’
+            // The first-launch onboarding path (show_onboarding_view →
             // workspace::open_new) opens a plain `Workspace` window, not
             // a `MultiWorkspace`. Returning-launch path is also `Workspace`
             // until something attaches the multi-workspace shell. The Open
@@ -1855,9 +1912,20 @@ fn boot(cx: &mut App, data_path: &std::path::Path) -> Result<()> {
                 let task = mw.update(cx, |mw, window, cx| {
                     mw.open_project(picked, workspace::OpenMode::Activate, window, cx)
                 });
-                if let Ok(task) = task {
-                    if let Err(err) = task.await {
-                        error!("zed_android: open_project failed: {err:#}");
+                match task {
+                    Ok(task) => {
+                        if let Err(err) = task.await {
+                            error!("zed_android: open_project failed: {err:#}");
+                            let message = format!("{err:#}");
+                            show_open_project_error(Some(&mw), None, &message, cx);
+                        } else {
+                            info!("zed_android: open_project completed");
+                        }
+                    }
+                    Err(err) => {
+                        error!("zed_android: open_project update failed: {err:#}");
+                        let message = format!("{err:#}");
+                        show_open_project_error(Some(&mw), None, &message, cx);
                     }
                 }
             } else if let Some(ws) = target_workspace {
@@ -1870,8 +1938,19 @@ fn boot(cx: &mut App, data_path: &std::path::Path) -> Result<()> {
                 let task = ws.update(cx, |ws, window, cx| {
                     ws.open_paths(picked, workspace::OpenOptions::default(), None, window, cx)
                 });
-                if let Ok(task) = task {
-                    let _ = task.await;
+                match task {
+                    Ok(task) => {
+                        let opened_items = task.await;
+                        info!(
+                            "zed_android: workspace open_paths completed items={}",
+                            opened_items.len()
+                        );
+                    }
+                    Err(err) => {
+                        error!("zed_android: workspace open_paths update failed: {err:#}");
+                        let message = format!("{err:#}");
+                        show_open_project_error(None, Some(&ws), &message, cx);
+                    }
                 }
             } else {
                 // active_window points at something that is neither a
@@ -1883,47 +1962,28 @@ fn boot(cx: &mut App, data_path: &std::path::Path) -> Result<()> {
                 // the URI is dropped silently and the user sees "tapping Open
                 // Project does nothing until I close + reopen the app".
                 //
-                // Fall back to the first local MultiWorkspace window. Same
-                // recovery the upstream `prompt_and_open_paths` does for its
-                // own scheduling.
-                if let Some(mw) = fallback_multi_workspace {
-                    log::warn!(
-                        "zed_android: Open action active_window was not a workspace; \
-                         falling back to the first local MultiWorkspace"
-                    );
-                    let task = mw.update(cx, |mw, window, cx| {
-                        mw.open_project(picked, workspace::OpenMode::Activate, window, cx)
-                    });
-                    if let Ok(task) = task {
-                        if let Err(err) = task.await {
-                            error!("zed_android: fallback open_project failed: {err:#}");
-                        }
-                    }
-                } else {
-                    error!(
-                        "zed_android: no local MultiWorkspace window exists; \
-                         Open action dropped"
-                    );
-                }
+                let message = "No active Zdroid workspace is available for the selected project.";
+                error!("zed_android: {message}");
+                show_open_project_error(None, None, message, cx);
             }
         })
         .detach();
     });
 
-    // ImportFromSdcard action removed in L9 â€” the menu entry was redundant
+    // ImportFromSdcard action removed in L9 — the menu entry was redundant
     // with the existing SAF picker (Open / Add Folder to Project), and the
     // copy-into-`~/projects` flow it ran is now triggered from the noexec
     // banner's confirmation dialog (see title_bar.rs::render_noexec_banner)
     // when an opened worktree turns out to live on a noexec mount.
 
     // Mirror production zed/src/main.rs's first-launch decision. Both
-    // helpers internally call `Workspace::new_local` â†’ `cx.open_window`,
+    // helpers internally call `Workspace::new_local` → `cx.open_window`,
     // construct the Project, build Workspace + MultiWorkspace, and run
     // their own `init` callback. We don't need to do any of that
     // manually; `observe_new` above attaches the project panel.
     let kvp = KeyValueStore::global(cx);
     if matches!(kvp.read_kvp(onboarding::FIRST_OPEN), Ok(None)) {
-        info!("zed_android: first launch â†’ show_onboarding_view");
+        info!("zed_android: first launch → show_onboarding_view");
         onboarding::show_onboarding_view(app_state.clone(), cx).detach_and_log_err(cx);
     } else {
         info!("zed_android: returning launch -> restore most recent workspace");

@@ -1,4 +1,4 @@
-﻿use crate::{
+use crate::{
     NewFile, Open, OpenMode, PathList, RecentWorkspace, SerializedWorkspaceLocation,
     ToggleWorkspaceSidebar, Workspace,
     item::{Item, ItemEvent},
@@ -17,13 +17,11 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use settings::Settings;
 use ui::{
-    ButtonLike, Divider, DividerColor, IconButton, KeyBinding, Tooltip, Vector, VectorName,
-    prelude::*,
+    ButtonLike, CopyButton, Divider, DividerColor, IconButton, KeyBinding, Tooltip, Vector,
+    VectorName, prelude::*,
 };
 use util::ResultExt;
-use zed_actions::{
-    Extensions, OpenKeymap, OpenOnboarding, OpenSettings, assistant::ToggleFocus, command_palette,
-};
+use zed_actions::{OpenOnboarding, assistant::ToggleFocus, command_palette};
 
 #[derive(PartialEq, Clone, Debug, Deserialize, Serialize, JsonSchema, Action)]
 #[action(namespace = welcome)]
@@ -163,63 +161,35 @@ impl SectionEntry {
     }
 }
 
-const CONTENT: (Section<4>, Section<3>) = (
-    Section {
-        title: "Get Started",
-        entries: [
-            SectionEntry {
-                icon: IconName::Plus,
-                title: "New File",
-                action: &NewFile,
-                visibility_guard: SectionVisibility::Always,
-            },
-            SectionEntry {
-                icon: IconName::FolderOpen,
-                title: "Open Project",
-                action: &Open::DEFAULT,
-                visibility_guard: SectionVisibility::Always,
-            },
-            SectionEntry {
-                icon: IconName::CloudDownload,
-                title: "Clone Repository",
-                action: &GitClone,
-                visibility_guard: SectionVisibility::Always,
-            },
-            SectionEntry {
-                icon: IconName::ListCollapse,
-                title: "Open Command Palette",
-                action: &command_palette::Toggle,
-                visibility_guard: SectionVisibility::Always,
-            },
-        ],
-    },
-    Section {
-        title: "Configure",
-        entries: [
-            SectionEntry {
-                icon: IconName::Settings,
-                title: "Open Settings",
-                action: &OpenSettings,
-                visibility_guard: SectionVisibility::Always,
-            },
-            SectionEntry {
-                icon: IconName::Keyboard,
-                title: "Customize Keymaps",
-                action: &OpenKeymap,
-                visibility_guard: SectionVisibility::Always,
-            },
-            SectionEntry {
-                icon: IconName::Blocks,
-                title: "Explore Extensions",
-                action: &Extensions {
-                    category_filter: None,
-                    id: None,
-                },
-                visibility_guard: SectionVisibility::Always,
-            },
-        ],
-    },
-);
+const CONTENT: Section<4> = Section {
+    title: "Get Started",
+    entries: [
+        SectionEntry {
+            icon: IconName::Plus,
+            title: "New File",
+            action: &NewFile,
+            visibility_guard: SectionVisibility::Always,
+        },
+        SectionEntry {
+            icon: IconName::FolderOpen,
+            title: "Open Project",
+            action: &Open::DEFAULT,
+            visibility_guard: SectionVisibility::Always,
+        },
+        SectionEntry {
+            icon: IconName::CloudDownload,
+            title: "Clone Repository",
+            action: &GitClone,
+            visibility_guard: SectionVisibility::Always,
+        },
+        SectionEntry {
+            icon: IconName::ListCollapse,
+            title: "Open Command Palette",
+            action: &command_palette::Toggle,
+            visibility_guard: SectionVisibility::Always,
+        },
+    ],
+};
 
 struct Section<const COLS: usize> {
     title: &'static str,
@@ -327,7 +297,12 @@ impl WelcomePage {
         }
     }
 
-    fn render_agent_card(&self, tab_index: usize, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_agent_card(
+        &self,
+        tab_index: usize,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         let focus = self.focus_handle.clone();
         let color = cx.theme().colors();
 
@@ -377,7 +352,7 @@ impl WelcomePage {
                     .mb_2(),
             )
             .when(self.agent_setup_info_open, |this| {
-                this.child(self.render_agent_setup_info(cx))
+                this.child(self.render_agent_setup_info(window, cx))
             })
             .child(
                 Button::new("open-agent", "Open Agent Panel")
@@ -395,22 +370,34 @@ impl WelcomePage {
             )
     }
 
-    fn render_agent_setup_info(&self, cx: &App) -> impl IntoElement {
+    fn render_agent_setup_info(&self, window: &Window, cx: &App) -> impl IntoElement {
         let colors = cx.theme().colors();
+        let max_height = (window.viewport_size().height - px(220.0))
+            .max(px(180.0))
+            .min(px(520.0));
         let command = |id: &'static str, text: &'static str| {
-            div()
+            h_flex()
                 .id(id)
                 .w_full()
                 .min_w_0()
+                .items_start()
+                .justify_between()
+                .gap_2()
                 .p_2()
                 .rounded_sm()
                 .bg(colors.editor_background)
                 .border_1()
                 .border_color(colors.border_variant)
                 .child(
-                    Label::new(text)
-                        .buffer_font(cx)
-                        .size(LabelSize::XSmall),
+                    div()
+                        .min_w_0()
+                        .flex_1()
+                        .child(Label::new(text).buffer_font(cx).size(LabelSize::XSmall)),
+                )
+                .child(
+                    CopyButton::new(format!("copy-{id}"), text)
+                        .icon_size(IconSize::Small)
+                        .tooltip_label("Copy command"),
                 )
         };
 
@@ -418,8 +405,9 @@ impl WelcomePage {
             .id("agent-setup-info-content")
             .w_full()
             .min_w_0()
-            .max_h(px(420.0))
+            .max_h(max_height)
             .overflow_y_scroll()
+            .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
             .mb_3()
             .p_3()
             .gap_3()
@@ -506,9 +494,8 @@ impl WelcomePage {
 
 impl Render for WelcomePage {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let (first_section, second_section) = CONTENT;
+        let first_section = CONTENT;
         let first_section_entries = first_section.entries.len();
-        let mut next_tab_index = first_section_entries + second_section.entries.len();
 
         let ai_enabled = AgentSettings::get_global(cx).enabled(cx);
 
@@ -522,6 +509,12 @@ impl Render for WelcomePage {
 
         let showing_recent_projects =
             self.fallback_to_recent_projects && !recent_projects_data.is_empty();
+        let mut next_tab_index = first_section_entries
+            + if showing_recent_projects {
+                recent_projects_data.len()
+            } else {
+                0
+            };
         let second_section = if showing_recent_projects {
             #[cfg(target_os = "android")]
             {
@@ -530,8 +523,7 @@ impl Render for WelcomePage {
                 // SAF-picked, FUSE noexec). The two `rust` problem â€” same name
                 // appearing twice in Recent Projects from different storage
                 // tiers â€” is otherwise indistinguishable to the user.
-                let workspace_root = util::env::workspace_root()
-                    .map(|h| h.join("projects"));
+                let workspace_root = util::env::workspace_root().map(|h| h.join("projects"));
                 let mut workspace_entries: Vec<gpui::AnyElement> = Vec::new();
                 let mut external_entries: Vec<gpui::AnyElement> = Vec::new();
                 for (index, workspace) in recent_projects_data.iter().enumerate() {
@@ -592,9 +584,7 @@ impl Render for WelcomePage {
                     .into_any_element()
             }
         } else {
-            second_section
-                .render(first_section_entries, &self.focus_handle)
-                .into_any_element()
+            div().into_any_element()
         };
 
         let welcome_label = if self.fallback_to_recent_projects {
@@ -624,8 +614,9 @@ impl Render for WelcomePage {
                     .gap_6()
                     .when(compact, |this| this.gap_4())
                     .when(!compact, |this| this.justify_center())
-                    .overflow_y_scroll()
-                    .child(
+                    .when(!self.agent_setup_info_open, |this| this.overflow_y_scroll())
+                    .when(self.agent_setup_info_open, |this| this.overflow_y_hidden())
+                    .when(!self.agent_setup_info_open, |this| this.child(
                         h_flex()
                             .w_full()
                             .justify_center()
@@ -652,27 +643,33 @@ impl Render for WelcomePage {
                                         ),
                                 ),
                             ),
-                    )
-                    .child(first_section.render(Default::default(), &self.focus_handle))
-                    .child(second_section)
+                    ))
+                    .when(!self.agent_setup_info_open, |this| {
+                        this.child(first_section.render(Default::default(), &self.focus_handle))
+                    })
+                    .when(!self.agent_setup_info_open, |this| this.child(second_section))
                     .when(ai_enabled && !showing_recent_projects, |this| {
                         let agent_tab_index = next_tab_index;
                         next_tab_index += 1;
-                        this.child(self.render_agent_card(agent_tab_index, cx))
+                        this.child(self.render_agent_card(agent_tab_index, window, cx))
                     })
-                    .when(!self.fallback_to_recent_projects, |this| {
-                        this.child(
-                            v_flex().gap_4().child(Divider::horizontal()).child(
-                                Button::new("welcome-exit", "Return to Onboarding")
-                                    .tab_index(next_tab_index as isize)
-                                    .full_width()
-                                    .label_size(LabelSize::XSmall)
-                                    .on_click(|_, window, cx| {
-                                        window.dispatch_action(OpenOnboarding.boxed_clone(), cx);
-                                    }),
-                            ),
-                        )
-                    }),
+                    .when(
+                        !self.fallback_to_recent_projects && !self.agent_setup_info_open,
+                        |this| {
+                            this.child(
+                                v_flex().gap_4().child(Divider::horizontal()).child(
+                                    Button::new("welcome-exit", "Return to Onboarding")
+                                        .tab_index(next_tab_index as isize)
+                                        .full_width()
+                                        .label_size(LabelSize::XSmall)
+                                        .on_click(|_, window, cx| {
+                                            window
+                                                .dispatch_action(OpenOnboarding.boxed_clone(), cx);
+                                        }),
+                                ),
+                            )
+                        },
+                    ),
             )
     }
 }

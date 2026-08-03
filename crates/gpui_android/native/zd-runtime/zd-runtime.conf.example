@@ -24,7 +24,7 @@ RUNTIME_TYPE=chroot
 RUNTIME_ROOT=/data/local/nhsystem/kali-arm64
 
 # Path inside the rootfs that should bind-mount Zdroid's home dir
-# (/data/data/com.zdroid/files/home). Projects opened in Zdroid land
+# (/data/data/com.zdroid/files/home). Projects opened in Zdroid-B land
 # under here when entering the rootfs.
 RUNTIME_HOME_BIND=/zed
 

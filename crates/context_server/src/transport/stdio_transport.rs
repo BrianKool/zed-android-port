@@ -1,4 +1,4 @@
-﻿use std::path::PathBuf;
+use std::path::PathBuf;
 use std::pin::Pin;
 
 use anyhow::Result;
@@ -38,7 +38,7 @@ impl StdioTransport {
             args.push(executable);
             args.extend(binary.args.iter().cloned());
             builder.build_std_command(
-                Some("/data/data/com.zdroid.b/files/bin/zd-exec".to_string()),
+                Some("/data/data/com.zdroid/files/bin/zd-exec".to_string()),
                 &args,
             )
         };

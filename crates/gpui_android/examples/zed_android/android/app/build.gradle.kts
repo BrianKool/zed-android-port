@@ -5,6 +5,9 @@ plugins {
     kotlin("android")
 }
 
+val zdroidApplicationId = "com.zdroid"
+val forbiddenLegacyApplicationIds = listOf("com.zdroid.b")
+
 // Release signing config. `signing.properties` and `release.keystore` are
 // gitignored: contributors who clone the repo can still build the debug
 // variant, but a release build that produces a signed APK requires the
@@ -17,6 +20,56 @@ val signingProps = Properties().apply {
     }
 }
 val hasReleaseSigning = signingPropsFile.exists()
+
+// Main Rust library bundling.
+//
+// Android Gradle only packages files already present under jniLibs; it does
+// not know that libzed_android.so is produced by Cargo. Always invoke Cargo
+// before preBuild (Cargo itself remains incremental), then stage the resulting
+// library. This prevents an APK from combining fresh Kotlin with a stale Rust
+// JNI contract.
+val zedAndroidDir = file("../..").canonicalFile
+val zedAndroidLib = file("${zedAndroidDir}/target/aarch64-linux-android/release/libzed_android.so")
+val stagedZedAndroidLib = file("src/main/jniLibs/arm64-v8a/libzed_android.so")
+
+tasks.register<Exec>("buildZedAndroidLib") {
+    description = "Build the main Zdroid Rust cdylib via cargo-ndk."
+    group = "build setup"
+
+    workingDir(zedAndroidDir)
+    commandLine(
+        "cargo",
+        "ndk",
+        "-t",
+        "arm64-v8a",
+        "-P",
+        "26",
+        "build",
+        "--release",
+    )
+    providers.environmentVariable("ANDROID_NDK_HOME").orNull?.let { ndk ->
+        environment("ANDROID_NDK_HOME", ndk)
+    }
+
+    outputs.file(zedAndroidLib)
+    outputs.upToDateWhen { false }
+}
+
+tasks.register<Copy>("stageZedAndroidLib") {
+    description = "Stage the freshly-built Rust cdylib into Android jniLibs."
+    group = "build setup"
+
+    dependsOn("buildZedAndroidLib")
+    from(zedAndroidLib)
+    into(stagedZedAndroidLib.parentFile)
+    rename { stagedZedAndroidLib.name }
+    inputs.file(zedAndroidLib)
+    outputs.file(stagedZedAndroidLib)
+}
+
+tasks.matching { it.name == "preBuild" }.configureEach {
+    dependsOn("stageZedAndroidLib")
+}
 
 // Bootstrap-zip distribution.
 //
@@ -179,8 +232,44 @@ tasks.matching { it.name == "preBuild" }.configureEach {
     dependsOn("stageAskpassHelperAsset")
 }
 
+val runtimeContractSources = fileTree("${workspaceRoot}/crates/gpui_android/native/zd-runtime") {
+    include("zd-exec", "zd-runtime-hook", "zd-runtime-sync", "zd-runtime.conf.example")
+}
+
+tasks.register("verifyZdroidRuntimeContract") {
+    description = "Reject stale package paths or JNI signatures before packaging the APK."
+    group = "verification"
+
+    dependsOn("stageZedAndroidLib", "stageZdExecAsset", "stageAskpassHelperAsset")
+    inputs.files(stagedZedAndroidLib, zdExecAsset, runtimeContractSources)
+
+    doLast {
+        val contractFiles = listOf(stagedZedAndroidLib, zdExecAsset) + runtimeContractSources.files
+        contractFiles.forEach { contractFile ->
+            val contents = contractFile.readBytes().toString(Charsets.ISO_8859_1)
+            forbiddenLegacyApplicationIds.forEach { forbidden ->
+                check(!contents.contains(forbidden)) {
+                    "Stale Android package '$forbidden' found in ${contractFile.path}"
+                }
+            }
+        }
+
+        val nativeContents = stagedZedAndroidLib.readBytes().toString(Charsets.ISO_8859_1)
+        check(nativeContents.contains("/data/data/$zdroidApplicationId/files/usr")) {
+            "Main Rust library does not contain the expected $zdroidApplicationId runtime prefix"
+        }
+        check(nativeContents.contains("launchOpenTree") && nativeContents.contains("(Z)V")) {
+            "Main Rust library does not contain the current launchOpenTree(boolean) JNI contract"
+        }
+    }
+}
+
+tasks.matching { it.name == "preBuild" }.configureEach {
+    dependsOn("verifyZdroidRuntimeContract")
+}
+
 android {
-    namespace = "com.zdroid"
+    namespace = zdroidApplicationId
     compileSdk = 35
 
     // Pin the NDK explicitly so reproducibility doesn't depend on whatever
@@ -191,7 +280,7 @@ android {
     ndkVersion = "27.0.12077973"
 
     defaultConfig {
-        applicationId = "com.zdroid.b"
+        applicationId = zdroidApplicationId
         // minSdk = 26 enforces bionic â‰¥ Oreo. `forkpty()` is on the symbol
         // table from API 23, but cpal/livekit transitive crates require
         // libaaudio which is API 26.
@@ -204,8 +293,8 @@ android {
         // denied â€” the entire L2 plan stops working. Skipping Play Store
         // eligibility is the explicit trade.
         targetSdk = 28
-        versionCode = 19
-        versionName = "beta-1d"
+        versionCode = 27
+        versionName = "beta-1l"
         ndk {
             abiFilters += listOf("arm64-v8a")
         }

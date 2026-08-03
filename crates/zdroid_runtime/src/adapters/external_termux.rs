@@ -1,9 +1,9 @@
-﻿//! External Termux adapter â€” bridges to the user's installed Termux app
+//! External Termux adapter — bridges to the user's installed Termux app
 //! via the `com.termux.RUN_COMMAND` intent service.
 //!
 //! Fire-and-forget short commands work cleanly through Termux's intent
 //! API. Interactive shells / long-lived bidirectional-stdio LSPs need a
-//! Termux-side helper script that opens a backing Unix socket â€” that
+//! Termux-side helper script that opens a backing Unix socket — that
 //! pattern lands in a follow-up commit. For v1 the adapter is
 //! structurally complete (`health_check` probes the installed package,
 //! `install` returns the on-screen setup guide steps) but `spawn`
@@ -13,7 +13,7 @@
 //! Setup the user has to do once:
 //! 1. Install Termux (F-Droid build, NOT the abandoned Play Store one).
 //! 2. In Termux: `echo allow-external-apps=true >> ~/.termux/termux.properties`
-//! 3. In Android settings: grant `com.zdroid.b` the
+//! 3. In Android settings: grant `com.zdroid` the
 //!    `com.termux.permission.RUN_COMMAND` permission.
 //! 4. Pick "Existing Termux app" in Zdroid's Runtime settings.
 //!
@@ -30,7 +30,7 @@ pub const RUN_COMMAND_ACTION: &str = "com.termux.RUN_COMMAND";
 pub const RUN_COMMAND_SERVICE_CLASS: &str = "com.termux.app.RunCommandService";
 
 /// Extras for the Intent. All required (BACKGROUND defaults to false
-/// if absent). Names must match the constants in Termux's source â€”
+/// if absent). Names must match the constants in Termux's source —
 /// see `RunCommandService.java`.
 pub mod extras {
     /// Absolute path to the executable. Typically
@@ -92,7 +92,7 @@ impl RuntimeProvider for ExternalTermuxAdapter {
              Setup the user must do manually until then: \
              (1) install Termux from F-Droid, \
              (2) in Termux run `echo allow-external-apps=true >> ~/.termux/termux.properties`, \
-             (3) grant `com.termux.permission.RUN_COMMAND` to `com.zdroid.b` in Android app permissions."
+             (3) grant `com.termux.permission.RUN_COMMAND` to `com.zdroid` in Android app permissions."
         )
     }
 
@@ -118,8 +118,8 @@ impl RuntimeProvider for ExternalTermuxAdapter {
     }
 
     fn environment_root(&self) -> std::path::PathBuf {
-        // Termux's `$PREFIX/.zed-env/`. Zdroid-B (com.zdroid.b, separate uid)
-        // can't write here directly â€” Termux's data dir is private to
+        // Termux's `$PREFIX/.zed-env/`. Zdroid-B (com.zdroid, separate uid)
+        // can't write here directly — Termux's data dir is private to
         // com.termux. The eventual JNI Intent bridge will route filesystem
         // ops here through Termux's RUN_COMMAND service. Returning the
         // path now so the seam is in place; actual writes will fail
@@ -141,18 +141,24 @@ impl RuntimeProvider for ExternalTermuxAdapter {
 
         vec![
             ("HOME".into(), EnvOp::Set(data_path.as_os_str().to_owned())),
-            ("TMPDIR".into(), EnvOp::Set(data_path.join("tmp").into_os_string())),
+            (
+                "TMPDIR".into(),
+                EnvOp::Set(data_path.join("tmp").into_os_string()),
+            ),
             ("TERM".into(), EnvOp::Set(OsString::from("xterm-256color"))),
             ("COLORTERM".into(), EnvOp::Set(OsString::from("truecolor"))),
             ("LANG".into(), EnvOp::Set(OsString::from("en_US.UTF-8"))),
-            ("ZED_BUILD_REMOTE_SERVER".into(), EnvOp::Set(OsString::from("never"))),
+            (
+                "ZED_BUILD_REMOTE_SERVER".into(),
+                EnvOp::Set(OsString::from("never")),
+            ),
             ("LD_PRELOAD".into(), EnvOp::Remove),
             ("PATH".into(), EnvOp::Set(existing_path)),
         ]
     }
 
     fn env_for_terminal(&self, _data_path: &std::path::Path) -> Vec<(String, util::env::EnvOp)> {
-        // No overlay â€” the integrated terminal stub for external
+        // No overlay — the integrated terminal stub for external
         // Termux is a placeholder until the Intent bridge lands. The
         // PTY just hosts whatever shell `terminal_shell` returns; once
         // the bridge ships, terminal spawns will route via Intent and

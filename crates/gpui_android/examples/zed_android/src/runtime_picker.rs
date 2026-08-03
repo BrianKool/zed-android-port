@@ -1,4 +1,4 @@
-﻿//! Runtime adapter picker â€” lets the user pick which userland Zdroid
+//! Runtime adapter picker â€” lets the user pick which userland Zdroid
 //! routes its spawns through (chroot, bootstrap, external Termux).
 //!
 //! Surfaces as a centered modal triggered by the `zdroid: pick runtime`
@@ -28,9 +28,9 @@ use platform_title_bar::PlatformTitleBar;
 use release_channel::ReleaseChannel;
 use theme::ActiveTheme;
 use ui::{
-    Button, Chip, Clickable, Color, Disableable, FluentBuilder, Headline, HeadlineSize, Icon,
-    IconName, IconSize, Label, LabelCommon, LabelSize, ParentElement, Styled, WithScrollbar, div,
-    h_flex, v_flex,
+    Button, Chip, Clickable, Color, Disableable, FixedWidth, FluentBuilder, Headline, HeadlineSize,
+    Icon, IconName, IconSize, Label, LabelCommon, LabelSize, ParentElement, Styled, WithScrollbar,
+    div, h_flex, v_flex,
 };
 use util::ResultExt as _;
 use workspace::{Workspace, client_side_decorations};
@@ -43,11 +43,10 @@ use zdroid_runtime::{
 
 /// Bridges the sync `ProgressSink` trait (called from the background
 /// install thread) into an async channel the foreground UI poller
-/// reads. `step` and `warn` are forwarded as status strings;
-/// `progress` is dropped because the install path's milestones are
-/// already coarse enough to render as labels.
+/// reads. `step`, `progress`, and `warn` are forwarded as status strings.
 struct ChannelProgressSink {
     tx: futures::channel::mpsc::UnboundedSender<String>,
+    last_percent: Option<u64>,
 }
 
 impl ProgressSink for ChannelProgressSink {
@@ -55,7 +54,18 @@ impl ProgressSink for ChannelProgressSink {
         log::info!("zdroid_runtime_picker: step: {}", label);
         let _ = self.tx.unbounded_send(label.to_string());
     }
-    fn progress(&mut self, _done: u64, _total: u64) {}
+    fn progress(&mut self, done: u64, total: u64) {
+        if total > 0 {
+            let pct = done.saturating_mul(100) / total;
+            if self.last_percent == Some(pct) {
+                return;
+            }
+            self.last_percent = Some(pct);
+            let _ = self
+                .tx
+                .unbounded_send(format!("Downloading bootstrap {pct}%"));
+        }
+    }
     fn warn(&mut self, message: &str) {
         log::warn!("zdroid_runtime_picker: warn: {}", message);
         let _ = self.tx.unbounded_send(format!("warning: {message}"));
@@ -66,7 +76,7 @@ impl ProgressSink for ChannelProgressSink {
 /// `$PREFIX/etc/` so the bootstrap-extraction step doesn't clobber it
 /// (extraction doesn't touch `etc/`), and so it persists across
 /// editor APK updates the same way other user state does.
-const RUNTIME_TOML_PATH: &str = "/data/data/com.zdroid.b/files/usr/etc/zd-runtime.toml";
+const RUNTIME_TOML_PATH: &str = "/data/data/com.zdroid/files/usr/etc/zd-runtime.toml";
 
 actions!(
     zdroid_runtime,
@@ -194,6 +204,8 @@ pub struct RuntimePicker {
     /// them here + calls `cx.notify()` so the install button's
     /// label re-renders without the user having to interact.
     install_status: Option<String>,
+    /// Last bootstrap install error. Kept visible after the task exits.
+    install_error: Option<String>,
     /// True once an adapter selection has been saved to
     /// `runtime.toml` and the user needs to fully close and reopen
     /// the app for the change to take effect. Drives the inline
@@ -219,6 +231,7 @@ impl RuntimePicker {
             entries: build_entries(),
             current: detect_current(),
             install_status: None,
+            install_error: None,
             restart_required: false,
         }
     }
@@ -235,6 +248,7 @@ impl RuntimePicker {
         }
         let (tx, mut rx) = futures::channel::mpsc::unbounded::<String>();
         self.install_status = Some("Starting install".into());
+        self.install_error = None;
         cx.notify();
 
         // Background: run the actual install. Blocks on ureq +
@@ -247,14 +261,17 @@ impl RuntimePicker {
                     Ok(a) => a,
                     Err(err) => {
                         log::error!("zdroid_runtime_picker: BootstrapAdapter::new failed: {err:#}");
-                        let _ = tx.unbounded_send(format!("Failed: {err:#}"));
+                        let _ = tx.unbounded_send(format!("ERROR: {err:#}"));
                         return;
                     }
                 };
-                let mut sink = ChannelProgressSink { tx: tx.clone() };
+                let mut sink = ChannelProgressSink {
+                    tx: tx.clone(),
+                    last_percent: None,
+                };
                 if let Err(err) = adapter.install(&mut sink) {
                     log::error!("zdroid_runtime_picker: BootstrapAdapter::install failed: {err:#}");
-                    let _ = tx.unbounded_send(format!("Install failed: {err:#}"));
+                    let _ = tx.unbounded_send(format!("ERROR: {err:#}"));
                 }
                 // tx + sink drop here â†’ channel closes â†’ foreground exits.
             })
@@ -268,7 +285,11 @@ impl RuntimePicker {
             use futures::StreamExt as _;
             while let Some(msg) = rx.next().await {
                 let _ = this.update(cx, |this, cx| {
-                    this.install_status = Some(msg);
+                    if let Some(error) = msg.strip_prefix("ERROR: ") {
+                        this.install_error = Some(error.to_string());
+                    } else {
+                        this.install_status = Some(msg);
+                    }
                     cx.notify();
                 });
             }
@@ -282,6 +303,12 @@ impl RuntimePicker {
     }
 
     fn select(&mut self, id: RuntimeId, _window: &mut Window, cx: &mut Context<Self>) {
+        if id == RuntimeId::ExternalTermux {
+            log::warn!(
+                "zdroid_runtime_picker: refusing External Termux selection until its stdio bridge is implemented"
+            );
+            return;
+        }
         if Some(id) == self.current {
             log::info!("zdroid_runtime_picker: {:?} already active; no-op", id);
             return;
@@ -355,6 +382,7 @@ impl Render for RuntimePicker {
                     entry,
                     self.current,
                     self.install_status.as_deref(),
+                    self.install_error.as_deref(),
                     compact,
                     cx,
                 )
@@ -403,7 +431,7 @@ impl Render for RuntimePicker {
             .w_full()
             .p_6()
             .gap_4()
-            .when(compact, |this| this.p_4())
+            .when(compact, |this| this.p_3().gap_3())
             .bg(bg)
             .when(cfg!(target_os = "macos"), |this| this.pt_10())
             .child(
@@ -458,6 +486,7 @@ fn render_card(
     entry: &AdapterEntry,
     current: Option<RuntimeId>,
     install_status: Option<&str>,
+    install_error: Option<&str>,
     compact: bool,
     cx: &mut Context<RuntimePicker>,
 ) -> AnyElement {
@@ -480,12 +509,25 @@ fn render_card(
         HealthStatus::Misconfigured { reason } => Some(reason.clone()),
         HealthStatus::Failed { error } => Some(error.clone()),
     };
+    let detail = if id == RuntimeId::Bootstrap {
+        install_error
+            .map(|error| format!("Install failed: {error}"))
+            .or(detail)
+    } else {
+        detail
+    };
+    let detail_color = if id == RuntimeId::Bootstrap && install_error.is_some() {
+        Color::Error
+    } else {
+        Color::Muted
+    };
 
     h_flex()
         .id(("adapter-card", idx))
         .gap_4()
         .when(compact, |this| this.flex_col().items_start())
         .p_4()
+        .when(compact, |this| this.p_3().gap_3())
         .w_full()
         .border_1()
         .border_color(if is_current {
@@ -546,7 +588,7 @@ fn render_card(
                     this.child(
                         Label::new(Arc::<str>::from(detail))
                             .size(LabelSize::XSmall)
-                            .color(Color::Muted),
+                            .color(detail_color),
                     )
                 }),
         )
@@ -568,6 +610,7 @@ fn render_card(
                 // + reboot, re-open the picker and the gate flips to
                 // Healthy â†’ normal Select.
                 Button::new(("get-module", idx), "Get module")
+                    .when(compact, |this| this.full_width())
                     .end_icon(Icon::new(IconName::ArrowUpRight).size(IconSize::Small))
                     .on_click(cx.listener(|_, _, _, cx| {
                         cx.open_url(SPAWND_RELEASE_URL);
@@ -586,15 +629,22 @@ fn render_card(
                 // Healthy â†’ normal Select.
                 if let Some(status) = install_status {
                     Button::new(("installing", idx), status.to_string())
+                        .when(compact, |this| this.full_width())
                         .disabled(true)
                         .into_any_element()
                 } else {
                     Button::new(("install", idx), "Install")
+                        .when(compact, |this| this.full_width())
                         .on_click(cx.listener(|this, _, _, cx| {
                             this.install_bootstrap(cx);
                         }))
                         .into_any_element()
                 }
+            } else if id == RuntimeId::ExternalTermux {
+                Button::new(("external-termux-unavailable", idx), "Not available yet")
+                    .when(compact, |this| this.full_width())
+                    .disabled(true)
+                    .into_any_element()
             } else if is_current {
                 // Healthy AND the active selection â€” decorative confirm.
                 // The header already shows an "Active" Chip; this right-
@@ -605,6 +655,7 @@ fn render_card(
                     .into_any_element()
             } else {
                 Button::new(("select", idx), "Select")
+                    .when(compact, |this| this.full_width())
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.select(id, window, cx);
                     }))
@@ -649,7 +700,7 @@ fn build_entries() -> Vec<AdapterEntry> {
         },
         AdapterEntry {
             id: RuntimeId::ExternalTermux,
-            tagline: "Bridges to the user's installed Termux app via Intent IPC. Slowest path; uses the user's existing setup.",
+            tagline: "Planned integration with the installed Termux app. Interactive stdio bridging is not implemented yet.",
             health: termux_health,
         },
     ]
@@ -659,14 +710,14 @@ fn default_chroot_config() -> ChrootConfig {
     ChrootConfig {
         root: PathBuf::from("/data/local/nhsystem/kali-arm64"),
         home_bind: PathBuf::from("/zed"),
-        spawnd_socket: PathBuf::from("/data/data/com.zdroid.b/files/run/zd-spawn"),
+        spawnd_socket: PathBuf::from("/data/data/com.zdroid/files/run/zd-spawn"),
         su_path: PathBuf::from("/product/bin/su"),
     }
 }
 
 fn default_bootstrap_config() -> BootstrapConfig {
     BootstrapConfig {
-        prefix: PathBuf::from("/data/data/com.zdroid.b/files/usr"),
+        prefix: PathBuf::from("/data/data/com.zdroid/files/usr"),
         proot_rootfs: None,
         release_repo: "Dylanmurzello/zdroid-bootstrap".into(),
     }

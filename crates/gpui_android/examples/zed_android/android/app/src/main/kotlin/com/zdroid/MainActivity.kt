@@ -1,4 +1,4 @@
-﻿package com.zdroid
+package com.zdroid
 
 import android.Manifest
 import android.app.Activity
@@ -44,7 +44,7 @@ import java.io.FileOutputStream
 /// no-ops `launch()` when the host is in a non-STARTED lifecycle state,
 /// which is the typical case when the call comes from a JNI thread driven
 /// by gpui's render loop. AGDK's own SAF samples use the legacy path for
-/// the same reason â€” `GameActivity` forwards `onActivityResult` correctly
+/// the same reason — `GameActivity` forwards `onActivityResult` correctly
 /// to its Java host, and we get the result without any of the registry
 /// gating.
 ///
@@ -55,7 +55,7 @@ import java.io.FileOutputStream
 /// freeform chrome on devices that support it. See `multi_window.rs` and
 /// `ExtraWindowActivity.kt`.
 class MainActivity : GameActivity(), ImeHost {
-    /// MainActivity is always gpui's primary window â€” id 0.
+    /// MainActivity is always gpui's primary window — id 0.
     override val imeWindowId: Long = 0L
 
     @Suppress("unused")
@@ -109,6 +109,7 @@ class MainActivity : GameActivity(), ImeHost {
     private val splashHandler = Handler(Looper.getMainLooper())
     private var splashRemoved: Boolean = false
     private var importOverlay: FrameLayout? = null
+    private var openTreeImportsForeignProviders: Boolean = false
 
     /// Focusable invisible view that owns the IME `InputConnection`.
     /// Installed in `onCreate`. Rust signals show/hide via JNI calls
@@ -138,7 +139,7 @@ class MainActivity : GameActivity(), ImeHost {
     private var extraKeysView: ExtraKeysView? = null
     // Kotlin-side cache of `android_input.programming_extras_row`.
     // Defaults to false so a fresh Activity sits in the "row hidden"
-    // state until the Rustâ†’Kotlin push lands. The push runs on
+    // state until the Rust→Kotlin push lands. The push runs on
     // `runOnUiThread` which queues on the main looper; during boot
     // the main thread can be busy with language/theme init for
     // hundreds of ms, leaving a window where this field's value
@@ -202,7 +203,7 @@ class MainActivity : GameActivity(), ImeHost {
 
     /// Last ime-bottom inset value observed by the listener.
     /// Listener fires on every inset change; we only treat the
-    /// transition `positive â†’ 0` as a real hide event (which can
+    /// transition `positive → 0` as a real hide event (which can
     /// distinguish user-dismiss vs programmatic). A steady-state 0
     /// reading before/during a show animation must not be confused
     /// with a hide.
@@ -282,7 +283,7 @@ class MainActivity : GameActivity(), ImeHost {
     /// a focus session does the real work; repeats are filtered.
     /// Suppressed entirely when the user has manually dismissed the
     /// IME (see [toggleIme] + the WindowInsets listener installed
-    /// in [onCreate]) â€” the user can re-summon via the pane keyboard
+    /// in [onCreate]) — the user can re-summon via the pane keyboard
     /// toggle button or by tapping into a different text target
     /// (which triggers `restartImeForTarget` and clears the flag).
     @Suppress("unused")
@@ -333,7 +334,7 @@ class MainActivity : GameActivity(), ImeHost {
             if (!imeShown) return@runOnUiThread
             programmaticHidePending = true
             // Use WindowInsetsControllerCompat over
-            // `imm.hideSoftInputFromWindow` â€” the Android docs flag
+            // `imm.hideSoftInputFromWindow` — the Android docs flag
             // the latter as racy when focus / window-token state is
             // mid-transition (the documented "first call silently
             // fails, second call works" symptom). InsetsController
@@ -352,7 +353,7 @@ class MainActivity : GameActivity(), ImeHost {
     /// - [toggleIme] when the user taps the pane keyboard button
     ///   to bring the IME back up,
     /// - any `restartImeForTarget` call (focus moved to a different
-    ///   input target â€” fresh context, fresh auto-show budget).
+    ///   input target — fresh context, fresh auto-show budget).
     @Volatile
     private var imeManuallyDismissed: Boolean = false
 
@@ -378,7 +379,7 @@ class MainActivity : GameActivity(), ImeHost {
                 textInputActive = false
                 Log.i("zdroid_ime", "toggleIme: hiding (manual dismiss)")
                 programmaticHidePending = true
-                // Modern hide path â€” see hideIme rationale. Sidesteps
+                // Modern hide path — see hideIme rationale. Sidesteps
                 // the `hideSoftInputFromWindow` first-call race that
                 // produced the two-taps-to-dismiss regression.
                 androidx.core.view.WindowInsetsControllerCompat(window, window.decorView)
@@ -393,7 +394,7 @@ class MainActivity : GameActivity(), ImeHost {
         }
     }
 
-    /// IME state mirror â€” written by Rust after every commit /
+    /// IME state mirror — written by Rust after every commit /
     /// compose / delete via [updateImeTextState], read by
     /// [ZdroidInputConnection]'s `getTextBeforeCursor` /
     /// `getTextAfterCursor` / `getSelectedText` /
@@ -410,7 +411,7 @@ class MainActivity : GameActivity(), ImeHost {
     ///   Disables composition + autocorrect; each keystroke commits
     ///   directly so the PTY sees normal hardware-keyboard semantics.
     /// - `ImeInputMode.CODE_EDITOR`: NO_SUGGESTIONS + IME_MULTI_LINE
-    ///   without VISIBLE_PASSWORD â€” kills autocorrect for code
+    ///   without VISIBLE_PASSWORD — kills autocorrect for code
     ///   tokens but preserves composition for CJK input.
     ///
     /// `@Volatile`: Rust JNI thread writes via [restartImeForTarget]
@@ -436,7 +437,7 @@ class MainActivity : GameActivity(), ImeHost {
     /// Effect: `InputMethodManager.restartInput(imeHostView)` causes
     /// the framework to invoke `imeHostView.onCreateInputConnection`
     /// again with a fresh `EditorInfo`, and the IME service receives
-    /// `onFinishInput` + `onStartInput(restarting=true)` â€” dropping
+    /// `onFinishInput` + `onStartInput(restarting=true)` — dropping
     /// any in-flight composition state that was anchored to the
     /// outgoing target. This is the canonical pattern the Android
     /// developer guide endorses for "one host view, multiple logical
@@ -458,7 +459,7 @@ class MainActivity : GameActivity(), ImeHost {
             )
             currentImeMode = modeId
             updateExtrasRowVisibility()
-            // Focus moved to a different input target â€” fresh
+            // Focus moved to a different input target — fresh
             // auto-show budget. Any prior manual dismiss applied
             // to the outgoing target, not this one.
             setImeManuallyDismissed(false)
@@ -472,7 +473,7 @@ class MainActivity : GameActivity(), ImeHost {
     /// Push the current editor text + selection across to Kotlin so
     /// the IME's queries return real values. Rust calls this after
     /// every text change. We also fire `InputMethodManager.updateSelection`
-    /// so Gboard / Swiftkey / etc. know the cursor moved â€” without
+    /// so Gboard / Swiftkey / etc. know the cursor moved — without
     /// this, they re-confirm by sending the same composition twice
     /// (the duplicate-letter bug). All offsets are UTF-16 code-unit
     /// positions in the full document; `windowStart` is where `text`
@@ -513,7 +514,7 @@ class MainActivity : GameActivity(), ImeHost {
                 onZedReady()
                 return
             }
-            // 32ms = ~30Hz polling. Splash boot waits 2â€“30s typically,
+            // 32ms = ~30Hz polling. Splash boot waits 2–30s typically,
             // so per-frame polling is overkill; 30Hz keeps the
             // animation smooth and the wake budget low.
             splashHandler.postDelayed(this, 32L)
@@ -523,17 +524,30 @@ class MainActivity : GameActivity(), ImeHost {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         installSplashOverlay()
+        AgentForegroundService.ensureNotificationChannels(this)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+            ContextCompat.checkSelfPermission(
+                this,
+                Manifest.permission.POST_NOTIFICATIONS,
+            ) != PackageManager.PERMISSION_GRANTED
+        ) {
+            ActivityCompat.requestPermissions(
+                this,
+                arrayOf(Manifest.permission.POST_NOTIFICATIONS),
+                REQ_NOTIFICATION_PERMISSION,
+            )
+        }
         // Edge-to-edge: tell the OS we want to draw behind status / nav bars
         // and the cutout area, so gpui's surface gets the full display
         // bounds. Without this, GameActivity respects system insets and the
-        // ANativeWindow we render into is shorter than the screen â€” visible
+        // ANativeWindow we render into is shorter than the screen — visible
         // as letterboxing under the status bar / above the nav bar on
         // 1080x2340 phones (Mi 10) and notch-cropping on tablets.
         //
         // We also hide the system bars by default and set
         // BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE so a downward swipe
         // temporarily reveals the status bar (notifications) without
-        // leaving the editor â€” same UX a native desktop editor gives on
+        // leaving the editor — same UX a native desktop editor gives on
         // Wayland/macOS.
         WindowCompat.setDecorFitsSystemWindows(window, false)
         WindowInsetsControllerCompat(window, window.decorView).apply {
@@ -559,7 +573,7 @@ class MainActivity : GameActivity(), ImeHost {
         // us. Without this, our `imeShown` flag and the OS's actual
         // visibility drift, and the user-dismiss intent is lost the
         // next time text-input focus reasserts (auto-show pops the
-        // keyboard back up â€” exactly the annoyance the user reported).
+        // keyboard back up — exactly the annoyance the user reported).
         //
         // Mechanism: the `ime()` inset goes from non-zero to zero
         // whenever the IME closes. We compare to `programmaticHidePending`
@@ -573,12 +587,12 @@ class MainActivity : GameActivity(), ImeHost {
             val nowVisible = imeBottom > 0
 
             if (!wasVisible && nowVisible) {
-                // 0 â†’ positive: IME just opened. Confirms a show.
+                // 0 → positive: IME just opened. Confirms a show.
                 programmaticShowPending = false
                 if (!imeShown) setImeShown(true)
                 Log.i("zdroid_ime", "WindowInsets: IME shown (inset bottom=$imeBottom)")
             } else if (wasVisible && !nowVisible) {
-                // positive â†’ 0: IME just closed. Distinguish source.
+                // positive → 0: IME just closed. Distinguish source.
                 if (programmaticHidePending) {
                     programmaticHidePending = false
                     Log.i(
@@ -598,12 +612,12 @@ class MainActivity : GameActivity(), ImeHost {
             }
             // Steady-state (no transition, e.g. inset stays 0 during
             // a show that hasn't animated yet, or stays positive
-            // during typing) â€” do nothing. The previous bug was firing
+            // during typing) — do nothing. The previous bug was firing
             // "user dismissed" on the steady-state-0 reading right
             // after our show call, before the animation had started.
 
             // Edge-to-edge (setDecorFitsSystemWindows=false) means the
-            // OS does NOT auto-translate content above the IME â€” the
+            // OS does NOT auto-translate content above the IME — the
             // IME draws over the bottom of our surface. Any view with
             // gravity=BOTTOM (the ExtraKeysView) would sit at the
             // screen bottom and be hidden behind the keyboard. Apply
@@ -638,7 +652,7 @@ class MainActivity : GameActivity(), ImeHost {
         // (decorView's) on top of decorView as a fallback. Setting on
         // both is harmless; whichever the system dispatches to wins.
         // Captured pointer events route through `onGenericMotionEvent`
-        // on the Activity (overridden below) â€” Moonlight's pattern.
+        // on the Activity (overridden below) — Moonlight's pattern.
         // Avoids the View-level captured-pointer listener path which
         // requires manipulating SurfaceView focus state and on Samsung
         // One UI triggers the accessibility tint + key dispatch
@@ -694,7 +708,7 @@ class MainActivity : GameActivity(), ImeHost {
         }
     }
 
-    /// True while Rust's `TRACKPAD_MODE_ENABLED` atomic is set â€”
+    /// True while Rust's `TRACKPAD_MODE_ENABLED` atomic is set —
     /// touch-screen virtual trackpad mode is on. Drives the
     /// SurfaceControl cursor overlay's visibility independently
     /// from the hardware-pointer-capture path (the two are OR'd:
@@ -777,7 +791,7 @@ class MainActivity : GameActivity(), ImeHost {
         // dispatchTouchEvent, dispatchKeyEvent, setTrackpadModeActive)
         // and applied by `applyCursorVisibility`. Focus cycles (IME
         // show/hide, dialog open/close) trigger this callback but
-        // shouldn't change what the user sees â€” if they were in
+        // shouldn't change what the user sees — if they were in
         // touch mode the cursor stays hidden across the cycle. The
         // call below re-applies the existing modality state to the
         // freshly-built overlay so a rebuild ends up in the right
@@ -848,7 +862,7 @@ class MainActivity : GameActivity(), ImeHost {
     /// overlay covers the SurfaceView's default-black buffer + the
     /// wgpu boot latency, so the user sees a continuous animation
     /// from cold start through to the editor's first frame instead
-    /// of icon â†’ black â†’ editor.
+    /// of icon → black → editor.
     ///
     /// Why a sibling View overlay rather than a separate
     /// SplashActivity:
@@ -1268,9 +1282,10 @@ class MainActivity : GameActivity(), ImeHost {
         }
     }
 
-    fun launchOpenTree() {
-        Log.i(TAG, "launchOpenTree() invoked")
+    fun launchOpenTree(importForeignProviders: Boolean) {
+        Log.i(TAG, "launchOpenTree(importForeignProviders=$importForeignProviders) invoked")
         runOnUiThread {
+            openTreeImportsForeignProviders = importForeignProviders
             val intent = Intent(Intent.ACTION_OPEN_DOCUMENT_TREE).apply {
                 addFlags(
                     Intent.FLAG_GRANT_READ_URI_PERMISSION or
@@ -1292,6 +1307,7 @@ class MainActivity : GameActivity(), ImeHost {
                 Log.i(TAG, "startActivityForResult OPEN_DOCUMENT_TREE dispatched")
             } catch (t: Throwable) {
                 Log.e(TAG, "OPEN_DOCUMENT_TREE dispatch threw", t)
+                openTreeImportsForeignProviders = false
                 onPickerResult("")
             }
         }
@@ -1349,7 +1365,7 @@ class MainActivity : GameActivity(), ImeHost {
     /// string. The Rust side writes them to /sdcard/.zed/r in resolv.conf
     /// format so Bun-compiled CLIs (whose c-ares is patched to read from
     /// /sdcard/.zed/r) can do DNS without proot. Falls back to empty
-    /// string if no active network â€” caller layers in public-DNS defaults.
+    /// string if no active network — caller layers in public-DNS defaults.
     @Suppress("unused") // called from Rust via JNI
     fun getActiveDnsServers(): String {
         val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
@@ -1385,7 +1401,7 @@ class MainActivity : GameActivity(), ImeHost {
     ///
     /// Returns true on a successful intent dispatch (the installer UI
     /// will then take over and prompt the user). Returns false if the
-    /// file is missing or the installer can't be started â€” Rust logs
+    /// file is missing or the installer can't be started — Rust logs
     /// the failure but doesn't retry.
     @Suppress("unused") // called from Rust via JNI
     fun launchPackageInstaller(apkPath: String): Boolean {
@@ -1397,7 +1413,7 @@ class MainActivity : GameActivity(), ImeHost {
         return try {
             val uri = FileProvider.getUriForFile(
                 this,
-                "com.zdroid.b.updater.fileprovider",
+                "com.zdroid.updater.fileprovider",
                 file,
             )
             val intent = Intent(Intent.ACTION_VIEW).apply {
@@ -1428,7 +1444,7 @@ class MainActivity : GameActivity(), ImeHost {
     /// We've declared every config-change axis we care about in
     /// AndroidManifest.xml (`android:configChanges="orientation|...|
     /// uiMode|fontScale|..."`), so rotation, DeX, dark-mode flips, etc.
-    /// don't destroy the Activity in the first place â€” those keep the
+    /// don't destroy the Activity in the first place — those keep the
     /// process and Activity continuous, no re-entry. The only paths that
     /// reach `onDestroy` are genuine teardowns: user closed the app,
     /// system killed for memory, finishAndRemoveTask. For those, killing
@@ -1437,7 +1453,7 @@ class MainActivity : GameActivity(), ImeHost {
     override fun onDestroy() {
         selectionOverlay?.destroy()
         selectionOverlay = null
-        Log.i(TAG, "onDestroy isFinishing=$isFinishing â€” exiting process for clean restart")
+        Log.i(TAG, "onDestroy isFinishing=$isFinishing — exiting process for clean restart")
         splashHandler.removeCallbacksAndMessages(null)
         cursorOverlay?.release()
         cursorOverlay = null
@@ -1452,6 +1468,11 @@ class MainActivity : GameActivity(), ImeHost {
         grantResults: IntArray,
     ) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode == REQ_NOTIFICATION_PERMISSION) {
+            val granted = grantResults.firstOrNull() == PackageManager.PERMISSION_GRANTED
+            Log.i(TAG, "Agent notification permission granted=$granted")
+            return
+        }
         if (requestCode != REQ_STORAGE_PERMS) {
             return
         }
@@ -1468,6 +1489,9 @@ class MainActivity : GameActivity(), ImeHost {
         }
         if (resultCode != Activity.RESULT_OK) {
             Log.i(TAG, "picker cancelled (req=$requestCode resultCode=$resultCode)")
+            if (requestCode == REQ_OPEN_TREE) {
+                openTreeImportsForeignProviders = false
+            }
             onPickerResult("")
             return
         }
@@ -1483,7 +1507,12 @@ class MainActivity : GameActivity(), ImeHost {
                 Log.w(TAG, "takePersistableUriPermission failed", t)
             }
         }
-        if (requestCode == REQ_OPEN_TREE && uri != null && !isDirectlyAccessibleTree(uri)) {
+        val shouldImportTree = requestCode == REQ_OPEN_TREE &&
+            openTreeImportsForeignProviders &&
+            uri != null &&
+            !isDirectlyAccessibleTree(uri)
+        openTreeImportsForeignProviders = false
+        if (shouldImportTree) {
             importAndReturnTree(uri)
         } else {
             onPickerResult(uri?.toString() ?: "")
@@ -1498,7 +1527,7 @@ class MainActivity : GameActivity(), ImeHost {
      */
     private fun isDirectlyAccessibleTree(uri: Uri): Boolean =
         uri.authority == "com.android.externalstorage.documents" ||
-            uri.authority == "com.zdroid.b.documents"
+            uri.authority == "com.zdroid.documents"
 
     /** Import a foreign SAF tree into Zdroid's private home, then return it
      * through our own provider URI so the Rust side can open it normally. */
@@ -1512,7 +1541,7 @@ class MainActivity : GameActivity(), ImeHost {
                 runOnUiThread {
                     Toast.makeText(this, "Project imported", Toast.LENGTH_SHORT).show()
                 }
-                onPickerResult("content://com.zdroid.b.documents/tree/$encodedPath")
+                onPickerResult("content://com.zdroid.documents/tree/$encodedPath")
             } catch (t: Throwable) {
                 Log.e(TAG, "Failed to import SAF tree $treeUri", t)
                 runOnUiThread {
@@ -1617,6 +1646,7 @@ class MainActivity : GameActivity(), ImeHost {
         private const val REQ_OPEN_TREE = 0xA1
         private const val REQ_CREATE_DOCUMENT = 0xA2
         private const val REQ_STORAGE_PERMS = 0xA3
+        private const val REQ_NOTIFICATION_PERMISSION = 0xA4
         private const val REQ_AGENT_NOTIFICATIONS = 0xA4
         /// Software cursor side length in dp. Scaled by display
         /// density at instantiation time to give the sprite a

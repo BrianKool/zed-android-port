@@ -25,9 +25,10 @@ set -eu
 # back to the wrapper symlinks and recursing.
 export PATH=/data/data/com.zdroid/files/usr/bin:/system/bin:/system/xbin
 
-PREFIX=/data/data/com.zdroid/files/usr
-ZD_RUNTIME_DIR="$PREFIX/zd-runtime"
-ZD_EXEC="$PREFIX/bin/zd-exec"
+APP_FILES=/data/data/com.zdroid/files
+PREFIX="$APP_FILES/usr"
+ZD_RUNTIME_DIR="$APP_FILES/zd-runtime"
+ZD_EXEC="$APP_FILES/bin/zd-exec"
 CONF="$PREFIX/etc/zd-runtime.conf"
 
 # Defaults (mirrors zd-exec).

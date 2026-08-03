@@ -1,4 +1,4 @@
-﻿//! Chroot adapter â€” talks to `zd-spawnd` over a Unix socket.
+//! Chroot adapter â€” talks to `zd-spawnd` over a Unix socket.
 //!
 //! Per-spawn cost: one connect (~1ms) + one sendmsg with `SCM_RIGHTS`
 //! (~1ms) + the daemon's fork/chroot/exec (~3ms). About 5ms total
@@ -87,7 +87,7 @@ mod android_impl {
         req: &SpawnRequest,
     ) -> Result<()> {
         // Symmetric bind (zd-spawnd v1.1.6+): host's
-        // `/data/data/com.zdroid.b/files` is bound onto the same path
+        // `/data/data/com.zdroid/files` is bound onto the same path
         // inside the chroot, and `/data/user/0/com.zdroid ->
         // /data/data/com.zdroid` is a symlink in the rootfs. Any
         // host path Zed produces resolves to the same inode whether
@@ -182,14 +182,8 @@ mod android_impl {
         let dummy = [0u8; 1];
         let iov = [std::io::IoSlice::new(&dummy)];
         let cmsgs = [ControlMessage::ScmRights(&req.stdio)];
-        sendmsg::<()>(
-            conn.as_raw_fd(),
-            &iov,
-            &cmsgs,
-            MsgFlags::empty(),
-            None,
-        )
-        .context("sendmsg with SCM_RIGHTS for stdio fds")?;
+        sendmsg::<()>(conn.as_raw_fd(), &iov, &cmsgs, MsgFlags::empty(), None)
+            .context("sendmsg with SCM_RIGHTS for stdio fds")?;
 
         Ok(())
     }
@@ -309,7 +303,7 @@ mod android_impl {
 
     // Path-translation helpers (translate_arg_for_chroot,
     // translate_cwd_for_chroot, APP_HOMES) were deleted in zd-spawnd
-    // v1.1.6. The symmetric bind-mount (host's `/data/data/com.zdroid.b/
+    // v1.1.6. The symmetric bind-mount (host's `/data/data/com.zdroid/
     // files` onto the same path inside the chroot, plus the
     // `/data/user/0/com.zdroid -> /data/data/com.zdroid` alias
     // symlink in the rootfs) makes host paths resolve identically
@@ -331,8 +325,8 @@ mod android_impl {
     /// the Termux-divestment refactor relocated this off `$PREFIX/usr/`
     /// to the bare `<data>/files/zd-runtime/`.
     const ZD_RUNTIME_DIRS: &[&str] = &[
-        "/data/data/com.zdroid.b/files/zd-runtime/",
-        "/data/user/0/com.zdroid.b/files/zd-runtime/",
+        "/data/data/com.zdroid/files/zd-runtime/",
+        "/data/user/0/com.zdroid/files/zd-runtime/",
     ];
 
     /// If `s` is a zd-runtime path (starts with one of [`ZD_RUNTIME_DIRS`]
@@ -424,10 +418,7 @@ mod android_impl {
         }
     }
 
-    pub(super) fn spawn(
-        config: &ChrootConfig,
-        req: SpawnRequest,
-    ) -> Result<Box<dyn SpawnHandle>> {
+    pub(super) fn spawn(config: &ChrootConfig, req: SpawnRequest) -> Result<Box<dyn SpawnHandle>> {
         let mut conn = connect(&config.spawnd_socket)?;
         send_request(&mut conn, config, &req)?;
         let _pid = read_spawned_response(&mut conn)?;
@@ -449,11 +440,13 @@ mod android_impl {
                 }
             }
             Err(e) => super::HealthStatus::Failed {
-                error: format!("connect zd-spawnd at {}: {e}", config.spawnd_socket.display()),
+                error: format!(
+                    "connect zd-spawnd at {}: {e}",
+                    config.spawnd_socket.display()
+                ),
             },
         }
     }
-
 }
 
 impl RuntimeProvider for ChrootAdapter {
@@ -514,7 +507,7 @@ impl RuntimeProvider for ChrootAdapter {
         //
         //   1. Must live inside the bind-mount source so the same bytes
         //      are reachable inside the chroot. The daemon binds
-        //      `/data/data/com.zdroid.b/files/home` onto `/zed`, so a
+        //      `/data/data/com.zdroid/files/home` onto `/zed`, so a
         //      file at `<this>/extensions/foo` on host is visible at
         //      `/zed/.zed-env/chroot/extensions/foo` inside the chroot.
         //      The adapter's argv-translation rewrites host paths in
@@ -526,16 +519,14 @@ impl RuntimeProvider for ChrootAdapter {
         //      shouldn't drop `languages/`, `extensions/`, `db/` etc.
         //      tree-roots at the top level of their home.
         //
-        // Hardcoded to `/data/data/com.zdroid.b/files/home/.zed-env/
-        // chroot`. Lives under `/data/data/com.zdroid.b/files`, which
+        // Hardcoded to `/data/data/com.zdroid/files/home/.zed-env/
+        // chroot`. Lives under `/data/data/com.zdroid/files`, which
         // zd-spawnd v1.1.6+ symmetrically bind-mounts onto the same
         // path inside the chroot â€” so this exact byte string resolves
         // to the same inode whether the resolver runs on host bionic
         // or inside the chroot. No translation. Future: thread the
         // path through config so the user can pick a non-default root.
-        std::path::PathBuf::from(
-            "/data/data/com.zdroid.b/files/home/.zed-env/chroot",
-        )
+        std::path::PathBuf::from("/data/data/com.zdroid/files/home/.zed-env/chroot")
     }
 
     fn list_binaries(&self) -> Vec<String> {
@@ -551,8 +542,7 @@ impl RuntimeProvider for ChrootAdapter {
         // doesn't care about discovery order, we collapse duplicates
         // into a set. The chroot's own internal PATH order applies on
         // the daemon side when execvpe resolves the binary.
-        let mut names: std::collections::BTreeSet<String> =
-            std::collections::BTreeSet::new();
+        let mut names: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
         for sub in ["usr/bin", "usr/local/bin", "usr/sbin", "bin", "sbin"] {
             let dir = self.config.root.join(sub);
             match std::fs::read_dir(&dir) {
@@ -607,7 +597,10 @@ impl RuntimeProvider for ChrootAdapter {
             // the rootfs.
             ("HOME".into(), EnvOp::Set(data_path.as_os_str().to_owned())),
             // Generic non-Termux tmp dir under the app sandbox.
-            ("TMPDIR".into(), EnvOp::Set(data_path.join("tmp").into_os_string())),
+            (
+                "TMPDIR".into(),
+                EnvOp::Set(data_path.join("tmp").into_os_string()),
+            ),
             ("TERM".into(), EnvOp::Set(OsString::from("xterm-256color"))),
             ("COLORTERM".into(), EnvOp::Set(OsString::from("truecolor"))),
             ("LANG".into(), EnvOp::Set(OsString::from("en_US.UTF-8"))),
@@ -616,7 +609,10 @@ impl RuntimeProvider for ChrootAdapter {
             // compiling rust on the device is never viable on Android
             // and forcing the CDN-or-existing-on-remote path keeps
             // the SSH transport behavior the same as desktop Zed.
-            ("ZED_BUILD_REMOTE_SERVER".into(), EnvOp::Set(OsString::from("never"))),
+            (
+                "ZED_BUILD_REMOTE_SERVER".into(),
+                EnvOp::Set(OsString::from("never")),
+            ),
             // No bootstrap libtermux-exec.so in chroot mode; if some
             // ancestor shell leaked LD_PRELOAD, drop it so remote
             // SSH subprocesses don't spam `cannot be preloaded` on
@@ -629,7 +625,10 @@ impl RuntimeProvider for ChrootAdapter {
             ("PATH".into(), EnvOp::Set(new_path)),
             // SHELL points at zd-exec so the integrated terminal
             // lands inside the rootfs via the same wrapper.
-            ("SHELL".into(), EnvOp::Set(bin.join("zd-exec").into_os_string())),
+            (
+                "SHELL".into(),
+                EnvOp::Set(bin.join("zd-exec").into_os_string()),
+            ),
         ]
     }
 

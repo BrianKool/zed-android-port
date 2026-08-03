@@ -1,4 +1,4 @@
-﻿<?xml version="1.0" encoding="utf-8"?>
+<?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
     <uses-feature android:name="android.hardware.vulkan.version" android:required="false"/>
 
@@ -6,12 +6,12 @@
       READ_EXTERNAL_STORAGE + WRITE_EXTERNAL_STORAGE are the legacy storage
       grants. They're still real permissions (dangerous, runtime-prompted)
       at targetSdk=28; the Settings dialog or our requestStoragePermissions()
-      JNI call gates them. MANAGE_EXTERNAL_STORAGE was dropped â€” that's an
+      JNI call gates them. MANAGE_EXTERNAL_STORAGE was dropped — that's an
       API 30+ scoped-storage escape hatch that has no effect at targetSdk=28.
-      `requestLegacyExternalStorage` was also dropped â€” it's an API 29 opt-in
+      `requestLegacyExternalStorage` was also dropped — it's an API 29 opt-in
       flag that's a no-op for us.
     -->
-    <!-- Required for any HTTP/HTTPS â€” Zed's HTTP client, plus all Termux
+    <!-- Required for any HTTP/HTTPS — Zed's HTTP client, plus all Termux
          subprocesses (apt, pkg, curl, git, npm, etc.). Implicit pre-API 23,
          explicit after. -->
     <uses-permission android:name="android.permission.INTERNET"/>
@@ -81,7 +81,7 @@
             android:exported="false"
             android:resizeableActivity="true"
             android:documentLaunchMode="always"
-            android:taskAffinity="com.zdroid.b.extra"
+            android:taskAffinity="com.zdroid.extra"
             android:windowLayoutInDisplayCutoutMode="always"
             android:configChanges="orientation|screenSize|smallestScreenSize|screenLayout|density|keyboard|keyboardHidden|navigation|uiMode|colorMode|fontScale|fontWeightAdjustment|layoutDirection|locale|mcc|mnc|touchscreen"
             android:windowSoftInputMode="adjustResize|stateAlwaysHidden"/>
@@ -90,7 +90,7 @@
           Exposes Zed's home dir as a SAF root so other apps can browse
           / share files from `~` via the system DocumentsUI picker. Same
           pattern Termux uses. `android.permission.MANAGE_DOCUMENTS` is
-          system-only â€” only the system's DocumentsUI can talk to us
+          system-only — only the system's DocumentsUI can talk to us
           directly; user-level apps reach our root by selecting it in the
           picker. `grantUriPermissions=true` lets the picker hand a
           time-limited URI grant to whatever app the user picks the file
@@ -98,7 +98,7 @@
         -->
         <provider
             android:name="com.zdroid.ZedDocumentsProvider"
-            android:authorities="com.zdroid.b.documents"
+            android:authorities="com.zdroid.documents"
             android:exported="true"
             android:grantUriPermissions="true"
             android:permission="android.permission.MANAGE_DOCUMENTS">
@@ -116,7 +116,7 @@
              DocumentsProvider above. -->
         <provider
             android:name="androidx.core.content.FileProvider"
-            android:authorities="com.zdroid.b.updater.fileprovider"
+            android:authorities="com.zdroid.updater.fileprovider"
             android:exported="false"
             android:grantUriPermissions="true">
             <meta-data

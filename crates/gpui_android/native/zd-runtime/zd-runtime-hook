@@ -19,7 +19,7 @@ set -u
 # Path to zd-exec on the host. Symlinks point here as byte strings;
 # they only need to resolve outside the chroot (where Zed does its
 # PATH lookup), and that's where /data/data/com.zdroid/... exists.
-ZD_EXEC=/data/data/com.zdroid/files/usr/bin/zd-exec
+ZD_EXEC=/data/data/com.zdroid/files/bin/zd-exec
 ZD_RUNTIME=/zed-runtime
 
 # If the bind-mount isn't in place, the host hasn't entered the chroot

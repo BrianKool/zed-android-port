@@ -70,17 +70,14 @@ pub fn install_latest(
     if let Ok(existing) = fs::read_to_string(&version_file)
         && existing.trim() == tag_name
     {
-        log::info!(
-            "bootstrap_install: $PREFIX already at {tag_name}, skipping extract"
-        );
+        log::info!("bootstrap_install: $PREFIX already at {tag_name}, skipping extract");
         progress.step(&format!("Bootstrap {tag_name} already installed"));
         return Ok(());
     }
 
     progress.step(&format!("Downloading bootstrap {tag_name}"));
-    let zip_bytes = download_bootstrap_asset(release_repo, &tag_name).with_context(|| {
-        format!("download bootstrap asset for {release_repo} tag {tag_name}")
-    })?;
+    let zip_bytes = download_bootstrap_asset(release_repo, &tag_name, progress)
+        .with_context(|| format!("download bootstrap asset for {release_repo} tag {tag_name}"))?;
     log::info!(
         "bootstrap_install: downloaded {} bytes for tag {}",
         zip_bytes.len(),
@@ -130,19 +127,14 @@ fn resolve_latest_tag(release_repo: &str) -> Result<String> {
         Err(ureq::Error::Status(_, resp)) => resp,
         Err(e) => return Err(anyhow!("HTTP GET {url}: {e}")),
     };
-    let location = resp.header("Location").ok_or_else(|| {
-        anyhow!(
-            "no Location header on {url}; got status {}",
-            resp.status()
-        )
-    })?;
+    let location = resp
+        .header("Location")
+        .ok_or_else(|| anyhow!("no Location header on {url}; got status {}", resp.status()))?;
     let marker = "/releases/tag/";
     let after = location.find(marker).map(|i| &location[i + marker.len()..]);
     let tag = after
         .and_then(|s| s.split('/').next().filter(|t| !t.is_empty()))
-        .ok_or_else(|| {
-            anyhow!("expected `/releases/tag/<tag>` in Location {location}")
-        })?;
+        .ok_or_else(|| anyhow!("expected `/releases/tag/<tag>` in Location {location}"))?;
     Ok(tag.to_owned())
 }
 
@@ -157,15 +149,16 @@ fn resolve_latest_tag(release_repo: &str) -> Result<String> {
 /// first asset whose name matches `<ASSET_NAME_PREFIX>*<ASSET_NAME_SUFFIX>`.
 /// One API request, eats one quota slot from the 60-req/hour limit,
 /// but kicks in only when uploads landed under a non-canonical name.
-fn download_bootstrap_asset(release_repo: &str, tag: &str) -> Result<Vec<u8>> {
-    let canonical_url = format!(
-        "https://github.com/{release_repo}/releases/download/{tag}/{RELEASE_ASSET_NAME}"
-    );
-    match fetch_asset_bytes(&canonical_url) {
+fn download_bootstrap_asset(
+    release_repo: &str,
+    tag: &str,
+    progress: &mut dyn ProgressSink,
+) -> Result<Vec<u8>> {
+    let canonical_url =
+        format!("https://github.com/{release_repo}/releases/download/{tag}/{RELEASE_ASSET_NAME}");
+    match fetch_asset_bytes(&canonical_url, progress) {
         Ok(bytes) => {
-            log::info!(
-                "bootstrap_install: fetched canonical asset {RELEASE_ASSET_NAME}"
-            );
+            log::info!("bootstrap_install: fetched canonical asset {RELEASE_ASSET_NAME}");
             Ok(bytes)
         }
         Err(FetchError::NotFound) => {
@@ -174,11 +167,10 @@ fn download_bootstrap_asset(release_repo: &str, tag: &str) -> Result<Vec<u8>> {
                  falling back to API asset enumeration"
             );
             let alt_name = find_alt_asset_name(release_repo, tag)?;
-            let alt_url = format!(
-                "https://github.com/{release_repo}/releases/download/{tag}/{alt_name}"
-            );
+            let alt_url =
+                format!("https://github.com/{release_repo}/releases/download/{tag}/{alt_name}");
             log::info!("bootstrap_install: fetching alt asset {alt_name}");
-            match fetch_asset_bytes(&alt_url) {
+            match fetch_asset_bytes(&alt_url, progress) {
                 Ok(bytes) => Ok(bytes),
                 Err(FetchError::NotFound) => Err(anyhow!(
                     "asset {alt_name} present in API listing but returned 404 on download"
@@ -195,7 +187,10 @@ enum FetchError {
     Other(anyhow::Error),
 }
 
-fn fetch_asset_bytes(url: &str) -> std::result::Result<Vec<u8>, FetchError> {
+fn fetch_asset_bytes(
+    url: &str,
+    progress: &mut dyn ProgressSink,
+) -> std::result::Result<Vec<u8>, FetchError> {
     let resp = ureq::get(url)
         .set("User-Agent", "zdroid-bootstrap-installer")
         .call();
@@ -208,10 +203,20 @@ fn fetch_asset_bytes(url: &str) -> std::result::Result<Vec<u8>, FetchError> {
         .header("Content-Length")
         .and_then(|s| s.parse::<usize>().ok())
         .unwrap_or(0);
+    let total = cap as u64;
     let mut buf = Vec::with_capacity(cap);
-    resp.into_reader()
-        .read_to_end(&mut buf)
-        .map_err(|e| FetchError::Other(anyhow!("read body from {url}: {e}")))?;
+    let mut reader = resp.into_reader();
+    let mut chunk = [0u8; 128 * 1024];
+    loop {
+        let read = reader
+            .read(&mut chunk)
+            .map_err(|e| FetchError::Other(anyhow!("read body from {url}: {e}")))?;
+        if read == 0 {
+            break;
+        }
+        buf.extend_from_slice(&chunk[..read]);
+        progress.progress(buf.len() as u64, total);
+    }
     Ok(buf)
 }
 
@@ -230,13 +235,9 @@ fn find_alt_asset_name(release_repo: &str, tag: &str) -> Result<String> {
     let candidates = parse_asset_names(&body);
     candidates
         .into_iter()
-        .find(|name| {
-            name.starts_with(ASSET_NAME_PREFIX) && name.ends_with(ASSET_NAME_SUFFIX)
-        })
+        .find(|name| name.starts_with(ASSET_NAME_PREFIX) && name.ends_with(ASSET_NAME_SUFFIX))
         .ok_or_else(|| {
-            anyhow!(
-                "release {tag} has no asset matching {ASSET_NAME_PREFIX}*{ASSET_NAME_SUFFIX}"
-            )
+            anyhow!("release {tag} has no asset matching {ASSET_NAME_PREFIX}*{ASSET_NAME_SUFFIX}")
         })
 }
 
@@ -291,9 +292,8 @@ fn swap_staging_into_prefix(staging: &Path, prefix: &Path) -> Result<()> {
         fs::remove_dir_all(prefix)
             .with_context(|| format!("wipe old prefix at {}", prefix.display()))?;
     }
-    fs::rename(staging, prefix).with_context(|| {
-        format!("rename {} -> {}", staging.display(), prefix.display())
-    })?;
+    fs::rename(staging, prefix)
+        .with_context(|| format!("rename {} -> {}", staging.display(), prefix.display()))?;
     Ok(())
 }
 
@@ -352,8 +352,7 @@ fn extract_entries<R: Read + std::io::Seek>(
         std::io::copy(&mut entry, &mut out)?;
 
         if let Some(mode) = entry_mode {
-            let owner_only =
-                (mode & 0o700) | if mode & 0o100 != 0 { 0o700 } else { 0o600 };
+            let owner_only = (mode & 0o700) | if mode & 0o100 != 0 { 0o700 } else { 0o600 };
             let mut perms = fs::metadata(&dest)?.permissions();
             perms.set_mode(owner_only);
             fs::set_permissions(&dest, perms)?;

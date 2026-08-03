@@ -1,4 +1,4 @@
-﻿package com.zdroid
+package com.zdroid
 
 import android.app.Notification
 import android.app.NotificationChannel
@@ -19,7 +19,7 @@ class AgentForegroundService : Service() {
 
     override fun onCreate() {
         super.onCreate()
-        createNotificationChannels(this)
+        ensureNotificationChannels(this)
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -127,8 +127,8 @@ class AgentForegroundService : Service() {
         get() = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
 
     companion object {
-        private const val ACTION_START = "com.zdroid.b.agent.START"
-        private const val ACTION_FINISH = "com.zdroid.b.agent.FINISH"
+        private const val ACTION_START = "com.zdroid.agent.START"
+        private const val ACTION_FINISH = "com.zdroid.agent.FINISH"
         private const val EXTRA_TASK_ID = "task_id"
         private const val EXTRA_DESCRIPTION = "description"
         private const val EXTRA_SUCCESSFUL = "successful"
@@ -138,7 +138,7 @@ class AgentForegroundService : Service() {
         private const val COMPLETION_ID_BASE = 2000
 
         fun startTask(context: Context, taskId: String, description: String) {
-            createNotificationChannels(context)
+            ensureNotificationChannels(context)
             val intent = Intent(context, AgentForegroundService::class.java).apply {
                 action = ACTION_START
                 putExtra(EXTRA_TASK_ID, taskId)
@@ -162,7 +162,7 @@ class AgentForegroundService : Service() {
             ContextCompat.startForegroundService(context, intent)
         }
 
-        private fun createNotificationChannels(context: Context) {
+        fun ensureNotificationChannels(context: Context) {
             if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
             val manager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
             manager.createNotificationChannel(
