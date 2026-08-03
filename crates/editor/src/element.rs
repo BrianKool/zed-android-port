@@ -7823,7 +7823,8 @@ impl EditorElement {
 
                     if event.modifiers.secondary()
                         && editor.read(cx).enable_mouse_wheel_zoom
-                        && EditorSettings::get_global(cx).mouse_wheel_zoom
+                        && (EditorSettings::get_global(cx).mouse_wheel_zoom
+                            || cfg!(target_os = "android"))
                     {
                         let delta_y = match event.delta {
                             ScrollDelta::Pixels(pixels) => pixels.y.into(),

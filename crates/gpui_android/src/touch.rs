@@ -67,21 +67,8 @@ const DRAG_THRESHOLD_PX: f64 = 8.0;
 /// to extend the selection.
 const LONG_PRESS_THRESHOLD: Duration = Duration::from_millis(500);
 
-/// Maximum delay between the primary finger landing and a second finger
-/// landing for the gesture to count as a 2-finger tap (right-click).
-/// Generous (longer than `LONG_PRESS_THRESHOLD`) so a user can
-/// long-press to select, then drop a second finger to trigger the
-/// context menu on the selected word — Moonlight-style hold-and-tap.
-const TWO_FINGER_TAP_WINDOW: Duration = Duration::from_millis(800);
-
-/// Maximum logical-pixel distance between the primary's anchor and where
-/// the second finger lands for the gesture to count as a 2-finger tap.
-/// Bumped from a former 12px (which never fired in practice — index +
-/// middle finger natural spread on a tablet is ~20-40mm = 200-400 logical
-/// pixels at typical density). 250px covers normal two-finger landings
-/// without false-positiving on clearly-distant two-finger gestures
-/// (those resolve as multi-finger scroll instead).
-const TWO_FINGER_TAP_SLOP_PX: f64 = 250.0;
+/// Span change before a two-finger gesture commits to one zoom step.
+const PINCH_STEP_PX: f64 = 8.0;
 
 /// Normalized touch input the SM consumes. Built from either an Android
 /// `MotionEvent` (primary surface) or the JNI-marshaled fields
@@ -286,6 +273,8 @@ enum GesturePhase {
     MultiFingerDown,
     /// 2+ fingers; motion past `DRAG_THRESHOLD_PX`, emitting `ScrollWheel`.
     MultiFingerScroll,
+    /// 2+ fingers; span changes emit synthetic Ctrl+wheel zoom events.
+    MultiFingerPinch,
     /// 2-finger tap already resolved as Right click. Waiting for all
     /// fingers to lift before returning to `Idle`.
     RightClickResolved,
@@ -313,6 +302,7 @@ pub(crate) struct TouchState {
     /// `cur_centroid - scroll_centroid` directly (no scale-factor divide;
     /// input is already in logical units).
     scroll_centroid: Option<Point<Pixels>>,
+    pinch_span: Option<f64>,
 }
 
 /// Average of all active pointers' logical-pixel positions. Returns
@@ -330,6 +320,13 @@ fn centroid(pointers: &[TouchPointer]) -> Point<Pixels> {
         sy += p.pos.y;
     }
     point(sx / n as f32, sy / n as f32)
+}
+
+fn two_finger_span(pointers: &[TouchPointer]) -> Option<f64> {
+    let [first, second, ..] = pointers else {
+        return None;
+    };
+    Some((second.pos - first.pos).magnitude())
 }
 
 impl TouchState {
@@ -408,23 +405,11 @@ impl TouchState {
                 let primary_id = primary.id;
                 let primary_pos = primary.pos;
 
-                // Two contexts qualify for right-click:
-                //   - `SingleFingerDown` within `TWO_FINGER_TAP_WINDOW`
-                //     and `TWO_FINGER_TAP_SLOP_PX` of the primary's
-                //     anchor (the simultaneous two-finger tap).
-                //   - `LongPressSelection` regardless of timing/slop —
-                //     the user has already committed to a held-finger
-                //     gesture via long-press; the 2nd finger landing
-                //     is Moonlight-style "hold-and-tap" and should fire
-                //     the context menu on the selected word.
+                // A second finger after long-press opens the selection
+                // context menu. A normal two-finger contact is reserved for
+                // pan or pinch so zoom never flashes a right-click menu.
                 let qualifies_as_two_finger_tap = match self.phase {
-                    GesturePhase::SingleFingerDown => {
-                        self.pointers.get(&primary_id).is_some_and(|s| {
-                            s.down_time.elapsed() < TWO_FINGER_TAP_WINDOW
-                                && (new_pos - s.down_pos).magnitude()
-                                    <= TWO_FINGER_TAP_SLOP_PX
-                        })
-                    }
+                    GesturePhase::SingleFingerDown => false,
                     GesturePhase::LongPressSelection => true,
                     _ => false,
                 };
@@ -489,9 +474,8 @@ impl TouchState {
                     GesturePhase::SingleFingerDown | GesturePhase::SingleFingerScroll
                 ) {
                     self.phase = GesturePhase::MultiFingerDown;
-                    // Drop any prior centroid; the MOVE handler will
-                    // recompute against the new pointer set.
-                    self.scroll_centroid = None;
+                    self.scroll_centroid = Some(centroid(&event.pointers));
+                    self.pinch_span = two_finger_span(&event.pointers);
                 }
             }
 
@@ -539,13 +523,29 @@ impl TouchState {
                         .unwrap_or(event.pointers[0].pos);
                     match self.phase {
                         GesturePhase::MultiFingerDown => {
-                            // Ambiguous (2-finger-tap vs scroll). Commit
-                            // to scroll once any pointer crosses the
-                            // drag threshold. The 2-finger-tap path
-                            // already fired (or didn't) at POINTER_DOWN
-                            // time — if we're still in
-                            // `MultiFingerDown`, the tap window expired
-                            // or the second finger landed too far.
+                            // Prefer span change (pinch) over centroid motion
+                            // (scroll) when both cross threshold together.
+                            let current_span = two_finger_span(&event.pointers);
+                            let pinch_delta = current_span
+                                .zip(self.pinch_span)
+                                .map_or(0.0, |(current, previous)| current - previous);
+                            if pinch_delta.abs() >= PINCH_STEP_PX {
+                                self.phase = GesturePhase::MultiFingerPinch;
+                                self.pinch_span = current_span;
+                                let mut zoom_modifiers = modifiers;
+                                zoom_modifiers.control = true;
+                                out.push(PlatformInput::ScrollWheel(ScrollWheelEvent {
+                                    position: primary_anchor,
+                                    delta: ScrollDelta::Lines(point(
+                                        0.0,
+                                        pinch_delta.signum() as f32,
+                                    )),
+                                    modifiers: zoom_modifiers,
+                                    touch_phase: TouchPhase::Moved,
+                                }));
+                                return out;
+                            }
+
                             let crossed = self
                                 .pointers
                                 .values()
@@ -557,6 +557,27 @@ impl TouchState {
                             self.scroll_centroid = Some(centroid(&event.pointers));
                         }
                         GesturePhase::MultiFingerScroll => {
+                            if let (Some(current), Some(previous)) =
+                                (two_finger_span(&event.pointers), self.pinch_span)
+                            {
+                                let delta = current - previous;
+                                self.pinch_span = Some(current);
+                                if delta.abs() >= PINCH_STEP_PX {
+                                    self.phase = GesturePhase::MultiFingerPinch;
+                                    let mut zoom_modifiers = modifiers;
+                                    zoom_modifiers.control = true;
+                                    out.push(PlatformInput::ScrollWheel(ScrollWheelEvent {
+                                        position: primary_anchor,
+                                        delta: ScrollDelta::Lines(point(
+                                            0.0,
+                                            delta.signum() as f32,
+                                        )),
+                                        modifiers: zoom_modifiers,
+                                        touch_phase: TouchPhase::Moved,
+                                    }));
+                                    return out;
+                                }
+                            }
                             let cur = centroid(&event.pointers);
                             if let Some(prev) = self.scroll_centroid {
                                 let delta = cur - prev;
@@ -570,6 +591,27 @@ impl TouchState {
                                 }
                             }
                             self.scroll_centroid = Some(cur);
+                        }
+                        GesturePhase::MultiFingerPinch => {
+                            if let (Some(current), Some(previous)) =
+                                (two_finger_span(&event.pointers), self.pinch_span)
+                            {
+                                let delta = current - previous;
+                                if delta.abs() >= PINCH_STEP_PX {
+                                    self.pinch_span = Some(current);
+                                    let mut zoom_modifiers = modifiers;
+                                    zoom_modifiers.control = true;
+                                    out.push(PlatformInput::ScrollWheel(ScrollWheelEvent {
+                                        position: primary_anchor,
+                                        delta: ScrollDelta::Lines(point(
+                                            0.0,
+                                            delta.signum() as f32,
+                                        )),
+                                        modifiers: zoom_modifiers,
+                                        touch_phase: TouchPhase::Moved,
+                                    }));
+                                }
+                            }
                         }
                         _ => {
                             // `RightClickResolved` (and any other phase
@@ -777,6 +819,7 @@ impl TouchState {
         self.pointers.clear();
         self.phase = GesturePhase::Idle;
         self.scroll_centroid = None;
+        self.pinch_span = None;
     }
 }
 
