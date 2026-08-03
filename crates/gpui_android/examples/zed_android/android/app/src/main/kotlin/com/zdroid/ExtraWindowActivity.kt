@@ -64,6 +64,20 @@ class ExtraWindowActivity : AppCompatActivity(), ImeHost {
     /// calls to [showIme] / [hideIme] which requestFocus on this view
     /// and invoke `InputMethodManager`.
     private var imeHostView: ImeHostView? = null
+    private var selectionOverlay: SelectionOverlayController? = null
+
+    @Suppress("unused")
+    fun updateSelectionUi(
+        visible: Boolean,
+        startX: Float,
+        startY: Float,
+        endX: Float,
+        endY: Float,
+    ) {
+        runOnUiThread {
+            selectionOverlay?.update(visible, startX, startY, endX, endY)
+        }
+    }
 
     // No `ExtraKeysView` for extra windows: the row is editor-
     // focused (arrows, Esc, Tab, Ctrl, Alt) and renders only
@@ -167,6 +181,7 @@ class ExtraWindowActivity : AppCompatActivity(), ImeHost {
         }
 
         NativeBridge.nativeOnExtraActivityCreated(extraWindowId, this)
+        selectionOverlay = SelectionOverlayController(this, extraWindowId)
 
         val id = extraWindowId
         surfaceView = ScrollableSurfaceView(this).apply {
@@ -450,6 +465,8 @@ class ExtraWindowActivity : AppCompatActivity(), ImeHost {
     }
 
     override fun onDestroy() {
+        selectionOverlay?.destroy()
+        selectionOverlay = null
         Log.i(TAG, "onDestroy windowId=$extraWindowId")
         cursorOverlay?.release()
         cursorOverlay = null

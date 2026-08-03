@@ -187,6 +187,8 @@ pub(crate) struct AndroidWindowState {
     /// diff we re-push so the IME observes touch-driven cursor moves
     /// in this specific window.
     pub(crate) last_pushed_selection: Option<(usize, usize)>,
+    /// Physical-pixel endpoints last sent to Android's selection overlay.
+    pub(crate) last_selection_overlay: Option<(i32, i32, i32, i32)>,
 }
 
 #[derive(Clone)]
@@ -539,6 +541,7 @@ impl AndroidWindow {
             ime_reassert_requested: false,
             last_ime_target_kind: None,
             last_pushed_selection: None,
+            last_selection_overlay: None,
         };
 
         Self {

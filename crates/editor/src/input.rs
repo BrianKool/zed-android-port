@@ -2704,6 +2704,30 @@ fn list_delimiter_for_newline(
 }
 
 impl EntityInputHandler for Editor {
+    fn select_text_range(
+        &mut self,
+        range_utf16: Range<usize>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let (start, end) = {
+            let snapshot = self.buffer.read(cx).read(cx);
+            (
+                snapshot.clip_offset_utf16(
+                    MultiBufferOffsetUtf16(OffsetUtf16(range_utf16.start)),
+                    Bias::Left,
+                ),
+                snapshot.clip_offset_utf16(
+                    MultiBufferOffsetUtf16(OffsetUtf16(range_utf16.end)),
+                    Bias::Right,
+                ),
+            )
+        };
+        self.change_selections(SelectionEffects::no_scroll(), window, cx, |selections| {
+            selections.select_ranges([start..end]);
+        });
+    }
+
     fn text_for_range(
         &mut self,
         range_utf16: Range<usize>,

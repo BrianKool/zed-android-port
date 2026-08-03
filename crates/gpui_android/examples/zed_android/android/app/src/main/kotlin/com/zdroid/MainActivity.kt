@@ -81,6 +81,20 @@ class MainActivity : GameActivity(), ImeHost {
     /// to `showIme()` / `hideIme()` on this Activity; those methods
     /// requestFocus on the host and invoke `InputMethodManager`.
     private var imeHostView: ImeHostView? = null
+    private var selectionOverlay: SelectionOverlayController? = null
+
+    @Suppress("unused")
+    fun updateSelectionUi(
+        visible: Boolean,
+        startX: Float,
+        startY: Float,
+        endX: Float,
+        endY: Float,
+    ) {
+        runOnUiThread {
+            selectionOverlay?.update(visible, startX, startY, endX, endY)
+        }
+    }
 
     /// Programming extras row (Esc/Tab/Ctrl/Alt/arrows). Inflated
     /// lazily on first enable so we don't pay the layout cost when
@@ -500,6 +514,7 @@ class MainActivity : GameActivity(), ImeHost {
         val host = ImeHostView(this)
         addContentView(host, android.view.ViewGroup.LayoutParams(1, 1))
         imeHostView = host
+        selectionOverlay = SelectionOverlayController(this, imeWindowId)
 
         // Detect when the IME is dismissed by the user (Back press,
         // swipe-down on the keyboard) rather than programmatically by
@@ -1266,6 +1281,8 @@ class MainActivity : GameActivity(), ImeHost {
     /// the process here guarantees the next launch starts fresh with
     /// zero stale static state.
     override fun onDestroy() {
+        selectionOverlay?.destroy()
+        selectionOverlay = null
         Log.i(TAG, "onDestroy isFinishing=$isFinishing — exiting process for clean restart")
         splashHandler.removeCallbacksAndMessages(null)
         cursorOverlay?.release()

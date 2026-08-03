@@ -771,7 +771,12 @@ impl AndroidPlatform {
             } else {
                 // IME going hidden — clear cached selection on this
                 // window so the next show-transition re-seeds cleanly.
-                window_ptr.state.borrow_mut().last_pushed_selection = None;
+                {
+                    let mut state = window_ptr.state.borrow_mut();
+                    state.last_pushed_selection = None;
+                    state.last_selection_overlay = None;
+                }
+                crate::ime::update_selection_ui(&app, extra_window_id, None);
                 crate::ime::hide_keyboard(&app, extra_window_id);
             }
         } else if currently_visible
@@ -825,10 +830,14 @@ impl AndroidPlatform {
         let handler_has_stale_mark: bool;
         let last_kind: Option<crate::ime::ImeTargetKind>;
         let last_selection: Option<(usize, usize)>;
+        let selection_overlay: Option<(i32, i32, i32, i32)>;
+        let last_selection_overlay: Option<(i32, i32, i32, i32)>;
         {
             let mut state = window_ptr.state.borrow_mut();
             last_kind = state.last_ime_target_kind;
             last_selection = state.last_pushed_selection;
+            last_selection_overlay = state.last_selection_overlay;
+            let scale_factor = state.scale_factor;
             // Snapshot composition tracking before mut-borrowing
             // input_handler — once `handler` is alive, we can't
             // touch other fields of `state` immutably.
@@ -846,6 +855,21 @@ impl AndroidPlatform {
             current_selection = handler
                 .selected_text_range(false)
                 .map(|s| (s.range.start, s.range.end));
+            selection_overlay = current_selection.and_then(|(start, end)| {
+                if start == end || current_kind != Some(crate::ime::ImeTargetKind::CodeEditor) {
+                    return None;
+                }
+                let start_bounds = handler.bounds_for_range(start..start)?;
+                let end_bounds = handler.bounds_for_range(end..end)?;
+                Some((
+                    (f32::from(start_bounds.origin.x) * scale_factor).round() as i32,
+                    (f32::from(start_bounds.origin.y + start_bounds.size.height) * scale_factor)
+                        .round() as i32,
+                    (f32::from(end_bounds.origin.x) * scale_factor).round() as i32,
+                    (f32::from(end_bounds.origin.y + end_bounds.size.height) * scale_factor)
+                        .round() as i32,
+                ))
+            });
             // If the editor still has a marked range from a prior
             // composition session (user typed in editor, switched
             // away without committing, came back), the editor's
@@ -862,6 +886,15 @@ impl AndroidPlatform {
         }
         if handler_has_stale_mark {
             log::info!("ime::tick cleared stale editor marked range");
+        }
+
+        if selection_overlay != last_selection_overlay {
+            crate::ime::update_selection_ui(
+                android_app,
+                extra_window_id,
+                selection_overlay,
+            );
+            window_ptr.state.borrow_mut().last_selection_overlay = selection_overlay;
         }
 
         let mut should_notify = false;

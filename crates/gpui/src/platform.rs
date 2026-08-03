@@ -1317,6 +1317,12 @@ impl PlatformInputHandler {
             .unwrap_or(false)
     }
 
+    pub fn select_text_range(&mut self, range_utf16: Range<usize>) {
+        self.cx
+            .update(|window, cx| self.handler.select_text_range(range_utf16, window, cx))
+            .ok();
+    }
+
     /// Returns whether focusing this handler should automatically show a soft keyboard.
     pub fn query_should_auto_show_ime(&mut self) -> bool {
         self.cx
@@ -1352,6 +1358,15 @@ pub trait InputHandler: 'static {
         window: &mut Window,
         cx: &mut App,
     ) -> Option<UTF16Selection>;
+
+    /// Replace the current selection with an absolute UTF-16 range.
+    fn select_text_range(
+        &mut self,
+        _range_utf16: Range<usize>,
+        _window: &mut Window,
+        _cx: &mut App,
+    ) {
+    }
 
     /// Get the range of the currently marked text, if any
     /// Corresponds to [markedRange()](https://developer.apple.com/documentation/appkit/nstextinputclient/1438250-markedrange)

@@ -25,6 +25,15 @@ pub trait EntityInputHandler: 'static + Sized {
         cx: &mut Context<Self>,
     ) -> Option<UTF16Selection>;
 
+    /// See [`InputHandler::select_text_range`] for details.
+    fn select_text_range(
+        &mut self,
+        _range: Range<usize>,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) {
+    }
+
     /// See [`InputHandler::marked_text_range`] for details
     fn marked_text_range(
         &self,
@@ -196,6 +205,16 @@ impl<V: EntityInputHandler> InputHandler for ElementInputHandler<V> {
     fn prefers_ime_for_printable_keys(&mut self, window: &mut Window, cx: &mut App) -> bool {
         self.view
             .update(cx, |view, cx| view.accepts_text_input(window, cx))
+    }
+
+    fn select_text_range(
+        &mut self,
+        range: Range<usize>,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        self.view
+            .update(cx, |view, cx| view.select_text_range(range, window, cx));
     }
 
     fn should_auto_show_ime(&mut self, window: &mut Window, cx: &mut App) -> bool {

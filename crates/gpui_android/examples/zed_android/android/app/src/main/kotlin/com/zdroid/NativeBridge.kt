@@ -207,6 +207,12 @@ object NativeBridge {
     /// target window.
     external fun nativeImePerformEditorAction(windowId: Long, actionId: Int)
 
+    /// Drag one of the native code-editor selection handles.
+    external fun nativeSelectionAdjust(windowId: Long, endpoint: Int, x: Float, y: Float)
+
+    /// Run Cut, Copy, Paste, or open Zed's full editor context menu.
+    external fun nativeSelectionCommand(windowId: Long, command: Int)
+
     /// Query the global vim-mode routing gate. True when the focused
     /// editor is in a vim command mode, in which case soft-keyboard
     /// text has to be re-delivered as key events (so vim reads `j`/`d`/
