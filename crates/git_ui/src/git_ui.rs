@@ -4,7 +4,7 @@ use editor::{Editor, actions::DiffClipboardWithSelectionData};
 
 use ui::{
     Color, Headline, HeadlineSize, Icon, IconName, IconSize, IntoElement, ParentElement, Render,
-    Styled, StyledExt, div, h_flex, rems, v_flex,
+    Styled, StyledExt, TintColor, div, h_flex, rems, v_flex,
 };
 use workspace::{Toast, notifications::NotificationId};
 
@@ -22,6 +22,7 @@ use gpui::{
 use menu::{Cancel, Confirm};
 use project::git_store::Repository;
 use project_diff::ProjectDiff;
+use std::path::PathBuf;
 use time::OffsetDateTime;
 use ui::prelude::*;
 use workspace::{ModalView, OpenMode, Workspace, notifications::DetachAndPromptErr};
@@ -1092,6 +1093,8 @@ struct GitCloneModal {
     github_search_input: Entity<Editor>,
     mode: GitCloneMode,
     github_state: GithubRepositoriesState,
+    selected_github_repo: Option<github_auth::GithubRepository>,
+    destination_dir: Option<PathBuf>,
     focus_handle: FocusHandle,
     _search_subscription: Subscription,
 }
@@ -1123,6 +1126,8 @@ impl GitCloneModal {
             github_search_input,
             mode: GitCloneMode::ChooseSource,
             github_state: GithubRepositoriesState::NotLoaded,
+            selected_github_repo: None,
+            destination_dir: None,
             focus_handle: cx.focus_handle(),
             _search_subscription,
         }
@@ -1190,6 +1195,43 @@ impl GitCloneModal {
         cx.emit(DismissEvent);
     }
 
+    fn choose_destination(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let paths_receiver = cx.prompt_for_paths(gpui::PathPromptOptions {
+            files: false,
+            directories: true,
+            multiple: false,
+            prompt: Some("Select as Repository Destination".into()),
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            let Ok(Ok(Some(mut paths))) = paths_receiver.await else {
+                return;
+            };
+            let Some(path) = paths.pop() else {
+                return;
+            };
+            this.update(cx, |this, cx| {
+                this.destination_dir = Some(path);
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn clone_selected_github(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let (Some(repo), Some(destination_dir)) = (
+            self.selected_github_repo.as_ref(),
+            self.destination_dir.clone(),
+        ) else {
+            return;
+        };
+        let clone_url = repo.clone_url.clone();
+        self.panel.update(cx, |panel, cx| {
+            panel.git_clone_at(clone_url, destination_dir, window, cx);
+        });
+        cx.emit(DismissEvent);
+    }
+
     fn render_source_choice(&self, cx: &mut Context<Self>) -> AnyElement {
         v_flex()
             .p_3()
@@ -1245,7 +1287,7 @@ impl GitCloneModal {
             .into_any_element()
     }
 
-    fn render_github(&self, cx: &mut Context<Self>) -> AnyElement {
+    fn render_github(&self, is_narrow: bool, cx: &mut Context<Self>) -> AnyElement {
         let body = match &self.github_state {
             GithubRepositoriesState::NotLoaded | GithubRepositoriesState::Loading => v_flex()
                 .p_4()
@@ -1292,23 +1334,37 @@ impl GitCloneModal {
 
                 v_flex()
                     .min_h_0()
+                    .mx_2()
+                    .mt_2()
+                    .mb_2()
+                    .border_1()
+                    .border_color(cx.theme().colors().border)
+                    .rounded_sm()
+                    .overflow_hidden()
                     .child(
-                        h_flex()
+                        v_flex()
                             .px_3()
                             .py_2()
-                            .gap_2()
-                            .child(Icon::new(IconName::Github).size(IconSize::Small))
-                            .child(Label::new(login.clone()))
+                            .gap_1()
+                            .border_b_1()
+                            .border_color(cx.theme().colors().border_variant)
+                            .child(Label::new("Repository").size(LabelSize::Small))
                             .child(
-                                Label::new(format!("{} repositories", repositories.len()))
-                                    .size(LabelSize::Small)
-                                    .color(Color::Muted),
+                                h_flex()
+                                    .min_w_0()
+                                    .gap_2()
+                                    .child(Icon::new(IconName::Github).size(IconSize::Small))
+                                    .child(Label::new(login.clone()))
+                                    .child(
+                                        Label::new(format!("{} repositories", repositories.len()))
+                                            .size(LabelSize::Small)
+                                            .color(Color::Muted),
+                                    ),
                             ),
                     )
                     .child(
                         div()
-                            .mx_2()
-                            .mb_2()
+                            .m_2()
                             .p_2()
                             .border_1()
                             .border_color(cx.theme().colors().border)
@@ -1318,7 +1374,7 @@ impl GitCloneModal {
                     .child(
                         v_flex()
                             .id("github-repository-list")
-                            .max_h(rems(28.))
+                            .max_h(rems(22.))
                             .overflow_y_scroll()
                             .when(matches.is_empty(), |this| {
                                 this.p_4().child(
@@ -1326,25 +1382,92 @@ impl GitCloneModal {
                                 )
                             })
                             .children(matches.into_iter().enumerate().map(|(ix, repo)| {
-                                let clone_url = repo.clone_url.clone();
-                                let private = repo.private;
-                                Button::new(format!("github-repository-{ix}"), repo.full_name)
-                                    .full_width()
-                                    .start_icon(
-                                        Icon::new(if private {
-                                            IconName::LockOutlined
-                                        } else {
-                                            IconName::Github
-                                        })
-                                        .size(IconSize::Small),
-                                    )
-                                    .on_click(cx.listener(move |this, _, window, cx| {
-                                        this.clone_url(clone_url.clone(), window, cx);
-                                    }))
+                                let selected = self
+                                    .selected_github_repo
+                                    .as_ref()
+                                    .is_some_and(|selected| selected.clone_url == repo.clone_url);
+                                let selected_repo = repo.clone();
+                                Button::new(
+                                    format!("github-repository-{ix}"),
+                                    repo.full_name.clone(),
+                                )
+                                .full_width()
+                                .truncate(true)
+                                .toggle_state(selected)
+                                .selected_style(ButtonStyle::Tinted(TintColor::Accent))
+                                .start_icon(
+                                    Icon::new(if repo.private {
+                                        IconName::LockOutlined
+                                    } else {
+                                        IconName::Github
+                                    })
+                                    .size(IconSize::Small),
+                                )
+                                .end_icon(
+                                    selected
+                                        .then(|| Icon::new(IconName::Check).size(IconSize::Small)),
+                                )
+                                .on_click(cx.listener(
+                                    move |this, _, _, cx| {
+                                        this.selected_github_repo = Some(selected_repo.clone());
+                                        cx.notify();
+                                    },
+                                ))
                             })),
                     )
                     .into_any_element()
             }
+        };
+
+        let destination_label: SharedString = self
+            .destination_dir
+            .as_ref()
+            .map(|path| path.to_string_lossy().into_owned().into())
+            .unwrap_or_else(|| "Choose a folder".into());
+        let can_clone = self.selected_github_repo.is_some() && self.destination_dir.is_some();
+        let actions = if is_narrow {
+            v_flex()
+                .w_full()
+                .p_2()
+                .gap_2()
+                .border_t_1()
+                .border_color(cx.theme().colors().border_variant)
+                .child(
+                    Button::new("clone-github-confirm-mobile", "Clone")
+                        .full_width()
+                        .style(ButtonStyle::Filled)
+                        .disabled(!can_clone)
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.clone_selected_github(window, cx);
+                        })),
+                )
+                .child(
+                    Button::new("clone-github-cancel-mobile", "Cancel")
+                        .full_width()
+                        .on_click(cx.listener(|_, _, _, cx| cx.emit(DismissEvent))),
+                )
+                .into_any_element()
+        } else {
+            h_flex()
+                .w_full()
+                .p_2()
+                .gap_2()
+                .justify_end()
+                .border_t_1()
+                .border_color(cx.theme().colors().border_variant)
+                .child(
+                    Button::new("clone-github-cancel", "Cancel")
+                        .on_click(cx.listener(|_, _, _, cx| cx.emit(DismissEvent))),
+                )
+                .child(
+                    Button::new("clone-github-confirm", "Clone")
+                        .style(ButtonStyle::Filled)
+                        .disabled(!can_clone)
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.clone_selected_github(window, cx);
+                        })),
+                )
+                .into_any_element()
         };
 
         v_flex()
@@ -1366,6 +1489,27 @@ impl GitCloneModal {
                     .child(Label::new("GitHub Repositories")),
             )
             .child(body)
+            .child(
+                v_flex()
+                    .mx_2()
+                    .mb_2()
+                    .p_3()
+                    .gap_2()
+                    .border_1()
+                    .border_color(cx.theme().colors().border)
+                    .rounded_sm()
+                    .child(Label::new("Saving directory").size(LabelSize::Small))
+                    .child(
+                        Button::new("choose-clone-destination", destination_label)
+                            .full_width()
+                            .truncate(true)
+                            .start_icon(Icon::new(IconName::FolderOpen).size(IconSize::Small))
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.choose_destination(window, cx);
+                            })),
+                    ),
+            )
+            .child(actions)
             .into_any_element()
     }
 }
@@ -1381,7 +1525,7 @@ impl Focusable for GitCloneModal {
 }
 
 impl Render for GitCloneModal {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         div()
             .elevation_3(cx)
             .w(rems(34.))
@@ -1392,7 +1536,10 @@ impl Render for GitCloneModal {
             .child(match self.mode {
                 GitCloneMode::ChooseSource => self.render_source_choice(cx),
                 GitCloneMode::RepositoryUrl => self.render_repository_url(cx),
-                GitCloneMode::Github => self.render_github(cx),
+                GitCloneMode::Github => {
+                    let is_narrow = window.viewport_size().width / window.rem_size() < 42.;
+                    self.render_github(is_narrow, cx)
+                }
             })
             .on_action(cx.listener(|_, _: &menu::Cancel, _, cx| {
                 cx.emit(DismissEvent);

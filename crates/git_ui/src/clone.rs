@@ -1,7 +1,7 @@
 use askpass::{AskPassDelegate, AskPassSession};
 use gpui::{App, Context, DismissEvent, WeakEntity, Window};
 use notifications::status_toast::StatusToast;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -70,42 +70,81 @@ pub fn clone_and_open(
         dyn Fn(&mut Workspace, &mut Window, &mut Context<Workspace>) + Send + Sync + 'static,
     >,
 ) {
-    let destination_prompt = cx.prompt_for_paths(gpui::PathPromptOptions {
-        files: false,
-        directories: true,
-        multiple: false,
-        prompt: Some("Select as Repository Destination".into()),
+    clone_and_open_with_destination(repo_url, None, workspace, askpass, window, cx, on_success);
+}
+
+pub fn clone_and_open_at(
+    repo_url: SharedString,
+    destination_dir: PathBuf,
+    workspace: WeakEntity<Workspace>,
+    askpass: AskPassDelegate,
+    window: &mut Window,
+    cx: &mut App,
+    on_success: Arc<
+        dyn Fn(&mut Workspace, &mut Window, &mut Context<Workspace>) + Send + Sync + 'static,
+    >,
+) {
+    clone_and_open_with_destination(
+        repo_url,
+        Some(destination_dir),
+        workspace,
+        askpass,
+        window,
+        cx,
+        on_success,
+    );
+}
+
+fn clone_and_open_with_destination(
+    repo_url: SharedString,
+    destination_dir: Option<PathBuf>,
+    workspace: WeakEntity<Workspace>,
+    askpass: AskPassDelegate,
+    window: &mut Window,
+    cx: &mut App,
+    on_success: Arc<
+        dyn Fn(&mut Workspace, &mut Window, &mut Context<Workspace>) + Send + Sync + 'static,
+    >,
+) {
+    let destination_prompt = destination_dir.is_none().then(|| {
+        cx.prompt_for_paths(gpui::PathPromptOptions {
+            files: false,
+            directories: true,
+            multiple: false,
+            prompt: Some("Select as Repository Destination".into()),
+        })
     });
 
     window
         .spawn(cx, async move |cx| {
-            let mut paths = destination_prompt.await.ok()?.ok()??;
-            let mut destination_dir = paths.pop()?;
-
-            let askpass_session = match AskPassSession::new(
-                cx.background_executor().clone(),
-                askpass,
-            )
-            .await
-            {
-                Ok(session) => session,
-                Err(error) => {
-                    workspace
-                        .update(cx, |workspace, cx| {
-                            let toast = StatusToast::new(error.to_string(), cx, |this, _| {
-                                this.icon(
-                                    Icon::new(IconName::XCircle)
-                                        .size(IconSize::Small)
-                                        .color(Color::Error),
-                                )
-                                .dismiss_button(true)
-                            });
-                            workspace.toggle_status_toast(toast, cx);
-                        })
-                        .log_err();
-                    return None;
+            let mut destination_dir = match destination_dir {
+                Some(destination_dir) => destination_dir,
+                None => {
+                    let mut paths = destination_prompt?.await.ok()?.ok()??;
+                    paths.pop()?
                 }
             };
+
+            let askpass_session =
+                match AskPassSession::new(cx.background_executor().clone(), askpass).await {
+                    Ok(session) => session,
+                    Err(error) => {
+                        workspace
+                            .update(cx, |workspace, cx| {
+                                let toast = StatusToast::new(error.to_string(), cx, |this, _| {
+                                    this.icon(
+                                        Icon::new(IconName::XCircle)
+                                            .size(IconSize::Small)
+                                            .color(Color::Error),
+                                    )
+                                    .dismiss_button(true)
+                                });
+                                workspace.toggle_status_toast(toast, cx);
+                            })
+                            .log_err();
+                        return None;
+                    }
+                };
             let askpass_script = askpass_session.script_path().as_ref().to_owned();
 
             let repo_name = repo_url

@@ -2953,6 +2953,27 @@ impl GitPanel {
         );
     }
 
+    pub(crate) fn git_clone_at(
+        &mut self,
+        repo: String,
+        destination_dir: std::path::PathBuf,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let workspace = self.workspace.clone();
+        let askpass = self.askpass_delegate("git clone", window, cx);
+
+        crate::clone::clone_and_open_at(
+            repo.into(),
+            destination_dir,
+            workspace,
+            askpass,
+            window,
+            cx,
+            Arc::new(|_workspace: &mut workspace::Workspace, _window, _cx| {}),
+        );
+    }
+
     pub(crate) fn git_init(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let worktrees = self
             .project
