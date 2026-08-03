@@ -17,7 +17,7 @@ use git::{
 };
 use gpui::{
     App, ClipboardItem, Context, DismissEvent, Entity, EventEmitter, FocusHandle, Focusable,
-    SharedString, Subscription, Task, TaskExt, Window,
+    SharedString, StatefulInteractiveElement, Subscription, Task, TaskExt, Window,
 };
 use menu::{Cancel, Confirm};
 use project::git_store::Repository;
@@ -38,9 +38,9 @@ mod conflict_view;
 pub mod file_diff_view;
 pub mod git_panel;
 mod git_panel_settings;
-mod github_auth;
 pub mod git_picker;
 mod git_runtime_diagnostics;
+mod github_auth;
 pub mod multi_diff_view;
 pub mod picker_prompt;
 pub mod project_diff;
@@ -1068,10 +1068,32 @@ impl Component for GitStatusIcon {
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum GitCloneMode {
+    ChooseSource,
+    RepositoryUrl,
+    Github,
+}
+
+enum GithubRepositoriesState {
+    NotLoaded,
+    Loading,
+    SignedOut,
+    Ready {
+        login: SharedString,
+        repositories: Vec<github_auth::GithubRepository>,
+    },
+    Error(SharedString),
+}
+
 struct GitCloneModal {
     panel: Entity<GitPanel>,
     repo_input: Entity<Editor>,
+    github_search_input: Entity<Editor>,
+    mode: GitCloneMode,
+    github_state: GithubRepositoriesState,
     focus_handle: FocusHandle,
+    _search_subscription: Subscription,
 }
 
 impl GitCloneModal {
@@ -1081,21 +1103,280 @@ impl GitCloneModal {
             editor.set_placeholder_text("Enter repository URL…", window, cx);
             editor
         });
-        let focus_handle = repo_input.focus_handle(cx);
-
-        window.focus(&focus_handle, cx);
+        let github_search_input = cx.new(|cx| {
+            let mut editor = Editor::single_line(window, cx);
+            editor.set_placeholder_text("Search repositories…", window, cx);
+            editor
+        });
+        let _search_subscription = cx.subscribe(
+            &github_search_input,
+            |_, _, event: &editor::EditorEvent, cx| {
+                if matches!(event, editor::EditorEvent::BufferEdited) {
+                    cx.notify();
+                }
+            },
+        );
 
         Self {
             panel,
             repo_input,
-            focus_handle,
+            github_search_input,
+            mode: GitCloneMode::ChooseSource,
+            github_state: GithubRepositoriesState::NotLoaded,
+            focus_handle: cx.focus_handle(),
+            _search_subscription,
         }
+    }
+
+    fn show_repository_url(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.mode = GitCloneMode::RepositoryUrl;
+        self.repo_input.focus_handle(cx).focus(window, cx);
+        cx.notify();
+    }
+
+    fn show_github(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.mode = GitCloneMode::Github;
+        self.github_search_input.focus_handle(cx).focus(window, cx);
+
+        if !matches!(self.github_state, GithubRepositoriesState::NotLoaded) {
+            cx.notify();
+            return;
+        }
+
+        self.github_state = GithubRepositoriesState::Loading;
+        let credentials = cx.read_credentials(github_auth::GITHUB_CREDENTIALS_KEY);
+        let http_client = cx.http_client();
+        cx.spawn(async move |this, cx| {
+            let result: anyhow::Result<_> = async {
+                let Some((_, token)) = credentials.await? else {
+                    return Ok(None);
+                };
+                let token = String::from_utf8(token)?;
+                let user = github_auth::validate_token(&http_client, &token).await?;
+                let repositories = github_auth::fetch_repositories(&http_client, &token).await?;
+                Ok(Some((user.display_label(), repositories)))
+            }
+            .await;
+
+            this.update(cx, |this, cx| {
+                this.github_state = match result {
+                    Ok(Some((login, repositories))) => GithubRepositoriesState::Ready {
+                        login: login.into(),
+                        repositories,
+                    },
+                    Ok(None) => GithubRepositoriesState::SignedOut,
+                    Err(error) => GithubRepositoriesState::Error(error.to_string().into()),
+                };
+                cx.notify();
+            })
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn back_to_sources(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.mode = GitCloneMode::ChooseSource;
+        self.focus_handle.focus(window, cx);
+        cx.notify();
+    }
+
+    fn clone_url(&mut self, repo: String, window: &mut Window, cx: &mut Context<Self>) {
+        if repo.trim().is_empty() {
+            return;
+        }
+        self.panel.update(cx, |panel, cx| {
+            panel.git_clone(repo, window, cx);
+        });
+        cx.emit(DismissEvent);
+    }
+
+    fn render_source_choice(&self, cx: &mut Context<Self>) -> AnyElement {
+        v_flex()
+            .p_3()
+            .gap_2()
+            .child(Label::new("Clone Repository").size(LabelSize::Large))
+            .child(
+                Button::new("clone-by-url", "Repository URL")
+                    .full_width()
+                    .start_icon(Icon::new(IconName::Link).size(IconSize::Small))
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.show_repository_url(window, cx);
+                    })),
+            )
+            .child(
+                Button::new("clone-from-github", "GitHub")
+                    .full_width()
+                    .start_icon(Icon::new(IconName::Github).size(IconSize::Small))
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.show_github(window, cx);
+                    })),
+            )
+            .into_any_element()
+    }
+
+    fn render_repository_url(&self, cx: &mut Context<Self>) -> AnyElement {
+        v_flex()
+            .child(
+                h_flex()
+                    .w_full()
+                    .p_2()
+                    .gap_2()
+                    .border_b_1()
+                    .border_color(cx.theme().colors().border_variant)
+                    .child(
+                        IconButton::new("back-to-clone-sources", IconName::ArrowLeft).on_click(
+                            cx.listener(|this, _, window, cx| {
+                                this.back_to_sources(window, cx);
+                            }),
+                        ),
+                    )
+                    .child(div().min_w_0().flex_1().child(self.repo_input.clone())),
+            )
+            .child(
+                h_flex().w_full().p_2().justify_end().child(
+                    Button::new("clone-url-confirm", "Clone")
+                        .style(ButtonStyle::Filled)
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            let repo = this.repo_input.read(cx).text(cx);
+                            this.clone_url(repo, window, cx);
+                        })),
+                ),
+            )
+            .into_any_element()
+    }
+
+    fn render_github(&self, cx: &mut Context<Self>) -> AnyElement {
+        let body = match &self.github_state {
+            GithubRepositoriesState::NotLoaded | GithubRepositoriesState::Loading => v_flex()
+                .p_4()
+                .items_center()
+                .child(Label::new("Loading GitHub repositories…").color(Color::Muted))
+                .into_any_element(),
+            GithubRepositoriesState::SignedOut => v_flex()
+                .p_4()
+                .gap_2()
+                .child(Label::new("No GitHub account is signed in."))
+                .child(
+                    Label::new("Open GitHub Accounts from the menu to sign in.")
+                        .color(Color::Muted),
+                )
+                .into_any_element(),
+            GithubRepositoriesState::Error(error) => v_flex()
+                .p_4()
+                .gap_2()
+                .child(Label::new("Could not load GitHub repositories."))
+                .child(Label::new(error.clone()).color(Color::Error))
+                .into_any_element(),
+            GithubRepositoriesState::Ready {
+                login,
+                repositories,
+            } => {
+                let query = self
+                    .github_search_input
+                    .read(cx)
+                    .text(cx)
+                    .trim()
+                    .to_lowercase();
+                let matches = repositories
+                    .iter()
+                    .filter(|repo| {
+                        query.is_empty()
+                            || repo.full_name.to_lowercase().contains(&query)
+                            || repo.description.as_deref().is_some_and(|description| {
+                                description.to_lowercase().contains(&query)
+                            })
+                    })
+                    .take(200)
+                    .cloned()
+                    .collect::<Vec<_>>();
+
+                v_flex()
+                    .min_h_0()
+                    .child(
+                        h_flex()
+                            .px_3()
+                            .py_2()
+                            .gap_2()
+                            .child(Icon::new(IconName::Github).size(IconSize::Small))
+                            .child(Label::new(login.clone()))
+                            .child(
+                                Label::new(format!("{} repositories", repositories.len()))
+                                    .size(LabelSize::Small)
+                                    .color(Color::Muted),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .mx_2()
+                            .mb_2()
+                            .p_2()
+                            .border_1()
+                            .border_color(cx.theme().colors().border)
+                            .rounded_sm()
+                            .child(self.github_search_input.clone()),
+                    )
+                    .child(
+                        v_flex()
+                            .id("github-repository-list")
+                            .max_h(rems(28.))
+                            .overflow_y_scroll()
+                            .when(matches.is_empty(), |this| {
+                                this.p_4().child(
+                                    Label::new("No matching repositories.").color(Color::Muted),
+                                )
+                            })
+                            .children(matches.into_iter().enumerate().map(|(ix, repo)| {
+                                let clone_url = repo.clone_url.clone();
+                                let private = repo.private;
+                                Button::new(format!("github-repository-{ix}"), repo.full_name)
+                                    .full_width()
+                                    .start_icon(
+                                        Icon::new(if private {
+                                            IconName::LockOutlined
+                                        } else {
+                                            IconName::Github
+                                        })
+                                        .size(IconSize::Small),
+                                    )
+                                    .on_click(cx.listener(move |this, _, window, cx| {
+                                        this.clone_url(clone_url.clone(), window, cx);
+                                    }))
+                            })),
+                    )
+                    .into_any_element()
+            }
+        };
+
+        v_flex()
+            .min_h_0()
+            .child(
+                h_flex()
+                    .w_full()
+                    .p_2()
+                    .gap_2()
+                    .border_b_1()
+                    .border_color(cx.theme().colors().border_variant)
+                    .child(
+                        IconButton::new("back-from-github", IconName::ArrowLeft).on_click(
+                            cx.listener(|this, _, window, cx| {
+                                this.back_to_sources(window, cx);
+                            }),
+                        ),
+                    )
+                    .child(Label::new("GitHub Repositories")),
+            )
+            .child(body)
+            .into_any_element()
     }
 }
 
 impl Focusable for GitCloneModal {
-    fn focus_handle(&self, _: &App) -> FocusHandle {
-        self.focus_handle.clone()
+    fn focus_handle(&self, cx: &App) -> FocusHandle {
+        match self.mode {
+            GitCloneMode::RepositoryUrl => self.repo_input.focus_handle(cx),
+            GitCloneMode::Github => self.github_search_input.focus_handle(cx),
+            GitCloneMode::ChooseSource => self.focus_handle.clone(),
+        }
     }
 }
 
@@ -1105,46 +1386,22 @@ impl Render for GitCloneModal {
             .elevation_3(cx)
             .w(rems(34.))
             .max_w_full()
-            .flex_1()
+            .max_h(rems(40.))
             .overflow_hidden()
-            .child(
-                div()
-                    .w_full()
-                    .p_2()
-                    .border_b_1()
-                    .border_color(cx.theme().colors().border_variant)
-                    .child(self.repo_input.clone()),
-            )
-            .child(
-                h_flex()
-                    .w_full()
-                    .p_2()
-                    .gap_0p5()
-                    .rounded_b_sm()
-                    .bg(cx.theme().colors().editor_background)
-                    .child(
-                        Label::new("Clone a repository from GitHub or other sources.")
-                            .color(Color::Muted)
-                            .size(LabelSize::Small),
-                    )
-                    .child(
-                        Button::new("learn-more", "Learn More")
-                            .label_size(LabelSize::Small)
-                            .end_icon(Icon::new(IconName::ArrowUpRight).size(IconSize::XSmall))
-                            .on_click(|_, _, cx| {
-                                cx.open_url("https://github.com/git-guides/git-clone");
-                            }),
-                    ),
-            )
+            .track_focus(&self.focus_handle)
+            .child(match self.mode {
+                GitCloneMode::ChooseSource => self.render_source_choice(cx),
+                GitCloneMode::RepositoryUrl => self.render_repository_url(cx),
+                GitCloneMode::Github => self.render_github(cx),
+            })
             .on_action(cx.listener(|_, _: &menu::Cancel, _, cx| {
                 cx.emit(DismissEvent);
             }))
             .on_action(cx.listener(|this, _: &menu::Confirm, window, cx| {
-                let repo = this.repo_input.read(cx).text(cx);
-                this.panel.update(cx, |panel, cx| {
-                    panel.git_clone(repo, window, cx);
-                });
-                cx.emit(DismissEvent);
+                if this.mode == GitCloneMode::RepositoryUrl {
+                    let repo = this.repo_input.read(cx).text(cx);
+                    this.clone_url(repo, window, cx);
+                }
             }))
     }
 }

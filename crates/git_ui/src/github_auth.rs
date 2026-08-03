@@ -25,11 +25,31 @@ const GITHUB_CLIENT_ID: &str = "Ov23lix5l83Pvw0bmit7";
 const DEVICE_CODE_URL: &str = "https://github.com/login/device/code";
 const ACCESS_TOKEN_URL: &str = "https://github.com/login/oauth/access_token";
 const USER_URL: &str = "https://api.github.com/user";
+const USER_REPOS_URL: &str = "https://api.github.com/user/repos";
 const GITHUB_GIT_USERNAME: &str = "x-access-token";
 
 #[derive(Clone, Deserialize)]
-struct GithubUser {
-    login: String,
+pub(crate) struct GithubUser {
+    pub(crate) login: String,
+    #[serde(default)]
+    pub(crate) name: Option<String>,
+}
+
+impl GithubUser {
+    pub(crate) fn display_label(&self) -> String {
+        match self.name.as_deref().map(str::trim).filter(|name| !name.is_empty()) {
+            Some(name) if name != self.login => format!("{name} (@{})", self.login),
+            _ => self.login.clone(),
+        }
+    }
+}
+
+#[derive(Clone, Deserialize)]
+pub(crate) struct GithubRepository {
+    pub(crate) full_name: String,
+    pub(crate) clone_url: String,
+    pub(crate) private: bool,
+    pub(crate) description: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -59,19 +79,55 @@ async fn response_text(
     Ok((status, body))
 }
 
-async fn validate_token(http_client: &Arc<dyn HttpClient>, token: &str) -> Result<GithubUser> {
+pub(crate) async fn validate_token(
+    http_client: &Arc<dyn HttpClient>,
+    token: &str,
+) -> Result<GithubUser> {
     let request = Request::builder()
         .method(Method::GET)
         .uri(USER_URL)
         .header("Accept", "application/vnd.github+json")
         .header("Authorization", format!("Bearer {token}"))
         .header("X-GitHub-Api-Version", "2022-11-28")
+        .header("User-Agent", "Zdroid")
         .body(AsyncBody::default())?;
     let (status, body) = response_text(http_client, request).await?;
     if !status.is_success() {
         bail!("GitHub rejected this token ({status})");
     }
     serde_json::from_str(&body).context("GitHub returned an invalid user response")
+}
+
+pub(crate) async fn fetch_repositories(
+    http_client: &Arc<dyn HttpClient>,
+    token: &str,
+) -> Result<Vec<GithubRepository>> {
+    let mut repositories = Vec::new();
+    for page in 1..=10 {
+        let uri = format!(
+            "{USER_REPOS_URL}?affiliation=owner,collaborator,organization_member&sort=pushed&direction=desc&per_page=100&page={page}"
+        );
+        let request = Request::builder()
+            .method(Method::GET)
+            .uri(uri)
+            .header("Accept", "application/vnd.github+json")
+            .header("Authorization", format!("Bearer {token}"))
+            .header("X-GitHub-Api-Version", "2022-11-28")
+            .header("User-Agent", "Zdroid")
+            .body(AsyncBody::default())?;
+        let (status, body) = response_text(http_client, request).await?;
+        if !status.is_success() {
+            bail!("GitHub could not load repositories ({status})");
+        }
+        let mut page_repositories: Vec<GithubRepository> = serde_json::from_str(&body)
+            .context("GitHub returned an invalid repository response")?;
+        let is_last_page = page_repositories.len() < 100;
+        repositories.append(&mut page_repositories);
+        if is_last_page {
+            break;
+        }
+    }
+    Ok(repositories)
 }
 
 async fn request_device_code(
@@ -206,7 +262,7 @@ impl GithubAccountsModal {
                 Ok(Some((username, token))) if username == GITHUB_GIT_USERNAME => {
                     match std::str::from_utf8(&token) {
                         Ok(token) => match validate_token(&http_client, token).await {
-                            Ok(user) => AuthState::SignedIn(user.login.into()),
+                            Ok(user) => AuthState::SignedIn(user.display_label().into()),
                             Err(error) => AuthState::Error(error.to_string().into()),
                         },
                         Err(_) => AuthState::Error("Stored GitHub credential is invalid.".into()),
@@ -266,7 +322,7 @@ impl GithubAccountsModal {
 
             this.update(cx, |this, cx| {
                 this.state = match result {
-                    Ok(user) => AuthState::SignedIn(user.login.into()),
+                    Ok(user) => AuthState::SignedIn(user.display_label().into()),
                     Err(error) => AuthState::Error(error.to_string().into()),
                 };
                 cx.notify();
