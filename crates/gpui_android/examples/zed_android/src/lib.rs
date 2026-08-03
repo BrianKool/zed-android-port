@@ -127,6 +127,111 @@ exec node "$codex_js" "$@"
     Ok(launcher)
 }
 
+struct AndroidAcpAgent {
+    id: &'static str,
+    command: &'static str,
+    args: &'static [&'static str],
+}
+
+const ANDROID_ACP_AGENTS: &[AndroidAcpAgent] = &[
+    AndroidAcpAgent {
+        id: "gemini",
+        command: "gemini",
+        args: &["--acp"],
+    },
+    AndroidAcpAgent {
+        id: "github-copilot-cli",
+        command: "copilot",
+        args: &["--acp", "--stdio"],
+    },
+    AndroidAcpAgent {
+        id: "grok-build",
+        command: "grok",
+        args: &["agent", "stdio"],
+    },
+    AndroidAcpAgent {
+        id: "opencode",
+        command: "opencode",
+        args: &["acp"],
+    },
+];
+
+fn executable_on_path(command: &str) -> Option<PathBuf> {
+    std::env::split_paths(&std::env::var_os("PATH")?).find_map(|directory| {
+        let candidate = directory.join(command);
+        candidate.is_file().then_some(candidate)
+    })
+}
+
+fn default_registry_agent_settings() -> settings::CustomAgentServerSettings {
+    settings::CustomAgentServerSettings::Registry {
+        env: HashMap::default(),
+        default_mode: None,
+        default_model: None,
+        favorite_models: Vec::new(),
+        default_config_options: HashMap::default(),
+        favorite_config_option_values: HashMap::default(),
+    }
+}
+
+fn configure_android_acp_agent(
+    agent_servers: &mut settings::AllAgentServersSettings,
+    spec: &AndroidAcpAgent,
+) {
+    let executable = executable_on_path(spec.command);
+
+    if let Some(executable) = executable {
+        let existing = agent_servers.get(spec.id).cloned();
+        let replacement = match existing {
+            Some(settings::CustomAgentServerSettings::Custom { .. }) => None,
+            Some(settings::CustomAgentServerSettings::Registry {
+                env,
+                default_mode,
+                default_model,
+                favorite_models,
+                default_config_options,
+                favorite_config_option_values,
+            }) => Some(settings::CustomAgentServerSettings::Custom {
+                path: executable.clone(),
+                args: spec.args.iter().map(|arg| (*arg).to_string()).collect(),
+                env,
+                default_mode,
+                default_model,
+                favorite_models,
+                default_config_options,
+                favorite_config_option_values,
+            }),
+            None => Some(settings::CustomAgentServerSettings::Custom {
+                path: executable.clone(),
+                args: spec.args.iter().map(|arg| (*arg).to_string()).collect(),
+                env: HashMap::default(),
+                default_mode: None,
+                default_model: None,
+                favorite_models: Vec::new(),
+                default_config_options: HashMap::default(),
+                favorite_config_option_values: HashMap::default(),
+            }),
+        };
+        if let Some(replacement) = replacement {
+            agent_servers.insert(spec.id.to_string(), replacement);
+        }
+        log::info!(
+            "zed_android: ACP agent {} uses terminal CLI {}",
+            spec.id,
+            executable.display()
+        );
+    } else {
+        agent_servers
+            .entry(spec.id.to_string())
+            .or_insert_with(default_registry_agent_settings);
+        log::info!(
+            "zed_android: ACP agent {} uses registry fallback; terminal command {} was not found",
+            spec.id,
+            spec.command
+        );
+    }
+}
+
 fn ensure_cli_subscription_agents(fs: Arc<dyn Fs>, cx: &mut App) {
     let codex_launcher = match ensure_codex_acp_launcher() {
         Ok(path) => Some(path.to_string_lossy().into_owned()),
@@ -148,7 +253,7 @@ fn ensure_cli_subscription_agents(fs: Arc<dyn Fs>, cx: &mut App) {
                     favorite_models: Vec::new(),
                     default_config_options: HashMap::default(),
                     favorite_config_option_values: HashMap::default(),
-            });
+                });
             if let settings::CustomAgentServerSettings::Registry { env, .. } = codex {
                 if let Some(launcher) = codex_launcher.as_ref() {
                     env.insert("CODEX_PATH".to_string(), launcher.clone());
@@ -170,6 +275,10 @@ fn ensure_cli_subscription_agents(fs: Arc<dyn Fs>, cx: &mut App) {
             if let settings::CustomAgentServerSettings::Registry { env, .. } = claude {
                 env.entry("CLAUDE_CODE_EXECUTABLE".to_string())
                     .or_insert_with(|| "claude".to_string());
+            }
+
+            for spec in ANDROID_ACP_AGENTS {
+                configure_android_acp_agent(agent_servers, spec);
             }
         });
 }

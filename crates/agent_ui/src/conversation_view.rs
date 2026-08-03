@@ -109,6 +109,28 @@ const TOKEN_THRESHOLD: u64 = 250;
 
 pub(crate) const DRAFT_PROMPT_PERSIST_DEBOUNCE: Duration = Duration::from_millis(250);
 
+#[cfg(target_os = "android")]
+fn android_agent_account_note(agent_id: &AgentId) -> Option<&'static str> {
+    match agent_id.as_ref() {
+        "gemini" => Some(
+            "Account availability is controlled by Google. Individual accounts may not be accepted; Gemini Code Assist Enterprise or API-key access may be required.",
+        ),
+        "github-copilot-cli" => {
+            Some("Sign in with a GitHub account that has GitHub Copilot access.")
+        }
+        "grok-build" => Some("Sign in with an xAI account that has Grok Build access."),
+        "opencode" => Some(
+            "OpenCode requires at least one model provider configured in its own CLI. Provider terms and charges apply.",
+        ),
+        _ => None,
+    }
+}
+
+#[cfg(not(target_os = "android"))]
+fn android_agent_account_note(_agent_id: &AgentId) -> Option<&'static str> {
+    None
+}
+
 mod thread_view;
 pub use thread_view::*;
 
@@ -2125,6 +2147,7 @@ impl ConversationView {
             .read(cx)
             .agent_display_name(&self.agent.agent_id())
             .unwrap_or_else(|| self.agent.agent_id().0);
+        let android_account_note = android_agent_account_note(&self.agent.agent_id());
 
         let show_fallback_description = auth_methods.len() > 1
             && configuration_view.is_none()
@@ -2196,6 +2219,10 @@ impl ConversationView {
             .description_slot(
                 v_flex()
                     .text_ui(cx)
+                    .when_some(android_account_note, |this, note| {
+                        this.gap_1()
+                            .child(Label::new(note).size(LabelSize::Small).color(Color::Muted))
+                    })
                     .map(|this| {
                         if show_fallback_description {
                             this.child(
