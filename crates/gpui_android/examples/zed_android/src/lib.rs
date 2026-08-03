@@ -127,6 +127,28 @@ exec node "$codex_js" "$@"
     Ok(launcher)
 }
 
+fn ensure_claude_acp_launcher() -> Result<PathBuf> {
+    let home = PathBuf::from(std::env::var_os("HOME").context("HOME is not set")?);
+    let launcher = home.join(".local/bin/zdroid-claude-agent-acp");
+    let parent = launcher
+        .parent()
+        .context("Claude ACP launcher has no parent")?;
+    std::fs::create_dir_all(parent).context("create Claude ACP launcher directory")?;
+
+    // This release asks the Claude SDK for the account's live model list and
+    // exposes full model versions through ACP. Pin it so a registry cache from
+    // an older Zdroid install cannot silently fall back to family aliases only.
+    let script = r#"#!/system/bin/sh
+set -eu
+exec npx -y @agentclientprotocol/claude-agent-acp@0.64.2 "$@"
+"#;
+    std::fs::write(&launcher, script).context("write Claude ACP launcher")?;
+    let mut permissions = std::fs::metadata(&launcher)?.permissions();
+    permissions.set_mode(0o700);
+    std::fs::set_permissions(&launcher, permissions).context("chmod Claude ACP launcher")?;
+    Ok(launcher)
+}
+
 struct AndroidAcpAgent {
     id: &'static str,
     command: &'static str,
@@ -240,6 +262,13 @@ fn ensure_cli_subscription_agents(fs: Arc<dyn Fs>, cx: &mut App) {
             None
         }
     };
+    let claude_launcher = match ensure_claude_acp_launcher() {
+        Ok(path) => Some(path),
+        Err(err) => {
+            log::error!("zed_android: failed to install Claude ACP launcher: {err:#}");
+            None
+        }
+    };
     cx.global::<SettingsStore>()
         .update_settings_file(fs, move |content, _cx| {
             let agent_servers = content.agent_servers.get_or_insert_default();
@@ -272,9 +301,35 @@ fn ensure_cli_subscription_agents(fs: Arc<dyn Fs>, cx: &mut App) {
                     default_config_options: HashMap::default(),
                     favorite_config_option_values: HashMap::default(),
                 });
-            if let settings::CustomAgentServerSettings::Registry { env, .. } = claude {
-                env.entry("CLAUDE_CODE_EXECUTABLE".to_string())
-                    .or_insert_with(|| "claude".to_string());
+            match claude {
+                settings::CustomAgentServerSettings::Registry {
+                    env,
+                    default_mode,
+                    default_model,
+                    favorite_models,
+                    default_config_options,
+                    favorite_config_option_values,
+                } if claude_launcher.is_some() => {
+                    env.entry("CLAUDE_CODE_EXECUTABLE".to_string())
+                        .or_insert_with(|| "claude".to_string());
+                    *claude = settings::CustomAgentServerSettings::Custom {
+                        path: claude_launcher.clone().unwrap(),
+                        args: Vec::new(),
+                        env: std::mem::take(env),
+                        default_mode: default_mode.take(),
+                        default_model: default_model.take(),
+                        favorite_models: std::mem::take(favorite_models),
+                        default_config_options: std::mem::take(default_config_options),
+                        favorite_config_option_values: std::mem::take(
+                            favorite_config_option_values,
+                        ),
+                    };
+                }
+                settings::CustomAgentServerSettings::Registry { env, .. }
+                | settings::CustomAgentServerSettings::Custom { env, .. } => {
+                    env.entry("CLAUDE_CODE_EXECUTABLE".to_string())
+                        .or_insert_with(|| "claude".to_string());
+                }
             }
 
             for spec in ANDROID_ACP_AGENTS {

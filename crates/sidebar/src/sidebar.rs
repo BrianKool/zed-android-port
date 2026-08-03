@@ -5274,7 +5274,7 @@ impl Sidebar {
         }
 
         let entries = self.mru_entries_for_switcher(cx);
-        if entries.len() < 2 {
+        if entries.is_empty() {
             return;
         }
 

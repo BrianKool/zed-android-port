@@ -3293,6 +3293,25 @@ impl AgentPanel {
         }
     }
 
+    fn open_thread_history(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(workspace) = self.workspace.upgrade() else {
+            return;
+        };
+        let Some(multi_workspace) = workspace
+            .read(cx)
+            .multi_workspace()
+            .and_then(|multi_workspace| multi_workspace.upgrade())
+        else {
+            return;
+        };
+
+        multi_workspace.update(cx, |multi_workspace, cx| {
+            if let Some(sidebar) = multi_workspace.sidebar() {
+                sidebar.toggle_thread_switcher(false, window, cx);
+            }
+        });
+    }
+
     pub(crate) fn open_configuration(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if matches!(self.overlay_view, Some(OverlayView::Configuration)) {
             self.clear_overlay(true, window, cx);
@@ -5397,15 +5416,13 @@ impl AgentPanel {
                 this.toggle_zoom(&ToggleZoom, window, cx);
             }));
 
-        let history_button = || {
+        let history_button = |cx: &mut Context<Self>| {
             IconButton::new("agent-thread-history", IconName::HistoryRerun)
                 .icon_size(IconSize::Small)
-                .tooltip(|_, cx| {
-                    Tooltip::for_action("Conversations & History", &ToggleWorkspaceSidebar, cx)
-                })
-                .on_click(|_, window, cx| {
-                    window.dispatch_action(Box::new(ToggleWorkspaceSidebar), cx);
-                })
+                .tooltip(Tooltip::text("Conversation History"))
+                .on_click(cx.listener(|this, _, window, cx| {
+                    this.open_thread_history(window, cx);
+                }))
         };
 
         let max_content_width = AgentSettings::get_global(cx).max_content_width;
@@ -5482,7 +5499,7 @@ impl AgentPanel {
                         .gap_1()
                         .pl_1()
                         .pr_1()
-                        .child(history_button())
+                        .child(history_button(cx))
                         .child(full_screen_button)
                         .child(self.render_panel_options_menu(window, cx)),
                 )
@@ -5531,7 +5548,7 @@ impl AgentPanel {
                         .gap_1()
                         .pl_1()
                         .pr_1()
-                        .child(history_button())
+                        .child(history_button(cx))
                         .when(can_create_entries, |this| this.child(new_thread_menu))
                         .child(full_screen_button)
                         .child(self.render_panel_options_menu(window, cx)),
