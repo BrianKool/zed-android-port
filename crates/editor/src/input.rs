@@ -3048,4 +3048,8 @@ impl EntityInputHandler for Editor {
     fn accepts_text_input(&self, _window: &mut Window, _cx: &mut Context<Self>) -> bool {
         self.expects_character_input
     }
+
+    fn should_auto_show_ime(&self, _window: &mut Window, _cx: &mut Context<Self>) -> bool {
+        self.mode.is_single_line()
+    }
 }

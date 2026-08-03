@@ -739,6 +739,23 @@ impl TouchState {
                         modifiers,
                         click_count,
                     }));
+                    if click_count == 2 {
+                        // Finish a native-style long press by opening the editor menu at the
+                        // selected word. The selection stays active for Cut/Copy/Paste.
+                        out.push(PlatformInput::MouseDown(MouseDownEvent {
+                            button: MouseButton::Right,
+                            position,
+                            modifiers,
+                            click_count: 1,
+                            first_mouse: false,
+                        }));
+                        out.push(PlatformInput::MouseUp(MouseUpEvent {
+                            button: MouseButton::Right,
+                            position,
+                            modifiers,
+                            click_count: 1,
+                        }));
+                    }
                 }
             }
 

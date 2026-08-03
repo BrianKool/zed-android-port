@@ -1316,6 +1316,13 @@ impl PlatformInputHandler {
             .update(|window, cx| self.handler.prefers_ime_for_printable_keys(window, cx))
             .unwrap_or(false)
     }
+
+    /// Returns whether focusing this handler should automatically show a soft keyboard.
+    pub fn query_should_auto_show_ime(&mut self) -> bool {
+        self.cx
+            .update(|window, cx| self.handler.should_auto_show_ime(window, cx))
+            .unwrap_or(false)
+    }
 }
 
 /// A struct representing a selection in a text buffer, in UTF16 characters.
@@ -1439,6 +1446,11 @@ pub trait InputHandler: 'static {
     /// character input (e.g. Vim insert mode returns `true`, normal mode returns `false`).
     /// The terminal keeps the default `false` so that raw keys reach the terminal process.
     fn prefers_ime_for_printable_keys(&mut self, _window: &mut Window, _cx: &mut App) -> bool {
+        false
+    }
+
+    /// Returns whether focusing this handler should automatically show a soft keyboard.
+    fn should_auto_show_ime(&mut self, _window: &mut Window, _cx: &mut App) -> bool {
         false
     }
 }

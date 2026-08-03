@@ -200,15 +200,19 @@ impl GithubAccountsModal {
             editor
         });
         let read_credentials = cx.read_credentials(GITHUB_CREDENTIALS_KEY);
+        let http_client = cx.http_client();
         cx.spawn(async move |this, cx| {
             let state = match read_credentials.await {
-                Ok(Some((username, _))) => {
-                    AuthState::SignedIn(if username == GITHUB_GIT_USERNAME {
-                        "GitHub".into()
-                    } else {
-                        username.into()
-                    })
+                Ok(Some((username, token))) if username == GITHUB_GIT_USERNAME => {
+                    match std::str::from_utf8(&token) {
+                        Ok(token) => match validate_token(&http_client, token).await {
+                            Ok(user) => AuthState::SignedIn(user.login.into()),
+                            Err(error) => AuthState::Error(error.to_string().into()),
+                        },
+                        Err(_) => AuthState::Error("Stored GitHub credential is invalid.".into()),
+                    }
                 }
+                Ok(Some((username, _))) => AuthState::SignedIn(username.into()),
                 Ok(None) => AuthState::SignedOut,
                 Err(error) => AuthState::Error(error.to_string().into()),
             };
@@ -292,9 +296,8 @@ impl GithubAccountsModal {
                     cx.notify();
                 })?;
 
-                // Device Flow only returns a token after GitHub has authenticated
-                // the user, so a separate profile lookup must not block login.
                 let token = poll_for_access_token(&http_client, &executor, &device).await?;
+                let user = validate_token(&http_client, &token).await?;
                 let store = cx.update(|cx| {
                     cx.write_credentials(
                         GITHUB_CREDENTIALS_KEY,
@@ -303,9 +306,7 @@ impl GithubAccountsModal {
                     )
                 });
                 store.await?;
-                Ok(GithubUser {
-                    login: "GitHub".to_string(),
-                })
+                Ok(user)
             }
             .await;
 

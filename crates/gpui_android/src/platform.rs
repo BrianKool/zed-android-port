@@ -723,16 +723,23 @@ impl AndroidPlatform {
         extra_window_id: Option<u64>,
         window_ptr: &crate::window::AndroidWindowStatePtr,
     ) {
-        let (currently_visible, target_kind, app, was_visible, reassert_requested) = {
+        let (currently_visible, target_kind, should_auto_show, app, was_visible, reassert_requested) = {
             let mut state = window_ptr.state.borrow_mut();
             let reassert_requested = std::mem::take(&mut state.ime_reassert_requested);
-            let target_kind = state
+            let (target_kind, should_auto_show) = state
                 .input_handler
                 .as_mut()
-                .map(crate::ime::probe_target_kind);
+                .map(|handler| {
+                    (
+                        Some(crate::ime::probe_target_kind(handler)),
+                        handler.query_should_auto_show_ime(),
+                    )
+                })
+                .unwrap_or((None, false));
             (
                 state.input_handler.is_some(),
                 target_kind,
+                should_auto_show,
                 state.android_app.clone(),
                 state.ime_currently_visible,
                 reassert_requested,
@@ -750,6 +757,7 @@ impl AndroidPlatform {
                 // on and tap the keyboard button, the IME has
                 // current state.
                 if crate::ime::on_screen_keyboard_enabled()
+                    && should_auto_show
                     && target_kind != Some(crate::ime::ImeTargetKind::Terminal)
                 {
                     crate::ime::show_keyboard(&app, extra_window_id);
@@ -769,6 +777,7 @@ impl AndroidPlatform {
         } else if currently_visible
             && reassert_requested
             && crate::ime::on_screen_keyboard_enabled()
+            && should_auto_show
             && target_kind != Some(crate::ime::ImeTargetKind::Terminal)
         {
             crate::ime::reassert_keyboard(&app, extra_window_id);

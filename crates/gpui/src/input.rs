@@ -75,6 +75,11 @@ pub trait EntityInputHandler: 'static + Sized {
     fn accepts_text_input(&self, _window: &mut Window, _cx: &mut Context<Self>) -> bool {
         true
     }
+
+    /// See [`InputHandler::should_auto_show_ime`] for details.
+    fn should_auto_show_ime(&self, _window: &mut Window, _cx: &mut Context<Self>) -> bool {
+        false
+    }
 }
 
 /// The canonical implementation of [`crate::PlatformInputHandler`]. Call [`Window::handle_input`]
@@ -191,5 +196,10 @@ impl<V: EntityInputHandler> InputHandler for ElementInputHandler<V> {
     fn prefers_ime_for_printable_keys(&mut self, window: &mut Window, cx: &mut App) -> bool {
         self.view
             .update(cx, |view, cx| view.accepts_text_input(window, cx))
+    }
+
+    fn should_auto_show_ime(&mut self, window: &mut Window, cx: &mut App) -> bool {
+        self.view
+            .update(cx, |view, cx| view.should_auto_show_ime(window, cx))
     }
 }
