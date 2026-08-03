@@ -11,11 +11,12 @@ mod title_bar;
 
 use std::borrow::Cow;
 use std::collections::HashMap;
+use std::os::unix::fs::PermissionsExt as _;
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use android_activity::AndroidApp;
-use anyhow::Result;
+use anyhow::{Context as _, Result};
 use client::{Client, UserStore};
 use db::AppDatabase;
 use db::kvp::KeyValueStore;
@@ -76,7 +77,63 @@ fn active_provider(data_path: &std::path::Path) -> Box<dyn RuntimeProvider> {
 /// app-server protocol is generated against that version, while pointing
 /// CODEX_PATH at a newer global CLI can initialize successfully but then hang
 /// waiting for turn notifications with a different wire shape.
+fn ensure_codex_acp_launcher() -> Result<PathBuf> {
+    let home = PathBuf::from(std::env::var_os("HOME").context("HOME is not set")?);
+    let launcher = home.join(".local/bin/zdroid-codex-acp-cli");
+    let parent = launcher.parent().context("Codex launcher has no parent")?;
+    std::fs::create_dir_all(parent).context("create Codex launcher directory")?;
+
+    // codex-acp installs its protocol-compatible @openai/codex dependency in
+    // npm's private _npx cache. That cache is outside Zdroid's global npm
+    // launcher-generator walk, so patch the bundled native binary immediately
+    // before app-server starts. Reading the parent Node process cmdline locates
+    // the exact npx generation that launched this adapter, avoiding stale cache
+    // entries from older codex-acp versions.
+    let script = r#"#!/system/bin/sh
+set -eu
+
+parent_args="$(tr '\000' '\n' < "/proc/$PPID/cmdline" 2>/dev/null || true)"
+acp_js="$(printf '%s\n' "$parent_args" | grep '/@agentclientprotocol/codex-acp/.*\.js$' | head -n 1 || true)"
+if [ -z "$acp_js" ]; then
+    cache="${npm_config_cache:-$HOME/../node/cache}"
+    acp_js="$(find "$cache/_npx" -path '*/node_modules/@agentclientprotocol/codex-acp/dist/index.js' -type f 2>/dev/null | tail -n 1 || true)"
+fi
+if [ -z "$acp_js" ]; then
+    echo 'Zdroid: unable to locate codex-acp in the npm cache' >&2
+    exit 127
+fi
+
+node_modules="${acp_js%%/@agentclientprotocol/codex-acp/*}"
+codex_root="$node_modules/@openai/codex"
+codex_js="$codex_root/bin/codex.js"
+if [ ! -f "$codex_js" ]; then
+    echo "Zdroid: compatible Codex package missing beside $acp_js" >&2
+    exit 127
+fi
+
+find "$codex_root" -type f -size +1048576c 2>/dev/null | while IFS= read -r file; do
+    if grep -q -a '/etc/resolv.conf' "$file" 2>/dev/null; then
+        perl -0777 -pi -e 's{/etc/resolv\.conf}{/sdcard/.zed/r\x00\x00}g' "$file"
+    fi
+done
+
+exec node "$codex_js" "$@"
+"#;
+    std::fs::write(&launcher, script).context("write Codex ACP launcher")?;
+    let mut permissions = std::fs::metadata(&launcher)?.permissions();
+    permissions.set_mode(0o700);
+    std::fs::set_permissions(&launcher, permissions).context("chmod Codex ACP launcher")?;
+    Ok(launcher)
+}
+
 fn ensure_cli_subscription_agents(fs: Arc<dyn Fs>, cx: &mut App) {
+    let codex_launcher = match ensure_codex_acp_launcher() {
+        Ok(path) => Some(path.to_string_lossy().into_owned()),
+        Err(err) => {
+            log::error!("zed_android: failed to install Codex ACP launcher: {err:#}");
+            None
+        }
+    };
     cx.global::<SettingsStore>()
         .update_settings_file(fs, move |content, _cx| {
             let agent_servers = content.agent_servers.get_or_insert_default();
@@ -92,11 +149,11 @@ fn ensure_cli_subscription_agents(fs: Arc<dyn Fs>, cx: &mut App) {
                     favorite_config_option_values: HashMap::default(),
             });
             if let settings::CustomAgentServerSettings::Registry { env, .. } = codex {
-                // Older Zdroid previews added this override. Remove it from
-                // persisted settings so codex-acp uses its own compatible
-                // @openai/codex dependency while still reading the shared
-                // login from HOME/.codex.
-                env.remove("CODEX_PATH");
+                if let Some(launcher) = codex_launcher.as_ref() {
+                    env.insert("CODEX_PATH".to_string(), launcher.clone());
+                } else {
+                    env.remove("CODEX_PATH");
+                }
             }
 
             let claude = agent_servers

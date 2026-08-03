@@ -444,13 +444,24 @@ impl AndroidWindowStatePtr {
     /// active `PlatformInputHandler` (gpui's text-input path) when the
     /// callback didn't claim them.
     pub(crate) fn handle_input(&self, input: PlatformInput) {
-        let is_pointer_down = matches!(input, PlatformInput::MouseDown(_));
+        let pointer_down_position = match &input {
+            PlatformInput::MouseDown(event) => Some(event.position),
+            _ => None,
+        };
         let callback = self.callbacks.borrow_mut().input.take();
         if let Some(mut callback) = callback {
             let result = callback(input.clone());
             self.callbacks.borrow_mut().input = Some(callback);
-            if is_pointer_down && self.state.borrow().input_handler.is_some() {
-                self.state.borrow_mut().ime_reassert_requested = true;
+            if let Some(position) = pointer_down_position {
+                let mut state = self.state.borrow_mut();
+                let tapped_text_input = state
+                    .input_handler
+                    .as_mut()
+                    .and_then(|handler| handler.character_index_for_point(position))
+                    .is_some();
+                if tapped_text_input {
+                    state.ime_reassert_requested = true;
+                }
             }
             if !result.propagate {
                 return;
