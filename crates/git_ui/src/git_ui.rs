@@ -4,7 +4,7 @@ use editor::{Editor, actions::DiffClipboardWithSelectionData};
 
 use ui::{
     Color, Headline, HeadlineSize, Icon, IconName, IconSize, IntoElement, ParentElement, Render,
-    Styled, StyledExt, TintColor, div, h_flex, rems, v_flex,
+    Styled, StyledExt, TintColor, WithScrollbar, div, h_flex, rems, v_flex,
 };
 use workspace::{Toast, notifications::NotificationId};
 
@@ -17,7 +17,7 @@ use git::{
 };
 use gpui::{
     App, ClipboardItem, Context, DismissEvent, Entity, EventEmitter, FocusHandle, Focusable,
-    SharedString, StatefulInteractiveElement, Subscription, Task, TaskExt, Window,
+    ScrollHandle, SharedString, StatefulInteractiveElement, Subscription, Task, TaskExt, Window,
 };
 use menu::{Cancel, Confirm};
 use project::git_store::Repository;
@@ -1091,6 +1091,7 @@ struct GitCloneModal {
     panel: Entity<GitPanel>,
     repo_input: Entity<Editor>,
     github_search_input: Entity<Editor>,
+    github_repository_scroll_handle: ScrollHandle,
     mode: GitCloneMode,
     github_state: GithubRepositoriesState,
     selected_github_repo: Option<github_auth::GithubRepository>,
@@ -1124,6 +1125,7 @@ impl GitCloneModal {
             panel,
             repo_input,
             github_search_input,
+            github_repository_scroll_handle: ScrollHandle::new(),
             mode: GitCloneMode::ChooseSource,
             github_state: GithubRepositoriesState::NotLoaded,
             selected_github_repo: None,
@@ -1287,7 +1289,12 @@ impl GitCloneModal {
             .into_any_element()
     }
 
-    fn render_github(&self, is_narrow: bool, cx: &mut Context<Self>) -> AnyElement {
+    fn render_github(
+        &self,
+        is_narrow: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let body = match &self.github_state {
             GithubRepositoriesState::NotLoaded | GithubRepositoriesState::Loading => v_flex()
                 .p_4()
@@ -1373,49 +1380,62 @@ impl GitCloneModal {
                             .child(self.github_search_input.clone()),
                     )
                     .child(
-                        v_flex()
-                            .id("github-repository-list")
+                        div()
+                            .relative()
                             .flex_1()
                             .min_h_0()
-                            .overflow_y_scroll()
-                            .when(matches.is_empty(), |this| {
-                                this.p_4().child(
-                                    Label::new("No matching repositories.").color(Color::Muted),
-                                )
-                            })
-                            .children(matches.into_iter().enumerate().map(|(ix, repo)| {
-                                let selected = self
-                                    .selected_github_repo
-                                    .as_ref()
-                                    .is_some_and(|selected| selected.clone_url == repo.clone_url);
-                                let selected_repo = repo.clone();
-                                Button::new(
-                                    format!("github-repository-{ix}"),
-                                    repo.full_name.clone(),
-                                )
-                                .full_width()
-                                .truncate(true)
-                                .toggle_state(selected)
-                                .selected_style(ButtonStyle::Tinted(TintColor::Accent))
-                                .start_icon(
-                                    Icon::new(if repo.private {
-                                        IconName::LockOutlined
-                                    } else {
-                                        IconName::Github
+                            .overflow_hidden()
+                            .child(
+                                v_flex()
+                                    .id("github-repository-list")
+                                    .size_full()
+                                    .track_scroll(&self.github_repository_scroll_handle)
+                                    .overflow_y_scroll()
+                                    .when(matches.is_empty(), |this| {
+                                        this.p_4().child(
+                                            Label::new("No matching repositories.")
+                                                .color(Color::Muted),
+                                        )
                                     })
-                                    .size(IconSize::Small),
-                                )
-                                .end_icon(
-                                    selected
-                                        .then(|| Icon::new(IconName::Check).size(IconSize::Small)),
-                                )
-                                .on_click(cx.listener(
-                                    move |this, _, _, cx| {
-                                        this.selected_github_repo = Some(selected_repo.clone());
-                                        cx.notify();
-                                    },
-                                ))
-                            })),
+                                    .children(matches.into_iter().enumerate().map(|(ix, repo)| {
+                                        let selected =
+                                            self.selected_github_repo.as_ref().is_some_and(
+                                                |selected| selected.clone_url == repo.clone_url,
+                                            );
+                                        let selected_repo = repo.clone();
+                                        Button::new(
+                                            format!("github-repository-{ix}"),
+                                            repo.full_name.clone(),
+                                        )
+                                        .full_width()
+                                        .truncate(true)
+                                        .toggle_state(selected)
+                                        .selected_style(ButtonStyle::Tinted(TintColor::Accent))
+                                        .start_icon(
+                                            Icon::new(if repo.private {
+                                                IconName::LockOutlined
+                                            } else {
+                                                IconName::Github
+                                            })
+                                            .size(IconSize::Small),
+                                        )
+                                        .end_icon(selected.then(|| {
+                                            Icon::new(IconName::Check).size(IconSize::Small)
+                                        }))
+                                        .on_click(
+                                            cx.listener(move |this, _, _, cx| {
+                                                this.selected_github_repo =
+                                                    Some(selected_repo.clone());
+                                                cx.notify();
+                                            }),
+                                        )
+                                    })),
+                            )
+                            .vertical_scrollbar_for(
+                                &self.github_repository_scroll_handle,
+                                window,
+                                cx,
+                            ),
                     )
                     .into_any_element()
             }
@@ -1491,7 +1511,7 @@ impl GitCloneModal {
                     )
                     .child(Label::new("GitHub Repositories")),
             )
-            .child(div().flex_1().min_h_0().overflow_hidden().child(body))
+            .child(body)
             .child(
                 v_flex()
                     .mx_2()
@@ -1542,7 +1562,7 @@ impl Render for GitCloneModal {
                 GitCloneMode::RepositoryUrl => self.render_repository_url(cx),
                 GitCloneMode::Github => {
                     let is_narrow = window.viewport_size().width / window.rem_size() < 42.;
-                    self.render_github(is_narrow, cx)
+                    self.render_github(is_narrow, window, cx)
                 }
             })
             .on_action(cx.listener(|_, _: &menu::Cancel, _, cx| {
