@@ -343,13 +343,21 @@ impl Render for RuntimePicker {
         // need later for `render_card` and `client_side_decorations`.
         let bg = cx.theme().colors().editor_background;
         let text = cx.theme().colors().text;
+        let compact = cfg!(target_os = "android") && window.viewport_size().width.as_f32() < 520.0;
 
         let cards: Vec<AnyElement> = self
             .entries
             .iter()
             .enumerate()
             .map(|(idx, entry)| {
-                render_card(idx, entry, self.current, self.install_status.as_deref(), cx)
+                render_card(
+                    idx,
+                    entry,
+                    self.current,
+                    self.install_status.as_deref(),
+                    compact,
+                    cx,
+                )
             })
             .collect();
 
@@ -388,17 +396,14 @@ impl Render for RuntimePicker {
                 )
         });
 
+        // Keep the viewport at the available window height and let this inner
+        // column retain its natural height. If the scroll node itself is a
+        // flex column, its cards shrink to fit and GPUI sees no overflow.
         let content = v_flex()
-            .id("runtime-picker-scroll")
-            .key_context("RuntimePicker")
-            .track_focus(&self.focus_handle)
-            .flex_1()
-            .min_h_0()
             .w_full()
-            .overflow_y_scroll()
-            .track_scroll(&self.scroll_handle)
             .p_6()
             .gap_4()
+            .when(compact, |this| this.p_4())
             .bg(bg)
             .when(cfg!(target_os = "macos"), |this| this.pt_10())
             .child(
@@ -415,7 +420,17 @@ impl Render for RuntimePicker {
                     ),
             )
             .when_some(banner, |this, banner| this.child(banner))
-            .child(v_flex().gap_3().children(cards));
+            .child(v_flex().w_full().gap_3().children(cards));
+
+        let scroll_viewport = div()
+            .id("runtime-picker-scroll")
+            .key_context("RuntimePicker")
+            .track_focus(&self.focus_handle)
+            .size_full()
+            .overflow_y_scroll()
+            .track_scroll(&self.scroll_handle)
+            .bg(bg)
+            .child(content);
 
         client_side_decorations(
             v_flex()
@@ -427,7 +442,8 @@ impl Render for RuntimePicker {
                         .relative()
                         .flex_1()
                         .min_h_0()
-                        .child(content)
+                        .overflow_hidden()
+                        .child(scroll_viewport)
                         .vertical_scrollbar_for(&self.scroll_handle, window, cx),
                 ),
             window,
@@ -442,6 +458,7 @@ fn render_card(
     entry: &AdapterEntry,
     current: Option<RuntimeId>,
     install_status: Option<&str>,
+    compact: bool,
     cx: &mut Context<RuntimePicker>,
 ) -> AnyElement {
     let theme_colors = cx.theme().colors();
@@ -467,6 +484,7 @@ fn render_card(
     h_flex()
         .id(("adapter-card", idx))
         .gap_4()
+        .when(compact, |this| this.flex_col().items_start())
         .p_4()
         .w_full()
         .border_1()
@@ -539,7 +557,7 @@ fn render_card(
         // state), the user needs the Install button — showing a
         // "Selected" chip there would leave them stuck without a way
         // to trigger the download.
-        .child(
+        .child(div().when(compact, |this| this.w_full()).child(
             if id == RuntimeId::Chroot && !matches!(entry.health, HealthStatus::Healthy) {
                 // Chroot adapter requires the zdroid-spawnd Magisk module
                 // to be running. If the daemon socket isn't reachable,
@@ -592,7 +610,7 @@ fn render_card(
                     }))
                     .into_any_element()
             },
-        )
+        ))
         .into_any_element()
 }
 

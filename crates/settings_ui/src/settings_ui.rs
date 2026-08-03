@@ -724,12 +724,17 @@ pub fn open_settings_editor(
                 window_background: cx.theme().window_background_appearance(),
                 app_id: Some(app_id.to_owned()),
                 window_decorations: Some(window_decorations),
-                window_min_size: Some(gpui::Size {
-                    // Don't make the settings window thinner than this,
-                    // otherwise, it gets unusable. Users with smaller res monitors
-                    // can customize the height, but not the width.
-                    width: px(900.0),
-                    height: px(240.0),
+                window_min_size: Some(if cfg!(target_os = "android") {
+                    gpui::Size {
+                        width: px(320.0),
+                        height: px(360.0),
+                    }
+                } else {
+                    gpui::Size {
+                        // Desktop settings keeps its navigation and content side by side.
+                        width: px(900.0),
+                        height: px(240.0),
+                    }
                 }),
                 window_bounds: Some(WindowBounds::centered(scaled_bounds, cx)),
                 ..Default::default()
