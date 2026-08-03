@@ -607,6 +607,7 @@ class MainActivity : GameActivity(), ImeHost {
             // row so it floats just above the keyboard, following the
             // IME show/hide animation smoothly.
             extraKeysView?.translationY = -imeBottom.toFloat()
+            applyImeViewportInset(imeBottom)
 
             lastImeInsetBottom = imeBottom
             insets
@@ -809,6 +810,21 @@ class MainActivity : GameActivity(), ImeHost {
             }
         }
         return null
+    }
+
+    /** Keep the GPUI surface above the soft keyboard in edge-to-edge mode. */
+    private fun applyImeViewportInset(imeBottom: Int) {
+        val surface = findSurfaceView(window.decorView) ?: return
+        val params = surface.layoutParams
+        if (params is ViewGroup.MarginLayoutParams) {
+            if (params.bottomMargin == imeBottom) return
+            params.bottomMargin = imeBottom
+            surface.layoutParams = params
+            surface.requestLayout()
+            Log.i("zdroid_ime", "GPUI viewport bottom inset=$imeBottom")
+        } else {
+            Log.w("zdroid_ime", "SurfaceView has no margin layout params; IME resize skipped")
+        }
     }
 
     /// Attach an animated splash overlay above the GameActivity

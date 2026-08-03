@@ -299,6 +299,7 @@ class ExtraWindowActivity : AppCompatActivity(), ImeHost {
                 }
                 setImeShown(false)
             }
+            applyImeViewportInset(imeBottom)
             lastImeInsetBottom = imeBottom
             insets
         }
@@ -795,6 +796,20 @@ class ExtraWindowActivity : AppCompatActivity(), ImeHost {
         override fun surfaceDestroyed(holder: SurfaceHolder) {
             Log.i(TAG, "surfaceDestroyed windowId=$id")
             NativeBridge.nativeOnExtraSurfaceDestroyed(id)
+        }
+    }
+
+    /** Keep this GPUI surface above the soft keyboard in edge-to-edge mode. */
+    private fun applyImeViewportInset(imeBottom: Int) {
+        val params = surfaceView.layoutParams
+        if (params is android.view.ViewGroup.MarginLayoutParams) {
+            if (params.bottomMargin == imeBottom) return
+            params.bottomMargin = imeBottom
+            surfaceView.layoutParams = params
+            surfaceView.requestLayout()
+            Log.i(TAG_IME, "GPUI viewport[w=$extraWindowId] bottom inset=$imeBottom")
+        } else {
+            Log.w(TAG_IME, "SurfaceView has no margin layout params; IME resize skipped")
         }
     }
 
