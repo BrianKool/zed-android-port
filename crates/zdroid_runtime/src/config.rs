@@ -1,4 +1,4 @@
-//! `runtime.toml` schema + the resolved-config struct downstream uses.
+﻿//! `runtime.toml` schema + the resolved-config struct downstream uses.
 //!
 //! On disk the file looks like:
 //!
@@ -15,7 +15,7 @@
 //! su_path = "/product/bin/su"
 //!
 //! [bootstrap]
-//! prefix = "/data/data/com.zdroid/files/usr"
+//! prefix = "/data/data/com.zdroid.b/files/usr"
 //! proot_rootfs = ""  # empty = bare mode
 //! release_repo = "Dylanmurzello/zdroid-bootstrap"
 //!
@@ -86,7 +86,7 @@ pub struct ChrootConfig {
     /// Filesystem path of the rootfs root, host-side.
     pub root: PathBuf,
     /// Path inside the rootfs that bind-mounts Zdroid's home dir. The
-    /// translation layer maps `~/projects/foo` (host) ↔ `/zed/projects/foo`
+    /// translation layer maps `~/projects/foo` (host) â†” `/zed/projects/foo`
     /// (chroot) using this.
     pub home_bind: PathBuf,
     /// Abstract or filesystem socket where `zd-spawnd` listens. The
@@ -128,7 +128,7 @@ pub struct ExternalTermuxConfig {
     pub prefix: PathBuf,
 }
 
-/// Resolved config — the active adapter section flattened so downstream
+/// Resolved config â€” the active adapter section flattened so downstream
 /// code never has to ask "which kind is this".
 #[derive(Debug, Clone)]
 pub enum ResolvedConfig {
@@ -171,7 +171,7 @@ impl RuntimeFile {
                 chroot: Some(ChrootConfig {
                     root: PathBuf::from("/data/local/nhsystem/kali-arm64"),
                     home_bind: PathBuf::from("/zed"),
-                    spawnd_socket: PathBuf::from("/data/data/com.zdroid/files/run/zd-spawn"),
+                    spawnd_socket: PathBuf::from("/data/data/com.zdroid.b/files/run/zd-spawn"),
                     su_path: PathBuf::from("/product/bin/su"),
                 }),
                 bootstrap: None,
@@ -181,7 +181,7 @@ impl RuntimeFile {
                 runtime,
                 chroot: None,
                 bootstrap: Some(BootstrapConfig {
-                    prefix: PathBuf::from("/data/data/com.zdroid/files/usr"),
+                    prefix: PathBuf::from("/data/data/com.zdroid.b/files/usr"),
                     proot_rootfs: None,
                     release_repo: "Dylanmurzello/zdroid-bootstrap".into(),
                 }),
@@ -211,7 +211,7 @@ impl RuntimeFile {
     }
 
     /// Atomically serialize and write `runtime.toml` to `path`. Writes
-    /// to a sibling `path.tmp`, then renames into place — so a partial
+    /// to a sibling `path.tmp`, then renames into place â€” so a partial
     /// write doesn't leave a half-formed config that breaks the
     /// adapter dispatch on next launch.
     pub fn save(&self, path: &std::path::Path) -> anyhow::Result<()> {
@@ -227,7 +227,7 @@ impl RuntimeFile {
 
     /// Pick the active section based on `runtime.type` and return it
     /// as a [`ResolvedConfig`]. Errors if the matching section is
-    /// missing — `runtime.toml` declared chroot but no `[chroot]`
+    /// missing â€” `runtime.toml` declared chroot but no `[chroot]`
     /// block exists, etc.
     pub fn resolve(self) -> anyhow::Result<ResolvedConfig> {
         match self.runtime.kind {

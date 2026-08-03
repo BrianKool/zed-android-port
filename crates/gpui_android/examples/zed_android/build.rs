@@ -1,20 +1,20 @@
-//! Build-time guard for the bootstrap-package-name invariant.
+﻿//! Build-time guard for the bootstrap-package-name invariant.
 //!
 //! Termux's bootstrap binaries hardcode `/data/data/<package>/files/...` in
 //! every ELF's `DT_RUNPATH` and every shell shebang. Rebuilding the
-//! bootstrap with `TERMUX_APP_PACKAGE=com.zdroid` bakes that exact
+//! bootstrap with `TERMUX_APP_PACKAGE=com.zdroid.b` bakes that exact
 //! string into ~3 GB of binaries. If `applicationId` in
 //! `android/app/build.gradle.kts` ever drifts from this constant, every
 //! binary in the rebuilt bootstrap fails at runtime with `dlopen failed:
-//! library "/data/data/com.termux/..." not found` — an afternoon of
+//! library "/data/data/com.termux/..." not found` â€” an afternoon of
 //! head-scratching by the time it shows up in logcat.
 //!
 //! Make the mismatch un-compileable: read the gradle file, assert it
 //! contains `applicationId = "<our package>"`. Only checks the gradle file
-//! exists and contains the literal — does NOT pretend to be a kts parser.
+//! exists and contains the literal â€” does NOT pretend to be a kts parser.
 //! AGP and we agree on the substring or we both panic.
 
-const BOOTSTRAP_PACKAGE_NAME: &str = "com.zdroid";
+const BOOTSTRAP_PACKAGE_NAME: &str = "com.zdroid.b";
 
 fn main() {
     let gradle_path = "android/app/build.gradle.kts";

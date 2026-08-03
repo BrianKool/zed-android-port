@@ -204,7 +204,7 @@ fn build_menu_entries(
 fn app_menu_definitions() -> Vec<MenuDefinition> {
     vec![
         MenuDefinition {
-            title: "Zdroid",
+            title: "Zdroid-B",
             items: zed_menu_items,
         },
         MenuDefinition {

@@ -1,4 +1,4 @@
-package com.zdroid
+﻿package com.zdroid
 
 import android.content.res.AssetFileDescriptor
 import android.database.Cursor
@@ -14,15 +14,15 @@ import java.io.File
 import java.io.FileNotFoundException
 import java.util.LinkedList
 
-/// Exposes Zed's `~` (i.e. `/data/data/com.zdroid/files/home`) to
+/// Exposes Zed's `~` (i.e. `/data/data/com.zdroid.b/files/home`) to
 /// other apps via Android's Storage Access Framework. After install Zed
-/// shows up in any system "Open from / Save to" picker as its own root —
+/// shows up in any system "Open from / Save to" picker as its own root â€”
 /// same pattern as Termux. Read-write; users can browse, edit, share files
 /// from `~` without ADB or run-as.
 ///
 /// Lifecycle gotcha: ContentProviders attach earlier than Activities. The
 /// system can fork our process, run `Application.onCreate`, then
-/// `ContentProvider.onCreate`, then service queries — without ever
+/// `ContentProvider.onCreate`, then service queries â€” without ever
 /// touching `MainActivity` or `android_main`. So the bootstrap extractor
 /// and env setup haven't run yet on a cold provider query. We rely on
 /// `ZedApplication.onCreate` mkdir-ing `~` so the root is at least
@@ -41,7 +41,7 @@ class ZedDocumentsProvider : DocumentsProvider() {
     override fun queryRoots(projection: Array<out String>?): Cursor {
         val cursor = MatrixCursor(projection ?: DEFAULT_ROOT_PROJECTION)
         if (!baseDir.isDirectory) {
-            // Defense-in-depth — `ZedApplication.onCreate` should have
+            // Defense-in-depth â€” `ZedApplication.onCreate` should have
             // mkdir'd this. If it didn't, return empty rather than crashing
             // the system DocumentsUI.
             Log.w(TAG, "queryRoots: $baseDir is not a directory; returning empty cursor")
@@ -114,7 +114,7 @@ class ZedDocumentsProvider : DocumentsProvider() {
             if (file.isDirectory) {
                 // Skip the dev-tree black holes that match nothing useful
                 // and explode the walk. User can still navigate into them
-                // manually for queryChildDocuments — this only filters the
+                // manually for queryChildDocuments â€” this only filters the
                 // recursive search.
                 if (file != root && file.name in SKIP_DIRS) continue
                 try {
@@ -193,7 +193,7 @@ class ZedDocumentsProvider : DocumentsProvider() {
             counter++
         }
         if (!file.renameTo(target)) {
-            throw FileNotFoundException("renameDocument failed: $documentId → ${target.absolutePath}")
+            throw FileNotFoundException("renameDocument failed: $documentId â†’ ${target.absolutePath}")
         }
         return target.absolutePath
     }
@@ -279,7 +279,7 @@ class ZedDocumentsProvider : DocumentsProvider() {
         )
 
         // `MimeTypeMap.getSingleton()` doesn't know about most dev-language
-        // extensions and falls back to `application/octet-stream` — files
+        // extensions and falls back to `application/octet-stream` â€” files
         // with that MIME often don't show up in receiving apps that filter
         // on `text/*` (share sheet, "open with" pickers). Provide explicit
         // text/x-* mappings so .rs / .toml / .md / etc. surface as text.
@@ -303,7 +303,7 @@ class ZedDocumentsProvider : DocumentsProvider() {
             "dockerfile" to "text/plain",
         )
 
-        // Skip during recursive search — these dirs commonly contain tens
+        // Skip during recursive search â€” these dirs commonly contain tens
         // of thousands of files that match no useful query and burn the
         // 50-result cap before reaching real source. Skipped only during
         // search-walk; users can still navigate into them via the picker.

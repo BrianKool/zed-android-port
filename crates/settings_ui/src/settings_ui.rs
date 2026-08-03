@@ -893,6 +893,7 @@ enum SettingsPageItem {
     SubPageLink(SubPageLink),
     DynamicItem(DynamicItem),
     ActionLink(ActionLink),
+    StaticInfo(StaticInfo),
 }
 
 impl std::fmt::Debug for SettingsPageItem {
@@ -911,6 +912,7 @@ impl std::fmt::Debug for SettingsPageItem {
             SettingsPageItem::ActionLink(action_link) => {
                 write!(f, "ActionLink({})", action_link.title)
             }
+            SettingsPageItem::StaticInfo(info) => write!(f, "StaticInfo({})", info.title),
         }
     }
 }
@@ -1201,6 +1203,42 @@ impl SettingsPageItem {
                 )
                 .when(bottom_border, |this| this.child(Divider::horizontal()))
                 .into_any_element(),
+            SettingsPageItem::StaticInfo(info) => {
+                let compact =
+                    cfg!(target_os = "android") && window.viewport_size().width.as_f32() < 520.0;
+                v_flex()
+                    .group("setting-item")
+                    .px_8()
+                    .child(
+                        h_flex()
+                            .id(("static-info", item_index))
+                            .w_full()
+                            .min_w_0()
+                            .justify_between()
+                            .gap_4()
+                            .when(compact, |this| this.flex_col().items_start().gap_2())
+                            .map(apply_padding)
+                            .child(
+                                v_flex()
+                                    .min_w_0()
+                                    .child(Label::new(info.title.clone()))
+                                    .when_some(info.description.as_ref(), |this, description| {
+                                        this.child(
+                                            Label::new(description.clone())
+                                                .size(LabelSize::Small)
+                                                .color(Color::Muted),
+                                        )
+                                    }),
+                            )
+                            .child(
+                                Label::new(info.value.clone())
+                                    .size(LabelSize::Default)
+                                    .color(Color::Accent),
+                            ),
+                    )
+                    .when(bottom_border, |this| this.child(Divider::horizontal()))
+                    .into_any_element()
+            }
         }
     }
 }
@@ -1447,6 +1485,14 @@ struct ActionLink {
     description: Option<SharedString>,
     button_text: SharedString,
     on_click: Arc<dyn Fn(&mut SettingsWindow, &mut Window, &mut App) + Send + Sync>,
+    files: FileMask,
+}
+
+#[derive(Clone, PartialEq)]
+struct StaticInfo {
+    title: SharedString,
+    description: Option<SharedString>,
+    value: SharedString,
     files: FileMask,
 }
 
@@ -1996,6 +2042,13 @@ impl SettingsWindow {
                             any_found_since_last_header = true;
                         }
                     }
+                    SettingsPageItem::StaticInfo(StaticInfo { files, .. }) => {
+                        if !files.contains(current_file) {
+                            page_filter[index] = false;
+                        } else {
+                            any_found_since_last_header = true;
+                        }
+                    }
                 }
             }
             if let Some(last_header) = page_filter.get_mut(header_index)
@@ -2242,6 +2295,27 @@ impl SettingsWindow {
                             &mut fuzzy_match_candidates,
                             key_index,
                             action_link.title.as_ref(),
+                        );
+                    }
+                    SettingsPageItem::StaticInfo(info) => {
+                        documents.push(SearchDocument {
+                            id: key_index,
+                            words: split_into_words(&[
+                                page.title,
+                                header_str,
+                                info.title.as_ref(),
+                                info.value.as_ref(),
+                            ]),
+                        });
+                        push_candidates(
+                            &mut fuzzy_match_candidates,
+                            key_index,
+                            info.title.as_ref(),
+                        );
+                        push_candidates(
+                            &mut fuzzy_match_candidates,
+                            key_index,
+                            info.value.as_ref(),
                         );
                     }
                 }

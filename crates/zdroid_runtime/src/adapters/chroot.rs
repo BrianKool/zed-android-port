@@ -1,4 +1,4 @@
-//! Chroot adapter — talks to `zd-spawnd` over a Unix socket.
+﻿//! Chroot adapter â€” talks to `zd-spawnd` over a Unix socket.
 //!
 //! Per-spawn cost: one connect (~1ms) + one sendmsg with `SCM_RIGHTS`
 //! (~1ms) + the daemon's fork/chroot/exec (~3ms). About 5ms total
@@ -14,7 +14,7 @@ use crate::config::{ChrootConfig, RuntimeId};
 use crate::health::{HealthStatus, ProgressSink};
 use crate::port::{RuntimeProvider, SpawnHandle, SpawnRequest};
 
-/// GitHub releases page for the `zdroid-spawnd` Magisk module — the
+/// GitHub releases page for the `zdroid-spawnd` Magisk module â€” the
 /// thing the chroot adapter needs running to function. Surfaced in
 /// health-check hints and in the runtime-picker UI when the daemon
 /// socket is missing, so the user has a one-click path from "this
@@ -87,7 +87,7 @@ mod android_impl {
         req: &SpawnRequest,
     ) -> Result<()> {
         // Symmetric bind (zd-spawnd v1.1.6+): host's
-        // `/data/data/com.zdroid/files` is bound onto the same path
+        // `/data/data/com.zdroid.b/files` is bound onto the same path
         // inside the chroot, and `/data/user/0/com.zdroid ->
         // /data/data/com.zdroid` is a symlink in the rootfs. Any
         // host path Zed produces resolves to the same inode whether
@@ -95,7 +95,7 @@ mod android_impl {
         // path translation needed for cwd, argv, or env values.
         //
         // Sanitize env at the boundary anyway: callers may carry a
-        // `PATH=…/zd-runtime:…` shaped for host bionic, but the
+        // `PATH=â€¦/zd-runtime:â€¦` shaped for host bionic, but the
         // chrooted child wants kali's `PATH=/usr/bin:/usr/sbin:...`.
         // sanitize_env_for_chroot strips the host-shaped env and
         // substitutes chroot-native defaults + INIT_PWD for the
@@ -105,7 +105,7 @@ mod android_impl {
         // zd-runtime paths are the ONE translation that survives the
         // v1.1.6 symmetric bind. zd-runtime/<name> symlinks at
         // `<data>/files/zd-runtime/` point at host's `../bin/zd-exec`
-        // — a bionic-linked binary. The bind mount makes the SYMLINK
+        // â€” a bionic-linked binary. The bind mount makes the SYMLINK
         // resolvable inside the chroot, but the dynamic loader the
         // symlink target needs (`/system/bin/linker64`) doesn't
         // exist inside the kali rootfs (kali has glibc's
@@ -117,7 +117,7 @@ mod android_impl {
         // so the chroot's own PATH lookup resolves `<name>` against
         // its native `/usr/bin/<name>`. The host-bridge concept stops
         // at the chroot boundary; inside, it's just `java` not
-        // `…/zd-runtime/java`.
+        // `â€¦/zd-runtime/java`.
         let program_translated = strip_zd_runtime(&req.program);
         let args_translated: Vec<OsString> = req
             .args
@@ -144,7 +144,7 @@ mod android_impl {
         let envc = env.len() as u32;
         let flags = if req.interactive { FLAG_INTERACTIVE } else { 0 };
 
-        // Header: 7 × u32 little-endian.
+        // Header: 7 Ã— u32 little-endian.
         let header = [
             MAGIC,
             VERSION,
@@ -208,21 +208,21 @@ mod android_impl {
 
     /// Build the env that the chrooted child will run under. Pulls a
     /// small allow-list of display-related vars from the caller (TERM,
-    /// COLORTERM, LANG, …) and pins everything else to chroot-native
+    /// COLORTERM, LANG, â€¦) and pins everything else to chroot-native
     /// defaults. Anything Android-sandbox-specific (PATH pointing at
-    /// $PREFIX/bin/, TERMUX__*, ZED_*) is dropped — those paths don't
+    /// $PREFIX/bin/, TERMUX__*, ZED_*) is dropped â€” those paths don't
     /// resolve inside the rootfs and would silently break exec / shell
     /// startup.
     ///
     /// Sets HOME=/root and USER=root explicitly. Empirical finding:
-    /// bash does NOT do `getpwuid(uid)` to fill HOME on its own — it
+    /// bash does NOT do `getpwuid(uid)` to fill HOME on its own â€” it
     /// expects HOME to be in the inherited env, the way login(1) /
     /// sshd / a desktop session manager would set it. With HOME unset,
     /// `~/.local/bin` in the chrooted .profile expands to `/.local/bin`
     /// which never exists, so user-installed tools (claude, pip --user
     /// installs, cargo binaries) silently disappear from PATH. /root
     /// is hardcoded because this adapter is debian-rootfs-shaped: uid 0
-    /// → /root in /etc/passwd. (Don't set HOME=home_bind — that would
+    /// â†’ /root in /etc/passwd. (Don't set HOME=home_bind â€” that would
     /// make bash source `<home_bind>/.bashrc` instead of
     /// `/root/.bashrc`, losing the kali prompt + aliases + actual user
     /// dotfiles.)
@@ -241,7 +241,7 @@ mod android_impl {
     ) -> Vec<(String, OsString)> {
         // Display / locale vars worth carrying across the boundary so
         // the inner shell renders correctly. Add to this list cautiously
-        // — anything path-shaped is an exec-failure waiting to happen.
+        // â€” anything path-shaped is an exec-failure waiting to happen.
         //
         // SSH_ASKPASS + SSH_ASKPASS_REQUIRE: when Zed's "Open Remote"
         // spawns ssh, it sets these so ssh delegates password prompts
@@ -254,7 +254,7 @@ mod android_impl {
         // when sshd offered password auth and ssh fell back to a
         // non-existent /dev/tty.
         //
-        // SSH_AUTH_SOCK: same reason — if the caller set up an agent
+        // SSH_AUTH_SOCK: same reason â€” if the caller set up an agent
         // socket, the chroot-side ssh needs to find it.
         const PASSTHROUGH: &[&str] = &[
             "TERM",
@@ -274,7 +274,7 @@ mod android_impl {
         // Bootstrap PATH so `execvpe(bash)` succeeds. Bash itself, on
         // interactive startup, sources `/etc/profile` and `~/.bashrc`,
         // which typically PREPEND user-installed tool dirs (e.g.
-        // `~/.npm-global/bin`, `~/.cargo/bin`) — those win over our
+        // `~/.npm-global/bin`, `~/.cargo/bin`) â€” those win over our
         // bootstrap PATH for any binary the user installed via npm /
         // cargo / etc. Matches what `getconf PATH` returns in fresh
         // debian.
@@ -298,7 +298,7 @@ mod android_impl {
 
         // INIT_PWD: read by NetHunter's /etc/profile.d/init-pwd.sh.
         // The patched .bash_profile also gates its own `cd /root` /
-        // `cd ~` on this — set means "Zdroid asked for a specific
+        // `cd ~` on this â€” set means "Zdroid asked for a specific
         // landing dir, leave it alone".
         if let Some(pwd) = init_pwd {
             env.push(("INIT_PWD".to_string(), pwd.as_os_str().to_owned()));
@@ -309,7 +309,7 @@ mod android_impl {
 
     // Path-translation helpers (translate_arg_for_chroot,
     // translate_cwd_for_chroot, APP_HOMES) were deleted in zd-spawnd
-    // v1.1.6. The symmetric bind-mount (host's `/data/data/com.zdroid/
+    // v1.1.6. The symmetric bind-mount (host's `/data/data/com.zdroid.b/
     // files` onto the same path inside the chroot, plus the
     // `/data/user/0/com.zdroid -> /data/data/com.zdroid` alias
     // symlink in the rootfs) makes host paths resolve identically
@@ -320,7 +320,7 @@ mod android_impl {
     // `<data>/files/bin/zd-exec` binary. The bind mount makes the
     // symlink resolvable inside the chroot, but the loader the binary
     // needs (`/system/bin/linker64`) doesn't exist inside the kali
-    // rootfs — kali has glibc's `/lib/ld-linux-aarch64.so.1`. So
+    // rootfs â€” kali has glibc's `/lib/ld-linux-aarch64.so.1`. So
     // executing the path inside the chroot fails with ENOENT from the
     // loader. We strip zd-runtime paths to bare program names so the
     // chroot's own PATH lookup resolves them against `/usr/bin/<name>`.
@@ -331,8 +331,8 @@ mod android_impl {
     /// the Termux-divestment refactor relocated this off `$PREFIX/usr/`
     /// to the bare `<data>/files/zd-runtime/`.
     const ZD_RUNTIME_DIRS: &[&str] = &[
-        "/data/data/com.zdroid/files/zd-runtime/",
-        "/data/user/0/com.zdroid/files/zd-runtime/",
+        "/data/data/com.zdroid.b/files/zd-runtime/",
+        "/data/user/0/com.zdroid.b/files/zd-runtime/",
     ];
 
     /// If `s` is a zd-runtime path (starts with one of [`ZD_RUNTIME_DIRS`]
@@ -351,7 +351,7 @@ mod android_impl {
         s.to_string()
     }
 
-    /// Read the daemon's `response_spawned` (4 × u32). Returns the
+    /// Read the daemon's `response_spawned` (4 Ã— u32). Returns the
     /// negotiated child PID (daemon-internal) or surfaces an error
     /// reflecting the daemon's reported errno.
     pub(super) fn read_spawned_response(conn: &mut UnixStream) -> Result<u32> {
@@ -379,7 +379,7 @@ mod android_impl {
         Ok(pid)
     }
 
-    /// Read `response_exited` (3 × u32). Returns the exit code, with
+    /// Read `response_exited` (3 Ã— u32). Returns the exit code, with
     /// negative values representing terminating signals (e.g. -9 for
     /// SIGKILL).
     pub(super) fn read_exited_response(conn: &mut UnixStream) -> Result<i32> {
@@ -500,7 +500,7 @@ impl RuntimeProvider for ChrootAdapter {
     fn needs_command_bridge(&self) -> bool {
         // Chroot crosses a namespace boundary: an absolute host path
         // under `environment_root()` only resolves correctly when the
-        // spawn lands inside the chroot via `zd-exec` → `zd-spawnd` →
+        // spawn lands inside the chroot via `zd-exec` â†’ `zd-spawnd` â†’
         // chroot dispatch. PATH for this adapter front-loads the
         // `zd-runtime/` symlink farm so `zd-exec` is kernel-resolvable
         // by short name.
@@ -510,11 +510,11 @@ impl RuntimeProvider for ChrootAdapter {
     fn environment_root(&self) -> std::path::PathBuf {
         // Host-side path that becomes Zed's ENTIRE data root when this
         // adapter is active (config, db, logs, extensions, languages,
-        // themes — everything). Two requirements:
+        // themes â€” everything). Two requirements:
         //
         //   1. Must live inside the bind-mount source so the same bytes
         //      are reachable inside the chroot. The daemon binds
-        //      `/data/data/com.zdroid/files/home` onto `/zed`, so a
+        //      `/data/data/com.zdroid.b/files/home` onto `/zed`, so a
         //      file at `<this>/extensions/foo` on host is visible at
         //      `/zed/.zed-env/chroot/extensions/foo` inside the chroot.
         //      The adapter's argv-translation rewrites host paths in
@@ -526,15 +526,15 @@ impl RuntimeProvider for ChrootAdapter {
         //      shouldn't drop `languages/`, `extensions/`, `db/` etc.
         //      tree-roots at the top level of their home.
         //
-        // Hardcoded to `/data/data/com.zdroid/files/home/.zed-env/
-        // chroot`. Lives under `/data/data/com.zdroid/files`, which
+        // Hardcoded to `/data/data/com.zdroid.b/files/home/.zed-env/
+        // chroot`. Lives under `/data/data/com.zdroid.b/files`, which
         // zd-spawnd v1.1.6+ symmetrically bind-mounts onto the same
-        // path inside the chroot — so this exact byte string resolves
+        // path inside the chroot â€” so this exact byte string resolves
         // to the same inode whether the resolver runs on host bionic
         // or inside the chroot. No translation. Future: thread the
         // path through config so the user can pick a non-default root.
         std::path::PathBuf::from(
-            "/data/data/com.zdroid/files/home/.zed-env/chroot",
+            "/data/data/com.zdroid.b/files/home/.zed-env/chroot",
         )
     }
 
@@ -647,7 +647,7 @@ impl RuntimeProvider for ChrootAdapter {
 
     fn workspace_root(&self, data_path: &std::path::Path) -> Option<std::path::PathBuf> {
         // <data>/files/home is the canonical user-files dir for both
-        // chroot and bootstrap modes — zd-spawnd's symmetric bind-
+        // chroot and bootstrap modes â€” zd-spawnd's symmetric bind-
         // mount makes the same path resolve identically inside the
         // chroot, so a project under here is reachable from both
         // sides without translation.

@@ -1,4 +1,4 @@
-package com.zdroid
+﻿package com.zdroid
 
 import android.content.Context
 import android.os.Build
@@ -19,7 +19,7 @@ import androidx.core.view.WindowInsetsControllerCompat
 /// `startActivity(Intent(...))` from `multi_window::launch_extra_activity`,
 /// with the gpui `WindowId` passed as the `com.zdroid.window_id`
 /// long extra. On freeform-windowing devices (DeX, Pixel desktop windowing,
-/// Android 16 Desktop Mode, ChromeOS) the OS provides native chrome —
+/// Android 16 Desktop Mode, ChromeOS) the OS provides native chrome â€”
 /// close X, drag bar, resize handles. On phones each Activity lives in its
 /// own Recents task instead.
 ///
@@ -29,7 +29,7 @@ import androidx.core.view.WindowInsetsControllerCompat
 ///   keyed by the window id so it can later issue `finishAndRemoveTask` for
 ///   gpui-initiated close.
 /// - `SurfaceHolder.Callback` fires through `NativeBridge.nativeOnExtraSurface*`
-///   — same JNI bridge as the primary surface, just keyed by window id.
+///   â€” same JNI bridge as the primary surface, just keyed by window id.
 /// - `OnTouchListener` forwards `MotionEvent`s through
 ///   `NativeBridge.nativeOnExtraTouchEvent`.
 /// - `onDestroy` notifies Rust via `nativeOnExtraActivityDestroyed`. If Rust
@@ -44,7 +44,7 @@ import androidx.core.view.WindowInsetsControllerCompat
 ///
 /// Activity recreation: `configChanges` in the manifest is exhaustive
 /// enough to keep this Activity alive across drag-resize, rotation, density
-/// change, locale change, etc. — the system delivers `onConfigurationChanged`
+/// change, locale change, etc. â€” the system delivers `onConfigurationChanged`
 /// instead of recreating. If a config we forgot to declare ever fires
 /// recreation, `onDestroy` notifies Rust which tears down the gpui Window;
 /// the user's window disappears, which is bad UX. Test by aggressive
@@ -150,7 +150,7 @@ class ExtraWindowActivity : AppCompatActivity(), ImeHost {
         // makes the secondary surface fill the screen end-to-end. On
         // freeform-windowing devices the OS-managed chrome (close X, drag
         // bar) renders on its own decoration layer above this Activity, so
-        // hiding system bars here doesn't strip the chrome — only the
+        // hiding system bars here doesn't strip the chrome â€” only the
         // status / nav strips that don't belong to the freeform window.
         WindowCompat.setDecorFitsSystemWindows(window, false)
         WindowInsetsControllerCompat(window, window.decorView).apply {
@@ -171,7 +171,7 @@ class ExtraWindowActivity : AppCompatActivity(), ImeHost {
         // this Activity back from Recents, the gpui-side runtime has been
         // re-init'd from scratch and doesn't know about our windowId. Running
         // through the rest of onCreate would attach a SurfaceView that fires
-        // JNI callbacks against a Rust runtime with no matching gpui Window —
+        // JNI callbacks against a Rust runtime with no matching gpui Window â€”
         // touches do nothing, no rendering, ghost window. Detect early and
         // bail. The user can re-open via the main app.
         if (!NativeBridge.nativeIsExtraWindowKnown(extraWindowId)) {
@@ -207,7 +207,7 @@ class ExtraWindowActivity : AppCompatActivity(), ImeHost {
             }
             // ACTION_HOVER_ENTER / ACTION_HOVER_MOVE / ACTION_HOVER_EXIT
             // (mouse moving over the surface without a button pressed) come
-            // through OnHoverListener — NOT OnTouchListener. Without this,
+            // through OnHoverListener â€” NOT OnTouchListener. Without this,
             // gpui never sees a `MouseMove { pressed_button: None }`, which
             // is what scrollbar-on-hover, link previews, and any
             // hover-only UI affordance is gated on.
@@ -226,7 +226,7 @@ class ExtraWindowActivity : AppCompatActivity(), ImeHost {
             // Activity-level `onGenericMotionEvent` override below)
             // owns those events. If this listener returns `true` for
             // captured events it claims them and the Activity handler
-            // never fires — the cursor sprite never updates and the
+            // never fires â€” the cursor sprite never updates and the
             // editor gets raw absolute-coordinate hovers instead of
             // synthesized MouseMove events from the gesture state
             // machine. Return `false` for captured sources so the
@@ -250,7 +250,7 @@ class ExtraWindowActivity : AppCompatActivity(), ImeHost {
             isFocusable = true
             isFocusableInTouchMode = true
             // Captured-pointer events arrive via the Activity-level
-            // `onGenericMotionEvent` override below — same pattern as
+            // `onGenericMotionEvent` override below â€” same pattern as
             // MainActivity. We don't install an
             // `OnCapturedPointerListener` here because some Samsung
             // builds bypass that listener path when DeX windowing
@@ -263,13 +263,13 @@ class ExtraWindowActivity : AppCompatActivity(), ImeHost {
         // a text input in the settings window or any other spawned
         // window leaves the gpui-side `set_input_handler` registered
         // but the OS soft keyboard never appears, because Android
-        // dispatches IME events through the focused View — not the
+        // dispatches IME events through the focused View â€” not the
         // SurfaceView, which doesn't override `onCreateInputConnection`.
         val imeHost = ImeHostView(this)
         addContentView(imeHost, android.view.ViewGroup.LayoutParams(1, 1))
         imeHostView = imeHost
 
-        // Inset-transition listener — same rationale as MainActivity.
+        // Inset-transition listener â€” same rationale as MainActivity.
         // Tracks programmatic-vs-user IME dismissals so the
         // auto-show on text-input focus is correctly suppressed
         // once the user has manually closed the keyboard in this
@@ -309,7 +309,7 @@ class ExtraWindowActivity : AppCompatActivity(), ImeHost {
     /// `SOFT_KEYBOARD_VISIBLE` mirror so the pane keyboard button's
     /// `toggle_state` highlight reflects this window's IME state.
     /// The global atomic represents whichever Activity most recently
-    /// transitioned — only one IME can be up across the app at a time,
+    /// transitioned â€” only one IME can be up across the app at a time,
     /// so a single global is still correct semantics.
     private fun setImeShown(shown: Boolean) {
         if (imeShown != shown) {
@@ -389,7 +389,7 @@ class ExtraWindowActivity : AppCompatActivity(), ImeHost {
         }
     }
 
-    /// Toggle the IME — pane keyboard button entry point.
+    /// Toggle the IME â€” pane keyboard button entry point.
     @Suppress("unused")
     fun toggleIme() {
         runOnUiThread {
@@ -540,7 +540,7 @@ class ExtraWindowActivity : AppCompatActivity(), ImeHost {
             // `surfaceView` is a `lateinit var` set during onCreate
             // (after JNI-creation completes). Rust pushes the
             // trackpad-mode state right after
-            // `nativeOnExtraActivityCreated` fires — which can race
+            // `nativeOnExtraActivityCreated` fires â€” which can race
             // ahead of surfaceView init. Guard against that: store
             // the desired state and apply once the surface is
             // ready (via [applyDeferredTrackpadCursor], called from
@@ -571,7 +571,7 @@ class ExtraWindowActivity : AppCompatActivity(), ImeHost {
     /// `surfaceView` is fully initialized. If trackpad mode was
     /// already active when we registered (typical path: user
     /// opens settings while in trackpad mode), the cursor sprite
-    /// build was deferred — apply it now.
+    /// build was deferred â€” apply it now.
     private fun applyDeferredTrackpadCursor() {
         if (!trackpadModeActive) return
         if (!::surfaceView.isInitialized) return
@@ -592,7 +592,7 @@ class ExtraWindowActivity : AppCompatActivity(), ImeHost {
     // (focus-gated cursor visibility is folded into the existing
     // `onWindowFocusChanged` override above)
 
-    /// Position the cursor sprite at (x, y) physical pixels —
+    /// Position the cursor sprite at (x, y) physical pixels â€”
     /// pushed by Rust's touch trackpad SM after each single-finger
     /// drag delta.
     @Suppress("unused")
@@ -825,7 +825,7 @@ class ExtraWindowActivity : AppCompatActivity(), ImeHost {
             ids[i] = event.getPointerId(i)
         }
         // ACTION_SCROLL (mouse wheel + trackpad two-finger scroll) carries
-        // its delta on the AXIS_VSCROLL / AXIS_HSCROLL axes — getX/Y return
+        // its delta on the AXIS_VSCROLL / AXIS_HSCROLL axes â€” getX/Y return
         // the pointer position, not the scroll amount. Read both axes
         // unconditionally; they're zero on non-scroll events and the Rust
         // translator only consumes them under the Scroll action arm.
@@ -850,7 +850,7 @@ class ExtraWindowActivity : AppCompatActivity(), ImeHost {
         private const val TAG = "zed_android_extra"
         private const val TAG_IME = "zdroid_ime"
         const val EXTRA_WINDOW_ID = "com.zdroid.window_id"
-        /// Software cursor side length in dp — matches MainActivity.
+        /// Software cursor side length in dp â€” matches MainActivity.
         private const val CURSOR_SIZE_DP = 24
     }
 }
@@ -860,9 +860,9 @@ class ExtraWindowActivity : AppCompatActivity(), ImeHost {
 /// to synthesize an `ACTION_SCROLL` event from a trackpad two-finger
 /// gesture by walking up from the pointer's hit-test target and asking
 /// each `View` whether it `canScrollVertically()` / `canScrollHorizontally()`.
-/// A bare `SurfaceView` returns `false` for both — the OS then falls
+/// A bare `SurfaceView` returns `false` for both â€” the OS then falls
 /// back to delivering the gesture as a single-pointer fake-mouse drag
-/// (Down with `button_state=0` then Move ×N then Up), which gpui then
+/// (Down with `button_state=0` then Move Ã—N then Up), which gpui then
 /// (correctly, given the input it sees) interprets as a click+drag.
 ///
 /// Returning `true` for both axes flips Android's behavior: trackpad
@@ -872,7 +872,7 @@ class ExtraWindowActivity : AppCompatActivity(), ImeHost {
 /// (independent of this override).
 ///
 /// Why this is on a custom subclass and not on the SurfaceView fields
-/// directly: `View.canScrollVertically` is a `protected open fun` —
+/// directly: `View.canScrollVertically` is a `protected open fun` â€”
 /// can only be overridden, not set, so we need a class.
 private class ScrollableSurfaceView(context: Context) : SurfaceView(context) {
     override fun canScrollVertically(direction: Int): Boolean = true

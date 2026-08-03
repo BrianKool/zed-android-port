@@ -1,4 +1,4 @@
-use crate::{
+﻿use crate::{
     NewFile, Open, OpenMode, PathList, RecentWorkspace, SerializedWorkspaceLocation,
     ToggleWorkspaceSidebar, Workspace,
     item::{Item, ItemEvent},
@@ -16,7 +16,10 @@ use menu::{SelectNext, SelectPrevious};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use settings::Settings;
-use ui::{ButtonLike, Divider, DividerColor, KeyBinding, Vector, VectorName, prelude::*};
+use ui::{
+    ButtonLike, Divider, DividerColor, IconButton, KeyBinding, Tooltip, Vector, VectorName,
+    prelude::*,
+};
 use util::ResultExt;
 use zed_actions::{
     Extensions, OpenKeymap, OpenOnboarding, OpenSettings, assistant::ToggleFocus, command_palette,
@@ -242,6 +245,7 @@ pub struct WelcomePage {
     focus_handle: FocusHandle,
     fallback_to_recent_projects: bool,
     recent_workspaces: Option<Vec<RecentWorkspace>>,
+    agent_setup_info_open: bool,
 }
 
 impl WelcomePage {
@@ -282,6 +286,7 @@ impl WelcomePage {
             focus_handle,
             fallback_to_recent_projects,
             recent_workspaces: None,
+            agent_setup_info_open: false,
         }
     }
 
@@ -341,13 +346,29 @@ impl WelcomePage {
             ))
             .child(
                 h_flex()
+                    .w_full()
+                    .justify_between()
                     .gap_1p5()
                     .child(
-                        Icon::new(IconName::ZedAssistant)
-                            .color(Color::Muted)
-                            .size(IconSize::Small),
+                        h_flex()
+                            .gap_1p5()
+                            .child(
+                                Icon::new(IconName::ZedAssistant)
+                                    .color(Color::Muted)
+                                    .size(IconSize::Small),
+                            )
+                            .child(Label::new("Collaborate with Agents")),
                     )
-                    .child(Label::new("Collaborate with Agents")),
+                    .child(
+                        IconButton::new("agent-setup-info", IconName::Info)
+                            .icon_size(IconSize::Small)
+                            .toggle_state(self.agent_setup_info_open)
+                            .tooltip(Tooltip::text("Agent CLI setup"))
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.agent_setup_info_open = !this.agent_setup_info_open;
+                                cx.notify();
+                            })),
+                    ),
             )
             .child(
                 Label::new(description)
@@ -355,6 +376,9 @@ impl WelcomePage {
                     .color(Color::Muted)
                     .mb_2(),
             )
+            .when(self.agent_setup_info_open, |this| {
+                this.child(self.render_agent_setup_info(cx))
+            })
             .child(
                 Button::new("open-agent", "Open Agent Panel")
                     .full_width()
@@ -368,6 +392,79 @@ impl WelcomePage {
                         focus.dispatch_action(&ToggleWorkspaceSidebar, window, cx);
                         focus.dispatch_action(&ToggleFocus, window, cx);
                     }),
+            )
+    }
+
+    fn render_agent_setup_info(&self, cx: &App) -> impl IntoElement {
+        let colors = cx.theme().colors();
+        let command = |id: &'static str, text: &'static str| {
+            div()
+                .id(id)
+                .w_full()
+                .min_w_0()
+                .p_2()
+                .rounded_sm()
+                .bg(colors.editor_background)
+                .border_1()
+                .border_color(colors.border_variant)
+                .child(
+                    Label::new(text)
+                        .buffer_font(cx)
+                        .size(LabelSize::XSmall),
+                )
+        };
+
+        v_flex()
+            .id("agent-setup-info-content")
+            .w_full()
+            .min_w_0()
+            .max_h(px(420.0))
+            .overflow_y_scroll()
+            .mb_3()
+            .p_3()
+            .gap_3()
+            .rounded_sm()
+            .border_1()
+            .border_color(colors.border_variant)
+            .bg(colors.panel_background)
+            .child(
+                Label::new(
+                    "Run these commands in the Zdroid-B terminal. Sign-in credentials stay on this device; API keys are not required for subscription login.",
+                )
+                .size(LabelSize::Small)
+                .color(Color::Muted),
+            )
+            .child(Label::new("Base packages").size(LabelSize::Small))
+            .child(command(
+                "agent-command-base",
+                "pkg update && pkg upgrade\npkg install nodejs-lts git",
+            ))
+            .child(Label::new("Codex").size(LabelSize::Small))
+            .child(command(
+                "agent-command-codex",
+                "npm install -g @openai/codex\ncodex login",
+            ))
+            .child(Label::new("Claude Code").size(LabelSize::Small))
+            .child(command(
+                "agent-command-claude",
+                "npm install -g @anthropic-ai/claude-code\nclaude\n/login",
+            ))
+            .child(Label::new("Gemini CLI").size(LabelSize::Small))
+            .child(command(
+                "agent-command-gemini",
+                "npm install -g @google/gemini-cli\ngemini",
+            ))
+            .child(Label::new("Grok Build").size(LabelSize::Small))
+            .child(command(
+                "agent-command-grok",
+                "Install the official Linux ARM64 build, then run:\ngrok\nACP: grok agent stdio",
+            ))
+            .child(
+                Label::new(
+                    "Also detected when installed: GitHub Copilot CLI (`copilot --acp --stdio`) and OpenCode (`opencode acp`). Only agents that launch successfully appear as connected.",
+                )
+                .size(LabelSize::Small)
+                .color(Color::Muted),
             )
     }
 
@@ -430,9 +527,9 @@ impl Render for WelcomePage {
             {
                 // Android-only split: ~/projects/* projects (built locally,
                 // exec-mounted) vs anything else (typically /storage/emulated/0/*
-                // SAF-picked, FUSE noexec). The two `rust` problem — same name
+                // SAF-picked, FUSE noexec). The two `rust` problem â€” same name
                 // appearing twice in Recent Projects from different storage
-                // tiers — is otherwise indistinguishable to the user.
+                // tiers â€” is otherwise indistinguishable to the user.
                 let workspace_root = util::env::workspace_root()
                     .map(|h| h.join("projects"));
                 let mut workspace_entries: Vec<gpui::AnyElement> = Vec::new();
@@ -501,9 +598,9 @@ impl Render for WelcomePage {
         };
 
         let welcome_label = if self.fallback_to_recent_projects {
-            "Welcome back to Zdroid"
+            "Welcome back to Zdroid-B"
         } else {
-            "Welcome to Zdroid"
+            "Welcome to Zdroid-B"
         };
 
         h_flex()
@@ -533,10 +630,21 @@ impl Render for WelcomePage {
                             .child(Vector::square(VectorName::ZedLogo, rems_from_px(45.)))
                             .child(
                                 v_flex().child(Headline::new(welcome_label)).child(
-                                    Label::new("The editor for what's next")
-                                        .size(LabelSize::Small)
-                                        .color(Color::Muted)
-                                        .italic(),
+                                    v_flex()
+                                        .gap_1()
+                                        .child(
+                                            Label::new("The editor for what's next")
+                                                .size(LabelSize::Small)
+                                                .color(Color::Muted)
+                                                .italic(),
+                                        )
+                                        .child(
+                                            Label::new(
+                                                "Linux-compatible ARM64 environment. Install the standard Linux version of terminal and npm CLI tools.",
+                                            )
+                                            .size(LabelSize::XSmall)
+                                            .color(Color::Muted),
+                                        ),
                                 ),
                             ),
                     )

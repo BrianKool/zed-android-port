@@ -1,4 +1,4 @@
-//! Bootstrap adapter — owns a Termux-flavored `$PREFIX` inside Zdroid's
+﻿//! Bootstrap adapter â€” owns a Termux-flavored `$PREFIX` inside Zdroid's
 //! own app sandbox.
 //!
 //! Two operating modes inside the sandbox:
@@ -155,7 +155,7 @@ mod android_impl {
                     OsString::from("-r"),
                     proot_rootfs.as_os_str().to_owned(),
                     OsString::from("-b"),
-                    OsString::from("/data/data/com.zdroid/files/home:/zed"),
+                    OsString::from("/data/data/com.zdroid.b/files/home:/zed"),
                     OsString::from("-b"),
                     OsString::from("/storage/emulated/0:/sdcard"),
                     OsString::from("--"),
@@ -194,7 +194,7 @@ impl RuntimeProvider for BootstrapAdapter {
         if !bash.exists() {
             return HealthStatus::NotInstalled {
                 hint: format!(
-                    "{} missing — bootstrap is not installed. Run install() to download it from {}.",
+                    "{} missing â€” bootstrap is not installed. Run install() to download it from {}.",
                     bash.display(),
                     self.config.release_repo,
                 ),
@@ -271,7 +271,7 @@ impl RuntimeProvider for BootstrapAdapter {
 
     fn environment_root(&self) -> std::path::PathBuf {
         // Bootstrap mode's Zed root is the app data dir Zed already
-        // uses — `<app>/files/`. `config.prefix` is `<app>/files/usr/`
+        // uses â€” `<app>/files/`. `config.prefix` is `<app>/files/usr/`
         // (the Termux-flavored prefix), so `.parent()` walks up to
         // `<app>/files/`. That keeps existing bootstrap users' state
         // (settings, db, themes, installed extensions, LSP downloads)
@@ -286,7 +286,7 @@ impl RuntimeProvider for BootstrapAdapter {
 
     fn list_binaries(&self) -> Vec<String> {
         // Walk bootstrap's bin dirs. Same shape as the chroot
-        // adapter's walk, just different roots — bootstrap doesn't
+        // adapter's walk, just different roots â€” bootstrap doesn't
         // have a `/usr/` layout, it puts everything directly under
         // `$PREFIX/bin/` (Termux-flavored prefix). `sbin` is rarely
         // populated on Termux but we look anyway.
@@ -343,7 +343,7 @@ impl RuntimeProvider for BootstrapAdapter {
         //   1. Subprocess parity. Every shell, LSP, git, etc. Zed
         //      spawns inherits this env. With HOME=data_path,
         //      `git config --global user.name` reads
-        //      `<data>/files/.gitconfig` which doesn't exist — the
+        //      `<data>/files/.gitconfig` which doesn't exist â€” the
         //      user's actual .gitconfig is at `<termux_home>/
         //      .gitconfig` because Termux's profile.d/zed-init.sh
         //      rewrites HOME to termux_home on bash startup. The
@@ -352,7 +352,7 @@ impl RuntimeProvider for BootstrapAdapter {
         //   2. Zed's own data dirs are pinned by `paths::set_custom_
         //      data_dir(env_root)` in `gpui_android::lib`, so
         //      config / db / extensions / logs land at
-        //      `<env_root>/{config,db,extensions,logs,…}` regardless
+        //      `<env_root>/{config,db,extensions,logs,â€¦}` regardless
         //      of HOME. The few `paths::home_dir()` consumers
         //      (`.ssh/config` in particular) align correctly with
         //      what shells see when both use termux_home.
@@ -367,7 +367,7 @@ impl RuntimeProvider for BootstrapAdapter {
             // starting with /data/data/com.termux/ to /data/data/
             // <this>/ on the fly, letting `pkg install <upstream-deb>`
             // Just Work with our prefix.
-            ("TERMUX_APP__PACKAGE_NAME".into(), EnvOp::Set(OsString::from("com.zdroid"))),
+            ("TERMUX_APP__PACKAGE_NAME".into(), EnvOp::Set(OsString::from("com.zdroid.b"))),
             ("TMPDIR".into(), EnvOp::Set(prefix.join("tmp").into_os_string())),
             ("TERM".into(), EnvOp::Set(OsString::from("xterm-256color"))),
             ("LANG".into(), EnvOp::Set(OsString::from("en_US.UTF-8"))),
@@ -399,7 +399,7 @@ impl RuntimeProvider for BootstrapAdapter {
             ("TERMUX__ROOTFS".into(), EnvOp::Set(data_path.as_os_str().to_owned())),
             ("TERMUX__PREFIX".into(), EnvOp::Set(prefix.as_os_str().to_owned())),
             ("TERMUX__HOME".into(), EnvOp::Set(termux_home.as_os_str().to_owned())),
-            ("TERMUX_APP__PACKAGE_NAME".into(), EnvOp::Set(OsString::from("com.zdroid"))),
+            ("TERMUX_APP__PACKAGE_NAME".into(), EnvOp::Set(OsString::from("com.zdroid.b"))),
             // Override HOME for the bash subshell: process-side HOME
             // points at data_path (so upstream dirs::home_dir() does
             // not panic), but bash inheriting that makes `~/projects`
@@ -412,7 +412,7 @@ impl RuntimeProvider for BootstrapAdapter {
             // any upstream package whose preinst has a hardcoded
             // shebang fails with EACCES.
             ("LD_PRELOAD".into(), EnvOp::Set(OsString::from(
-                "/data/data/com.zdroid/files/usr/lib/libtermux-exec.so"
+                "/data/data/com.zdroid.b/files/usr/lib/libtermux-exec.so"
             ))),
         ];
         let cert_path = prefix.join("etc/tls/cert.pem");
@@ -438,7 +438,7 @@ impl RuntimeProvider for BootstrapAdapter {
     }
 
     fn workspace_root(&self, data_path: &std::path::Path) -> Option<std::path::PathBuf> {
-        // <data>/files/home — same as Termux's $TERMUX__HOME and what
+        // <data>/files/home â€” same as Termux's $TERMUX__HOME and what
         // the chroot adapter publishes. Recent-projects UI and storage
         // hooks read this to know where workspace files live.
         Some(data_path.join("home"))
@@ -447,7 +447,7 @@ impl RuntimeProvider for BootstrapAdapter {
     fn npm_libtermux_exec_path(&self, _data_path: &std::path::Path) -> Option<std::path::PathBuf> {
         // Bootstrap is the only adapter that ships the bionic-flavored
         // libtermux-exec.so. npm-installed CLIs (Bun-compiled Termux
-        // packages: claude, codex, …) LD_PRELOAD this so their
+        // packages: claude, codex, â€¦) LD_PRELOAD this so their
         // hardcoded `/data/data/com.termux/...` shebangs and dlopen
         // calls get path-translated to our $PREFIX.
         Some(self.config.prefix.join("lib/libtermux-exec.so"))

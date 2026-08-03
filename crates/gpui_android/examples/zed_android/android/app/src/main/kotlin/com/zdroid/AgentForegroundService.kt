@@ -1,4 +1,4 @@
-package com.zdroid
+﻿package com.zdroid
 
 import android.app.Notification
 import android.app.NotificationChannel
@@ -88,7 +88,7 @@ class AgentForegroundService : Service() {
         }
         return NotificationCompat.Builder(this, CHANNEL_RUNNING)
             .setSmallIcon(R.drawable.ic_launcher_foreground)
-            .setContentTitle("Zdroid Agent")
+            .setContentTitle("Zdroid-B Agent")
             .setContentText(description)
             .setContentIntent(openAppIntent())
             .setCategory(NotificationCompat.CATEGORY_PROGRESS)
@@ -127,8 +127,8 @@ class AgentForegroundService : Service() {
         get() = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
 
     companion object {
-        private const val ACTION_START = "com.zdroid.agent.START"
-        private const val ACTION_FINISH = "com.zdroid.agent.FINISH"
+        private const val ACTION_START = "com.zdroid.b.agent.START"
+        private const val ACTION_FINISH = "com.zdroid.b.agent.FINISH"
         private const val EXTRA_TASK_ID = "task_id"
         private const val EXTRA_DESCRIPTION = "description"
         private const val EXTRA_SUCCESSFUL = "successful"
@@ -171,7 +171,7 @@ class AgentForegroundService : Service() {
                     "Agent tasks",
                     NotificationManager.IMPORTANCE_LOW,
                 ).apply {
-                    description = "Shows while a Zdroid agent task is running"
+                    description = "Shows while a Zdroid-B agent task is running"
                     setShowBadge(false)
                 },
             )
@@ -181,7 +181,7 @@ class AgentForegroundService : Service() {
                     "Agent task results",
                     NotificationManager.IMPORTANCE_DEFAULT,
                 ).apply {
-                    description = "Notifies when a Zdroid agent task finishes"
+                    description = "Notifies when a Zdroid-B agent task finishes"
                 },
             )
         }

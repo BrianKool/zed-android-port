@@ -1,4 +1,4 @@
-//! Runtime adapter picker — lets the user pick which userland Zdroid
+﻿//! Runtime adapter picker â€” lets the user pick which userland Zdroid
 //! routes its spawns through (chroot, bootstrap, external Termux).
 //!
 //! Surfaces as a centered modal triggered by the `zdroid: pick runtime`
@@ -66,7 +66,7 @@ impl ProgressSink for ChannelProgressSink {
 /// `$PREFIX/etc/` so the bootstrap-extraction step doesn't clobber it
 /// (extraction doesn't touch `etc/`), and so it persists across
 /// editor APK updates the same way other user state does.
-const RUNTIME_TOML_PATH: &str = "/data/data/com.zdroid/files/usr/etc/zd-runtime.toml";
+const RUNTIME_TOML_PATH: &str = "/data/data/com.zdroid.b/files/usr/etc/zd-runtime.toml";
 
 actions!(
     zdroid_runtime,
@@ -82,8 +82,8 @@ actions!(
 /// `window.dispatch_action(...)`. Three current entry points:
 ///
 ///   - Command palette (`zdroid: pick runtime`).
-///   - Settings → "Android Runtime" → "Open picker".
-///   - Onboarding basics page → "Set up Android runtime" button.
+///   - Settings â†’ "Android Runtime" â†’ "Open picker".
+///   - Onboarding basics page â†’ "Set up Android runtime" button.
 ///
 /// The handler unconditionally opens the picker as a STANDALONE
 /// WINDOW (`cx.open_window`), not as a workspace Modal. The window
@@ -91,7 +91,7 @@ actions!(
 /// from inside the Settings window still spawns the picker as its
 /// own independent OS window (on Android, an ExtraWindowActivity).
 /// The modal path required dispatching from the workspace window and
-/// rendered behind any window stacked on top — bad UX.
+/// rendered behind any window stacked on top â€” bad UX.
 pub fn register(cx: &mut App) {
     cx.observe_new(
         |workspace: &mut Workspace, _window, _cx: &mut Context<Workspace>| {
@@ -227,7 +227,7 @@ impl RuntimePicker {
     /// "downloading + extracting" state on the Bootstrap card while
     /// the background task pulls the latest release zip from GitHub
     /// and extracts to `$PREFIX`. Refreshes adapter health on
-    /// completion so the card flips from NotInstalled → Healthy
+    /// completion so the card flips from NotInstalled â†’ Healthy
     /// without the user having to re-open the picker.
     fn install_bootstrap(&mut self, cx: &mut Context<Self>) {
         if self.install_status.is_some() {
@@ -256,7 +256,7 @@ impl RuntimePicker {
                     log::error!("zdroid_runtime_picker: BootstrapAdapter::install failed: {err:#}");
                     let _ = tx.unbounded_send(format!("Install failed: {err:#}"));
                 }
-                // tx + sink drop here → channel closes → foreground exits.
+                // tx + sink drop here â†’ channel closes â†’ foreground exits.
             })
             .detach();
 
@@ -307,7 +307,7 @@ impl RuntimePicker {
                 cx.notify();
 
                 // Surface the close-and-reopen requirement inline,
-                // styled with the picker's own theme — see Render
+                // styled with the picker's own theme â€” see Render
                 // for the banner. Window-level `window.prompt` is
                 // the native Android AlertDialog which looks out of
                 // place against the editor's chrome. We deliberately
@@ -495,7 +495,7 @@ fn render_card(
         })
         .rounded_md()
         // Allow inner flex children to shrink below their content
-        // width (CSS `min-width: 0` equivalent) — without this the
+        // width (CSS `min-width: 0` equivalent) â€” without this the
         // long tagline labels push the layout past the modal's edge.
         .min_w_0()
         .child(
@@ -510,7 +510,7 @@ fn render_card(
                         .child(Icon::new(IconName::Server).size(IconSize::Small))
                         .child(Headline::new(name).size(HeadlineSize::XSmall))
                         .when(is_current, |row| {
-                            // Use ui::Chip — the canonical Zed badge
+                            // Use ui::Chip â€” the canonical Zed badge
                             // primitive (same one agent_ui uses for
                             // "Latest" tags etc.). Matches the rest of
                             // the editor's design language out of the
@@ -554,7 +554,7 @@ fn render_card(
         // decorative chip, even when the unhealthy adapter is the
         // user's current runtime.toml selection. If Bootstrap is
         // selected but its $PREFIX is empty (Phase 6 fresh-install
-        // state), the user needs the Install button — showing a
+        // state), the user needs the Install button â€” showing a
         // "Selected" chip there would leave them stuck without a way
         // to trigger the download.
         .child(div().when(compact, |this| this.w_full()).child(
@@ -566,7 +566,7 @@ fn render_card(
                 // path inline instead: tap "Get module" to jump to the
                 // GitHub releases page where the zip lives. After install
                 // + reboot, re-open the picker and the gate flips to
-                // Healthy → normal Select.
+                // Healthy â†’ normal Select.
                 Button::new(("get-module", idx), "Get module")
                     .end_icon(Icon::new(IconName::ArrowUpRight).size(IconSize::Small))
                     .on_click(cx.listener(|_, _, _, cx| {
@@ -583,7 +583,7 @@ fn render_card(
                 // "Install" to kick off the async download + extract; the
                 // button label switches to the live `install_status` for
                 // the duration. After completion the card flips to
-                // Healthy → normal Select.
+                // Healthy â†’ normal Select.
                 if let Some(status) = install_status {
                     Button::new(("installing", idx), status.to_string())
                         .disabled(true)
@@ -596,7 +596,7 @@ fn render_card(
                         .into_any_element()
                 }
             } else if is_current {
-                // Healthy AND the active selection — decorative confirm.
+                // Healthy AND the active selection â€” decorative confirm.
                 // The header already shows an "Active" Chip; this right-
                 // hand Chip is design-language parity.
                 Chip::new("Selected")
@@ -659,14 +659,14 @@ fn default_chroot_config() -> ChrootConfig {
     ChrootConfig {
         root: PathBuf::from("/data/local/nhsystem/kali-arm64"),
         home_bind: PathBuf::from("/zed"),
-        spawnd_socket: PathBuf::from("/data/data/com.zdroid/files/run/zd-spawn"),
+        spawnd_socket: PathBuf::from("/data/data/com.zdroid.b/files/run/zd-spawn"),
         su_path: PathBuf::from("/product/bin/su"),
     }
 }
 
 fn default_bootstrap_config() -> BootstrapConfig {
     BootstrapConfig {
-        prefix: PathBuf::from("/data/data/com.zdroid/files/usr"),
+        prefix: PathBuf::from("/data/data/com.zdroid.b/files/usr"),
         proot_rootfs: None,
         release_repo: "Dylanmurzello/zdroid-bootstrap".into(),
     }

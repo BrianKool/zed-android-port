@@ -1,4 +1,4 @@
-import java.util.Properties
+﻿import java.util.Properties
 
 plugins {
     id("com.android.application")
@@ -41,11 +41,11 @@ val hasReleaseSigning = signingPropsFile.exists()
 // mode, and as the symlink target for `$PREFIX/zd-runtime/<name>`
 // in chroot+other modes. It MUST be in the APK so fresh installs
 // have it. Without bundling, end users hit
-// `failed to spawn $PREFIX/bin/zd-exec — no such file or directory`
+// `failed to spawn $PREFIX/bin/zd-exec â€” no such file or directory`
 // the first time they open the integrated terminal in chroot mode.
 //
 // Build flow:
-//   1. `buildZdExec` runs `cargo ndk … build --release -p
+//   1. `buildZdExec` runs `cargo ndk â€¦ build --release -p
 //      zdroid_runtime --bin zd-exec` from the workspace root, with
 //      $ANDROID_NDK_HOME pointed at the same NDK the lib build uses.
 //   2. The resulting ELF at
@@ -128,7 +128,7 @@ tasks.matching { it.name == "preBuild" }.configureEach {
 // `target-feature=+crt-static` for `aarch64-linux-android`. By running
 // `cargo ndk` with `workingDir` set to that crate's directory, gradle
 // guarantees the static-link config is in scope for every APK build
-// — no chance of a contributor accidentally shipping a dynamic
+// â€” no chance of a contributor accidentally shipping a dynamic
 // binary by building from the wrong cwd or hand-editing the asset.
 val askpassHelperDir = file("${workspaceRoot}/crates/gpui_android/examples/zed_android/askpass-helper")
 val askpassHelperBin = file("${askpassHelperDir}/target/aarch64-linux-android/release/zed-askpass-helper")
@@ -185,14 +185,14 @@ android {
 
     // Pin the NDK explicitly so reproducibility doesn't depend on whatever
     // `sdkmanager --list_installed` happens to surface. Bionic's
-    // `forkpty()` is in API 23+, so any NDK ≥ r21 is sufficient; we use r27
+    // `forkpty()` is in API 23+, so any NDK â‰¥ r21 is sufficient; we use r27
     // because that's the one we shipped L1 with and `+fp16` codegen
     // (gemm-f16) wants a recent toolchain.
     ndkVersion = "27.0.12077973"
 
     defaultConfig {
-        applicationId = "com.zdroid"
-        // minSdk = 26 enforces bionic ≥ Oreo. `forkpty()` is on the symbol
+        applicationId = "com.zdroid.b"
+        // minSdk = 26 enforces bionic â‰¥ Oreo. `forkpty()` is on the symbol
         // table from API 23, but cpal/livekit transitive crates require
         // libaaudio which is API 26.
         minSdk = 26
@@ -201,11 +201,11 @@ android {
         // `execute_no_trans` on `app_data_file` is permitted, so we can
         // execve $PREFIX/bin/* directly. Pinning > 28 lands in
         // `untrusted_app_all` / numbered higher domains where exec is
-        // denied — the entire L2 plan stops working. Skipping Play Store
+        // denied â€” the entire L2 plan stops working. Skipping Play Store
         // eligibility is the explicit trade.
         targetSdk = 28
-        versionCode = 17
-        versionName = "0.3.2"
+        versionCode = 18
+        versionName = "beta-1c"
         ndk {
             abiFilters += listOf("arm64-v8a")
         }
@@ -217,7 +217,7 @@ android {
         }
     }
 
-    // Don't deflate bootstrap-aarch64.zip during APK packaging — it's
+    // Don't deflate bootstrap-aarch64.zip during APK packaging â€” it's
     // already a deflated zip, and re-deflating it (a) wastes APK size
     // (b) forces AAssetManager to decompress at runtime, which prevents
     // the bootstrap extractor from using the mmap-able buffer path.
@@ -238,7 +238,7 @@ android {
     // pins us in the SELinux `untrusted_app_27` domain so the bundled Termux
     // runtime can `execve` $PREFIX/bin/*. AGP's `lintVitalRelease` task
     // flags this as `ExpiredTargetSdkVersion` and refuses to assemble the
-    // release APK. We're not Play-Store eligible by design — disable that
+    // release APK. We're not Play-Store eligible by design â€” disable that
     // single rule rather than bumping the SDK and breaking exec.
     lint {
         disable += "ExpiredTargetSdkVersion"

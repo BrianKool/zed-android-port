@@ -1,4 +1,4 @@
-use gpui::{Action as _, App};
+﻿use gpui::{Action as _, App};
 use itertools::Itertools as _;
 use settings::{
     AudioInputDeviceName, AudioOutputDeviceName, LanguageSettingsContent, SemanticTokens,
@@ -11,7 +11,8 @@ use ui::IntoElement;
 
 use crate::{
     ActionLink, DynamicItem, PROJECT, SettingField, SettingItem, SettingsFieldMetadata,
-    SettingsPage, SettingsPageItem, SubPageLink, USER, active_language, all_language_names,
+    SettingsPage, SettingsPageItem, StaticInfo, SubPageLink, USER, active_language,
+    all_language_names,
     pages::{
         open_audio_test_window, render_edit_prediction_setup_page, render_skills_setup_page,
         render_tool_permissions_setup_page,
@@ -96,7 +97,7 @@ pub(crate) fn settings_data(cx: &App) -> Vec<SettingsPage> {
 /// Android-specific: lets the user choose which userland Zdroid routes
 /// its spawn pipeline through (chroot / bootstrap / external Termux).
 /// Lives as a top-level settings page so the option is discoverable
-/// without command-palette knowledge — chroot mode is functionally
+/// without command-palette knowledge â€” chroot mode is functionally
 /// required for LSPs, terminal, and tooling, so this can't be buried.
 ///
 /// The click handler dispatches the `zdroid_runtime::PickRuntime`
@@ -104,7 +105,7 @@ pub(crate) fn settings_data(cx: &App) -> Vec<SettingsPage> {
 /// runtime_picker.rs::register`. The action handler unconditionally
 /// calls `cx.open_window` to spawn the picker as its own window
 /// (ExtraWindowActivity on Android), so it doesn't matter that this
-/// dispatch starts in the Settings window — the picker is a peer
+/// dispatch starts in the Settings window â€” the picker is a peer
 /// window, not nested inside Settings. Dispatched via
 /// `with_active_or_new_workspace` so the action lands on the workspace
 /// where the handler is registered.
@@ -305,6 +306,28 @@ fn developer_page() -> SettingsPage {
 }
 
 fn general_page(cx: &App) -> SettingsPage {
+    #[cfg(target_os = "android")]
+    fn zdroid_build_section() -> [SettingsPageItem; 3] {
+        [
+            SettingsPageItem::SectionHeader("About Zdroid-B"),
+            SettingsPageItem::StaticInfo(StaticInfo {
+                title: "Zdroid-B Version".into(),
+                description: Some("Edition ID: zdroid-b. Android package: com.zdroid.b".into()),
+                value: "beta-1c".into(),
+                files: USER,
+            }),
+            SettingsPageItem::ActionLink(ActionLink {
+                title: "Zdroid-B Source".into(),
+                description: Some("https://github.com/BrianKool/zed-android-port".into()),
+                button_text: "Open GitHub".into(),
+                on_click: Arc::new(|_settings_window, _window, cx| {
+                    cx.open_url("https://github.com/BrianKool/zed-android-port");
+                }),
+                files: USER,
+            }),
+        ]
+    }
+
     fn general_settings_section(_cx: &App) -> Vec<SettingsPageItem> {
         vec![
             SettingsPageItem::SectionHeader("General Settings"),
@@ -607,6 +630,8 @@ fn general_page(cx: &App) -> SettingsPage {
             items.extend(privacy_section());
             #[cfg(not(target_os = "android"))]
             items.extend(auto_update_section());
+            #[cfg(target_os = "android")]
+            items.extend(zdroid_build_section());
             items.into()
         },
     }
@@ -8661,7 +8686,7 @@ fn language_settings_data() -> Box<[SettingsPageItem]> {
             }),
             SettingsPageItem::SettingItem(SettingItem {
                 title: "Space Whitespace Indicator",
-                description: "Visible character used to render space characters when show_whitespaces is enabled (default: \"•\")",
+                description: "Visible character used to render space characters when show_whitespaces is enabled (default: \"â€¢\")",
                 field: Box::new(
                     SettingField {
                         json_path: Some("languages.$(language).whitespace_map.space"),
@@ -8687,7 +8712,7 @@ fn language_settings_data() -> Box<[SettingsPageItem]> {
             }),
             SettingsPageItem::SettingItem(SettingItem {
                 title: "Tab Whitespace Indicator",
-                description: "Visible character used to render tab characters when show_whitespaces is enabled (default: \"→\")",
+                description: "Visible character used to render tab characters when show_whitespaces is enabled (default: \"â†’\")",
                 field: Box::new(
                     SettingField {
                         json_path: Some("languages.$(language).whitespace_map.tab"),

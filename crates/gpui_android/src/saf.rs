@@ -1,4 +1,4 @@
-//! Storage Access Framework bridge.
+﻿//! Storage Access Framework bridge.
 //!
 //! GPUI's `prompt_for_paths` / `prompt_for_new_path` traditionally pop a
 //! native file dialog. On Android the analogue is launching an `Intent`
@@ -152,7 +152,7 @@ fn handle_tree_result(uri: &str) -> Result<Option<PathBuf>> {
     if let Some(rest) = uri.strip_prefix("content://com.android.externalstorage.documents/tree/") {
         return Ok(Some(decode_storage_segment(rest)?));
     }
-    if let Some(rest) = uri.strip_prefix("content://com.zdroid.documents/tree/") {
+    if let Some(rest) = uri.strip_prefix("content://com.zdroid.b.documents/tree/") {
         return Ok(Some(decode_zed_segment(rest)?));
     }
     Err(anyhow::anyhow!("unsupported tree URI authority: {uri}"))
@@ -167,7 +167,7 @@ fn handle_document_result(uri: &str) -> Result<Option<PathBuf>> {
     {
         return Ok(Some(decode_storage_segment(rest)?));
     }
-    if let Some(rest) = uri.strip_prefix("content://com.zdroid.documents/document/") {
+    if let Some(rest) = uri.strip_prefix("content://com.zdroid.b.documents/document/") {
         return Ok(Some(decode_zed_segment(rest)?));
     }
     Err(anyhow::anyhow!("unsupported document URI authority: {uri}"))
