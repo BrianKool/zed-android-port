@@ -1931,7 +1931,8 @@ fn boot(cx: &mut App, data_path: &std::path::Path) -> Result<()> {
                     .next()
                 });
                 if let Some(serialized) = serialized {
-                    match workspace::restore_multiworkspace(serialized, app_state.clone(), cx).await {
+                    match workspace::restore_multiworkspace(serialized, app_state.clone(), cx).await
+                    {
                         Ok(_) => return Ok(()),
                         Err(error) => {
                             error!("zed_android: failed to restore recent workspace: {error:#}");

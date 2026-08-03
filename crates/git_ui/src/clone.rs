@@ -16,6 +16,19 @@ enum CloneOutcome {
     Cancelled,
 }
 
+fn redacted_repo_url(url: &str) -> String {
+    let without_suffix = url.split(['?', '#']).next().unwrap_or(url);
+    let Some((scheme, remainder)) = without_suffix.split_once("://") else {
+        return without_suffix.to_owned();
+    };
+    let authority_end = remainder.find('/').unwrap_or(remainder.len());
+    let (authority, path) = remainder.split_at(authority_end);
+    let host = authority
+        .rsplit_once('@')
+        .map_or(authority, |(_, host)| host);
+    format!("{scheme}://{host}{path}")
+}
+
 /// Spawns `git clone --progress <url>` in `cwd`, polls for exit or
 /// cancellation. On cancel, sends `kill()` (SIGKILL on Unix) and waits
 /// so we don't leave a zombie. The caller is responsible for
@@ -28,6 +41,12 @@ fn run_git_clone(
     cancel: &AtomicBool,
     askpass_script: &std::ffi::OsStr,
 ) -> anyhow::Result<CloneOutcome> {
+    let safe_url = redacted_repo_url(url);
+    log::info!(
+        "git clone: starting url={safe_url} cwd={} PATH={}",
+        cwd.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
     let mut child = Command::new("git")
         .arg("clone")
         .arg("--progress")
@@ -38,16 +57,32 @@ fn run_git_clone(
         .env("SSH_ASKPASS_REQUIRE", "force")
         .env("GIT_TERMINAL_PROMPT", "0")
         .spawn()
-        .map_err(|err| anyhow::anyhow!("spawn git clone for {url}: {err}"))?;
+        .map_err(|err| {
+            anyhow::anyhow!(
+                "spawn git clone for {safe_url} in {} failed: {err} (PATH={})",
+                cwd.display(),
+                std::env::var("PATH").unwrap_or_default()
+            )
+        })?;
     loop {
         if cancel.load(Ordering::Relaxed) {
             let _ = child.kill();
             let _ = child.wait();
+            log::info!("git clone: cancelled url={safe_url} cwd={}", cwd.display());
             return Ok(CloneOutcome::Cancelled);
         }
         match child.try_wait()? {
-            Some(status) if status.success() => return Ok(CloneOutcome::Completed),
-            Some(status) => anyhow::bail!("git clone exited with {status}"),
+            Some(status) if status.success() => {
+                log::info!("git clone: completed url={safe_url} cwd={}", cwd.display());
+                return Ok(CloneOutcome::Completed);
+            }
+            Some(status) => {
+                log::error!(
+                    "git clone: failed url={safe_url} cwd={} status={status}",
+                    cwd.display()
+                );
+                anyhow::bail!("git clone exited with {status}")
+            }
             None => {
                 // Block one background-pool thread for ~200ms between
                 // polls. background_spawn pool is sized for blocking
@@ -124,11 +159,18 @@ fn clone_and_open_with_destination(
                     paths.pop()?
                 }
             };
+            let safe_repo_url = redacted_repo_url(&repo_url);
+            log::info!(
+                "git clone: destination selected url={} destination={}",
+                safe_repo_url,
+                destination_dir.display()
+            );
 
             let askpass_session =
                 match AskPassSession::new(cx.background_executor().clone(), askpass).await {
                     Ok(session) => session,
                     Err(error) => {
+                        log::error!("git clone: failed to start askpass session: {error:#}");
                         workspace
                             .update(cx, |workspace, cx| {
                                 let toast = StatusToast::new(error.to_string(), cx, |this, _| {
@@ -226,6 +268,11 @@ fn clone_and_open_with_destination(
                     return None;
                 }
                 Err(error) => {
+                    log::error!(
+                        "git clone: failed url={} destination={}: {error:#}",
+                        safe_repo_url,
+                        destination_dir.display()
+                    );
                     let cloned_dir = destination_dir.join(&repo_name);
                     if let Err(err) = std::fs::remove_dir_all(&cloned_dir) {
                         log::warn!(
@@ -345,4 +392,21 @@ fn clone_and_open_with_destination(
             Some(())
         })
         .detach();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::redacted_repo_url;
+
+    #[test]
+    fn redacts_credentials_and_url_suffixes_from_clone_logs() {
+        assert_eq!(
+            redacted_repo_url("https://user:secret@github.com/acme/repo.git?token=secret#main"),
+            "https://github.com/acme/repo.git"
+        );
+        assert_eq!(
+            redacted_repo_url("git@github.com:acme/repo.git"),
+            "git@github.com:acme/repo.git"
+        );
+    }
 }

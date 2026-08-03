@@ -713,17 +713,38 @@ impl TerminalElement {
             }
         });
 
-        self.interactivity.on_mouse_up(
-            MouseButton::Left,
-            TerminalElement::generic_button_handler(
-                terminal.clone(),
-                focus.clone(),
-                false,
-                move |terminal, e, cx| {
+        self.interactivity.on_mouse_up(MouseButton::Left, {
+            let terminal = terminal.clone();
+            let focus = focus.clone();
+            let terminal_view = self.terminal_view.clone();
+            move |e, window, cx| {
+                if !focus.is_focused(window) {
+                    return;
+                }
+
+                terminal.update(cx, |terminal, cx| {
                     terminal.mouse_up(e, cx);
-                },
-            ),
-        );
+                    cx.notify();
+                });
+
+                // Android's direct-touch gesture recognizer represents a
+                // long press as a double-click followed by an optional drag.
+                // Once the finger lifts, expose the terminal's existing
+                // clipboard actions at the selection instead of requiring a
+                // hardware right-click or a two-finger tap.
+                if window.last_input_was_touch() && e.click_count == 2 {
+                    let has_selection = terminal
+                        .read(cx)
+                        .last_content
+                        .selection_text
+                        .as_ref()
+                        .is_some_and(|text| !text.is_empty());
+                    terminal_view.update(cx, |view, cx| {
+                        view.deploy_context_menu(e.position, has_selection, window, cx);
+                    });
+                }
+            }
+        });
         self.interactivity.on_mouse_down(
             MouseButton::Middle,
             TerminalElement::generic_button_handler(

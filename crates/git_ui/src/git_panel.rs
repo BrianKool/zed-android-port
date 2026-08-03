@@ -3315,9 +3315,8 @@ impl GitPanel {
                     || normalized_prompt.contains("password"));
 
             if is_github_https {
-                let credentials = cx.update(|cx| {
-                    cx.read_credentials(crate::github_auth::GITHUB_CREDENTIALS_KEY)
-                });
+                let credentials =
+                    cx.update(|cx| cx.read_credentials(crate::github_auth::GITHUB_CREDENTIALS_KEY));
                 let workspace = workspace.clone();
                 let operation = operation.clone();
                 let window = window.clone();
@@ -3343,13 +3342,7 @@ impl GitPanel {
                         .update(cx, |_, window, cx| {
                             workspace.update(cx, |workspace, cx| {
                                 workspace.toggle_modal(window, cx, |window, cx| {
-                                    AskPassModal::new(
-                                        operation,
-                                        prompt.into(),
-                                        tx,
-                                        window,
-                                        cx,
-                                    )
+                                    AskPassModal::new(operation, prompt.into(), tx, window, cx)
                                 });
                             })
                         })

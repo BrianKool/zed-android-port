@@ -37,7 +37,12 @@ pub(crate) struct GithubUser {
 
 impl GithubUser {
     pub(crate) fn display_label(&self) -> String {
-        match self.name.as_deref().map(str::trim).filter(|name| !name.is_empty()) {
+        match self
+            .name
+            .as_deref()
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+        {
             Some(name) if name != self.login => format!("{name} (@{})", self.login),
             _ => self.login.clone(),
         }

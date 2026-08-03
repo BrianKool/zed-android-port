@@ -233,10 +233,7 @@ fn app_menu_definitions() -> Vec<MenuDefinition> {
 fn zed_menu_items() -> Vec<MenuEntry> {
     vec![
         MenuEntry::Action("Settings", Box::new(zed_actions::OpenSettings)),
-        MenuEntry::Action(
-            "GitHub Accounts",
-            Box::new(git_ui::OpenGithubAccounts),
-        ),
+        MenuEntry::Action("GitHub Accounts", Box::new(git_ui::OpenGithubAccounts)),
         MenuEntry::Separator,
         MenuEntry::Action("Check for Updates", Box::new(auto_update::Check)),
         MenuEntry::Action("Extensions", Box::new(zed_actions::Extensions::default())),
@@ -257,10 +254,7 @@ fn zed_menu_items() -> Vec<MenuEntry> {
 fn zed_settings_submenu_items() -> Vec<MenuEntry> {
     vec![
         MenuEntry::Action("Open Settings", Box::new(zed_actions::OpenSettings)),
-        MenuEntry::Action(
-            "GitHub Accounts",
-            Box::new(git_ui::OpenGithubAccounts),
-        ),
+        MenuEntry::Action("GitHub Accounts", Box::new(git_ui::OpenGithubAccounts)),
         MenuEntry::Action(
             "Open Settings File",
             Box::new(zed_actions::OpenSettingsFile),

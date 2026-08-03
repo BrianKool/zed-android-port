@@ -218,7 +218,14 @@ impl PasswordProxy {
         >,
         executor: BackgroundExecutor,
     ) -> Result<Self> {
-        let temp_dir = tempfile::Builder::new().prefix("zed-askpass").tempdir()?;
+        let temp_base = std::env::temp_dir();
+        fs::create_dir_all(&temp_base)
+            .await
+            .with_context(|| format!("creating temp directory at {temp_base:?}"))?;
+        let temp_dir = tempfile::Builder::new()
+            .prefix("zed-askpass")
+            .tempdir_in(&temp_base)
+            .with_context(|| format!("creating askpass temp directory in {temp_base:?}"))?;
         let askpass_socket = temp_dir.path().join("askpass.sock");
         let askpass_script_path = temp_dir.path().join(ASKPASS_SCRIPT_NAME);
         let current_exec =

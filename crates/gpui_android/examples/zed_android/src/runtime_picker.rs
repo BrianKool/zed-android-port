@@ -20,15 +20,17 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use gpui::{
-    AnyElement, App, AppContext as _, Context, Entity, FocusHandle, Focusable, Render, Size,
-    Tiling, Window, WindowBounds, WindowKind, WindowOptions, actions, prelude::*, px,
+    AnyElement, App, AppContext as _, Context, Entity, FocusHandle, Focusable, Render,
+    ScrollHandle, Size, StatefulInteractiveElement, Tiling, Window, WindowBounds, WindowKind,
+    WindowOptions, actions, prelude::*, px,
 };
 use platform_title_bar::PlatformTitleBar;
 use release_channel::ReleaseChannel;
 use theme::ActiveTheme;
 use ui::{
     Button, Chip, Clickable, Color, Disableable, FluentBuilder, Headline, HeadlineSize, Icon,
-    IconName, IconSize, Label, LabelCommon, LabelSize, ParentElement, Styled, h_flex, v_flex,
+    IconName, IconSize, Label, LabelCommon, LabelSize, ParentElement, Styled, WithScrollbar, div,
+    h_flex, v_flex,
 };
 use util::ResultExt as _;
 use workspace::{Workspace, client_side_decorations};
@@ -144,8 +146,8 @@ pub fn open_runtime_picker_window(_window: &mut Window, cx: &mut App) {
         height: px(800.0),
     };
     let window_min_size = Size {
-        width: px(480.0),
-        height: px(560.0),
+        width: px(320.0),
+        height: px(360.0),
     };
 
     cx.open_window(
@@ -180,6 +182,7 @@ struct AdapterEntry {
 pub struct RuntimePicker {
     title_bar: Option<Entity<PlatformTitleBar>>,
     focus_handle: FocusHandle,
+    scroll_handle: ScrollHandle,
     entries: Vec<AdapterEntry>,
     /// The currently active adapter (from disk). Marked with a
     /// "Current" badge in the UI; `Select` is a no-op if the user
@@ -212,6 +215,7 @@ impl RuntimePicker {
         Self {
             title_bar,
             focus_handle: cx.focus_handle(),
+            scroll_handle: ScrollHandle::new(),
             entries: build_entries(),
             current: detect_current(),
             install_status: None,
@@ -385,9 +389,14 @@ impl Render for RuntimePicker {
         });
 
         let content = v_flex()
+            .id("runtime-picker-scroll")
             .key_context("RuntimePicker")
             .track_focus(&self.focus_handle)
-            .size_full()
+            .flex_1()
+            .min_h_0()
+            .w_full()
+            .overflow_y_scroll()
+            .track_scroll(&self.scroll_handle)
             .p_6()
             .gap_4()
             .bg(bg)
@@ -413,7 +422,14 @@ impl Render for RuntimePicker {
                 .size_full()
                 .text_color(text)
                 .children(self.title_bar.clone())
-                .child(content),
+                .child(
+                    div()
+                        .relative()
+                        .flex_1()
+                        .min_h_0()
+                        .child(content)
+                        .vertical_scrollbar_for(&self.scroll_handle, window, cx),
+                ),
             window,
             cx,
             Tiling::default(),

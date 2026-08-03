@@ -25,6 +25,9 @@ import android.view.ViewGroup
 import android.view.animation.AccelerateDecelerateInterpolator
 import android.widget.FrameLayout
 import android.widget.ImageView
+import android.widget.LinearLayout
+import android.widget.ProgressBar
+import android.widget.TextView
 import android.widget.Toast
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
@@ -105,6 +108,7 @@ class MainActivity : GameActivity(), ImeHost {
     private var splashOverlay: FrameLayout? = null
     private val splashHandler = Handler(Looper.getMainLooper())
     private var splashRemoved: Boolean = false
+    private var importOverlay: FrameLayout? = null
 
     /// Focusable invisible view that owns the IME `InputConnection`.
     /// Installed in `onCreate`. Rust signals show/hide via JNI calls
@@ -877,6 +881,83 @@ class MainActivity : GameActivity(), ImeHost {
             .start()
     }
 
+    private fun showProjectImportOverlay() {
+        runOnUiThread {
+            if (importOverlay != null) return@runOnUiThread
+            val density = resources.displayMetrics.density
+            val overlay = FrameLayout(this).apply {
+                isClickable = true
+                setBackgroundColor(0x66000000)
+                layoutParams = ViewGroup.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                )
+            }
+            val panel = LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                gravity = android.view.Gravity.CENTER
+                setPadding(
+                    (24 * density).toInt(),
+                    (22 * density).toInt(),
+                    (24 * density).toInt(),
+                    (22 * density).toInt(),
+                )
+                background = android.graphics.drawable.GradientDrawable().apply {
+                    setColor(0xFF2F3136.toInt())
+                    cornerRadius = 10 * density
+                    setStroke((1 * density).toInt(), 0xFF4A4D55.toInt())
+                }
+            }
+            val spinner = ProgressBar(this).apply {
+                isIndeterminate = true
+            }
+            val label = TextView(this).apply {
+                text = "Importing project into Zdroid..."
+                setTextColor(0xFFE6E6E6.toInt())
+                textSize = 16f
+                gravity = android.view.Gravity.CENTER
+            }
+            panel.addView(
+                spinner,
+                LinearLayout.LayoutParams(
+                    (44 * density).toInt(),
+                    (44 * density).toInt(),
+                ).apply {
+                    bottomMargin = (14 * density).toInt()
+                    gravity = android.view.Gravity.CENTER_HORIZONTAL
+                },
+            )
+            panel.addView(
+                label,
+                LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.WRAP_CONTENT,
+                    LinearLayout.LayoutParams.WRAP_CONTENT,
+                ),
+            )
+            overlay.addView(
+                panel,
+                FrameLayout.LayoutParams(
+                    FrameLayout.LayoutParams.WRAP_CONTENT,
+                    FrameLayout.LayoutParams.WRAP_CONTENT,
+                ).apply {
+                    gravity = android.view.Gravity.CENTER
+                    leftMargin = (20 * density).toInt()
+                    rightMargin = (20 * density).toInt()
+                },
+            )
+            (window.decorView as? ViewGroup)?.addView(overlay)
+            importOverlay = overlay
+        }
+    }
+
+    private fun hideProjectImportOverlay() {
+        runOnUiThread {
+            val overlay = importOverlay ?: return@runOnUiThread
+            (overlay.parent as? ViewGroup)?.removeView(overlay)
+            importOverlay = null
+        }
+    }
+
     // installCapturedPointerListenerOnAll removed: we no longer
     // install the View-level captured-pointer listener anywhere.
     // Activity.onGenericMotionEvent below is the single capture path.
@@ -1379,7 +1460,7 @@ class MainActivity : GameActivity(), ImeHost {
     /** Import a foreign SAF tree into Zdroid's private home, then return it
      * through our own provider URI so the Rust side can open it normally. */
     private fun importAndReturnTree(treeUri: Uri) {
-        Toast.makeText(this, "Importing project into Zdroid...", Toast.LENGTH_SHORT).show()
+        showProjectImportOverlay()
         Thread({
             try {
                 val imported = importDocumentTree(treeUri)
@@ -1399,6 +1480,8 @@ class MainActivity : GameActivity(), ImeHost {
                     ).show()
                 }
                 onPickerResult("zdroid-error:${Uri.encode(t.message ?: t.javaClass.simpleName)}")
+            } finally {
+                hideProjectImportOverlay()
             }
         }, "zdroid-saf-import").start()
     }
