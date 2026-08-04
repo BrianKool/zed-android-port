@@ -11,8 +11,9 @@ mod title_bar;
 
 use std::borrow::Cow;
 use std::collections::HashMap;
+use std::net::{IpAddr, SocketAddr};
 use std::os::unix::fs::PermissionsExt as _;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use android_activity::AndroidApp;
@@ -39,6 +40,76 @@ use zdroid_runtime::{
     RuntimeId, RuntimeProvider, adapters,
     config::{ResolvedConfig, RuntimeFile},
 };
+
+#[derive(Clone, Copy)]
+struct AndroidDnsResolver {
+    vm_ptr: usize,
+}
+
+impl AndroidDnsResolver {
+    fn new(android_app: &AndroidApp) -> Self {
+        Self {
+            vm_ptr: android_app.vm_as_ptr() as usize,
+        }
+    }
+
+    fn resolve_now(&self, hostname: &str) -> Result<Vec<SocketAddr>> {
+        use jni::JavaVM;
+        use jni::objects::{JObject, JObjectArray, JString, JValue};
+
+        let vm = unsafe { JavaVM::from_raw(self.vm_ptr as *mut _)? };
+        let mut env = vm
+            .attach_current_thread()
+            .context("attach thread for Android DNS")?;
+        let host = env.new_string(hostname).context("create DNS hostname")?;
+        let result = env
+            .call_static_method(
+                "java/net/InetAddress",
+                "getAllByName",
+                "(Ljava/lang/String;)[Ljava/net/InetAddress;",
+                &[JValue::Object(&JObject::from(host))],
+            )
+            .context("InetAddress.getAllByName")?
+            .l()
+            .context("DNS result is not an object")?;
+        let addresses = JObjectArray::from(result);
+        let length = env
+            .get_array_length(&addresses)
+            .context("DNS result length")?;
+        let mut resolved = Vec::with_capacity(length as usize);
+        for index in 0..length {
+            let address = env
+                .get_object_array_element(&addresses, index)
+                .context("read DNS result")?;
+            let value = env
+                .call_method(&address, "getHostAddress", "()Ljava/lang/String;", &[])
+                .context("InetAddress.getHostAddress")?
+                .l()
+                .context("DNS address is not a string")?;
+            let value: String = env
+                .get_string(&JString::from(value))
+                .context("decode DNS address")?
+                .into();
+            if let Ok(ip) = value.parse::<IpAddr>() {
+                resolved.push(SocketAddr::new(ip, 0));
+            }
+        }
+        anyhow::ensure!(
+            !resolved.is_empty(),
+            "Android returned no addresses for {hostname}"
+        );
+        Ok(resolved)
+    }
+}
+
+impl reqwest::dns::Resolve for AndroidDnsResolver {
+    fn resolve(&self, name: reqwest::dns::Name) -> reqwest::dns::Resolving {
+        let result = self
+            .resolve_now(name.as_str())
+            .map(|addresses| Box::new(addresses.into_iter()) as reqwest::dns::Addrs);
+        Box::pin(std::future::ready(result.map_err(Into::into)))
+    }
+}
 
 fn minimal_window_options(_: Option<uuid::Uuid>, _cx: &mut App) -> gpui::WindowOptions {
     gpui::WindowOptions::default()
@@ -115,59 +186,132 @@ fn active_provider(data_path: &std::path::Path) -> Box<dyn RuntimeProvider> {
     adapters::for_config(&resolved).expect("default Bootstrap adapter must construct")
 }
 
+const CODEX_TERMUX_VERSION: &str = "0.146.0";
+
 /// Make the subscription-backed ACP agents available without asking users to
 /// configure an API provider. Both adapters inherit the active runtime's HOME,
 /// so they reuse the login performed by `codex login` / `claude` in Zdroid's
-/// integrated terminal. Keep Codex on the version bundled by codex-acp: its
-/// app-server protocol is generated against that version, while pointing
-/// CODEX_PATH at a newer global CLI can initialize successfully but then hang
-/// waiting for turn notifications with a different wire shape.
+/// integrated terminal. Codex must use an Android-targeted binary: the regular
+/// Linux-musl npm binary cannot reliably use Android's netd resolver.
 fn ensure_codex_acp_launcher() -> Result<PathBuf> {
     let home = PathBuf::from(std::env::var_os("HOME").context("HOME is not set")?);
     let launcher = home.join(".local/bin/zdroid-codex-acp-cli");
     let parent = launcher.parent().context("Codex launcher has no parent")?;
     std::fs::create_dir_all(parent).context("create Codex launcher directory")?;
 
-    // codex-acp installs its protocol-compatible @openai/codex dependency in
-    // npm's private _npx cache. That cache is outside Zdroid's global npm
-    // launcher-generator walk, so patch the bundled native binary immediately
-    // before app-server starts. Reading the parent Node process cmdline locates
-    // the exact npx generation that launched this adapter, avoiding stale cache
-    // entries from older codex-acp versions.
-    let script = r#"#!/system/bin/sh
+    let script = format!(
+        r#"#!/system/bin/sh
 set -eu
 
-parent_args="$(tr '\000' '\n' < "/proc/$PPID/cmdline" 2>/dev/null || true)"
-acp_js="$(printf '%s\n' "$parent_args" | grep '/@agentclientprotocol/codex-acp/.*\.js$' | head -n 1 || true)"
-if [ -z "$acp_js" ]; then
-    cache="${npm_config_cache:-$HOME/../node/cache}"
-    acp_js="$(find "$cache/_npx" -path '*/node_modules/@agentclientprotocol/codex-acp/dist/index.js' -type f 2>/dev/null | tail -n 1 || true)"
-fi
-if [ -z "$acp_js" ]; then
-    echo 'Zdroid: unable to locate codex-acp in the npm cache' >&2
-    exit 127
-fi
+version="{CODEX_TERMUX_VERSION}"
+root="$HOME/.local/share/zdroid/codex-termux-$version"
+codex_bin="$root/node_modules/@mmmbuto/codex-cli-termux/bin/codex.bin"
+archive="/sdcard/.zed/mmmbuto-codex-cli-termux-$version.tgz"
+mkdir -p "$HOME/.local/share/zdroid"
 
-node_modules="${acp_js%%/@agentclientprotocol/codex-acp/*}"
-codex_root="$node_modules/@openai/codex"
-codex_js="$codex_root/bin/codex.js"
-if [ ! -f "$codex_js" ]; then
-    echo "Zdroid: compatible Codex package missing beside $acp_js" >&2
-    exit 127
-fi
-
-find "$codex_root" -type f -size +1048576c 2>/dev/null | while IFS= read -r file; do
-    if grep -q -a '/etc/resolv.conf' "$file" 2>/dev/null; then
-        perl -0777 -pi -e 's{/etc/resolv\.conf}{/sdcard/.zed/r\x00\x00}g' "$file"
+if [ ! -x "$codex_bin" ]; then
+    lock="$root.installing"
+    if [ -d "$lock" ]; then
+        owner="$(cat "$lock/pid" 2>/dev/null || true)"
+        owner_start="$(cat "$lock/start_time" 2>/dev/null || true)"
+        live_start=""
+        if [ -n "$owner" ] && [ -r "/proc/$owner/stat" ]; then
+            live_start="$(awk '{{print $22}}' "/proc/$owner/stat" 2>/dev/null || true)"
+        fi
+        if [ -z "$owner_start" ] || [ "$owner_start" != "$live_start" ]; then
+            rm -rf "$lock"
+        fi
     fi
-done
+    if mkdir "$lock" 2>/dev/null; then
+        echo "$$" > "$lock/pid"
+        awk '{{print $22}}' "/proc/$$/stat" > "$lock/start_time"
+        trap 'rm -rf "$lock" "$root.staging"' EXIT INT TERM
+        rm -rf "$root.staging"
+        mkdir -p "$root.staging"
+        echo "Zdroid-B: installing Android Codex $version (one-time setup)..." >&2
+        if [ -f "$archive" ]; then source="$archive"; else source="@mmmbuto/codex-cli-termux@$version"; fi
+        npm_config_platform=android npm install --force --no-audit --no-fund --prefix "$root.staging" "$source" >&2
+        rm -rf "$root"
+        mv "$root.staging" "$root"
+        rm -rf "$lock"
+        trap - EXIT INT TERM
+    else
+        waited=0
+        while [ ! -x "$codex_bin" ] && [ "$waited" -lt 900 ]; do
+            sleep 1
+            waited=$((waited + 1))
+        done
+    fi
+fi
 
-exec node "$codex_js" "$@"
-"#;
+if [ ! -x "$codex_bin" ]; then
+    echo "Zdroid-B: Android Codex installation did not complete." >&2
+    exit 127
+fi
+
+bin_dir="$(dirname "$codex_bin")"
+export CODEX_MANAGED_BY_NPM=1
+export CODEX_SELF_EXE="$codex_bin"
+export LD_LIBRARY_PATH="$bin_dir${{LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}}"
+exec "$codex_bin" "$@"
+"#
+    );
     std::fs::write(&launcher, script).context("write Codex ACP launcher")?;
     let mut permissions = std::fs::metadata(&launcher)?.permissions();
     permissions.set_mode(0o700);
     std::fs::set_permissions(&launcher, permissions).context("chmod Codex ACP launcher")?;
+    let prefix = std::env::var_os("PREFIX")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("/data/data/com.zdroid/files/usr"));
+    let terminal_launcher = prefix.join(".zed/bin/codex");
+    if let Some(parent) = terminal_launcher.parent() {
+        std::fs::create_dir_all(parent).context("create Codex terminal launcher directory")?;
+    }
+    std::fs::write(
+        &terminal_launcher,
+        r#"#!/system/bin/sh
+# The terminal keeps the regular Codex CLI so its browser OAuth flow behaves
+# exactly like the setup that originally worked in Zdroid-B. The Agent panel
+# uses the separate Android-compatible CODEX_PATH launcher above and shares the
+# resulting ~/.codex/auth.json credentials.
+regular_cli="$PREFIX/bin/codex"
+if [ -x "$regular_cli" ]; then
+    exec "$regular_cli" "$@"
+fi
+echo 'Zdroid-B: regular Codex CLI is not installed. Re-run Zdroid Bootstrap setup or run npm install -g @openai/codex.' >&2
+exit 127
+"#,
+    )
+    .context("write Codex terminal launcher")?;
+    let mut permissions = std::fs::metadata(&terminal_launcher)?.permissions();
+    permissions.set_mode(0o700);
+    std::fs::set_permissions(&terminal_launcher, permissions)
+        .context("chmod Codex terminal launcher")?;
+
+    let local_archive = PathBuf::from(format!(
+        "/sdcard/.zed/mmmbuto-codex-cli-termux-{CODEX_TERMUX_VERSION}.tgz"
+    ));
+    if local_archive.is_file() {
+        let launcher = launcher.clone();
+        std::thread::spawn(move || {
+            log::info!("zed_android: preparing Android Codex from local package");
+            match std::process::Command::new(&launcher)
+                .arg("--version")
+                .output()
+            {
+                Ok(output) if output.status.success() => log::info!(
+                    "zed_android: Android Codex ready: {}",
+                    String::from_utf8_lossy(&output.stdout).trim()
+                ),
+                Ok(output) => log::error!(
+                    "zed_android: Android Codex setup failed ({}): {}",
+                    output.status,
+                    String::from_utf8_lossy(&output.stderr).trim()
+                ),
+                Err(err) => log::error!("zed_android: could not start Android Codex setup: {err}"),
+            }
+        });
+    }
     Ok(launcher)
 }
 
@@ -190,13 +334,118 @@ if [ -z "$claude_cli" ]; then
     exit 127
 fi
 export CLAUDE_CODE_EXECUTABLE="$claude_cli"
-exec npx -y @agentclientprotocol/claude-agent-acp@0.64.2 "$@"
+cache="${npm_config_cache:-$HOME/../node/cache}"
+acp_js="$(find "$cache/_npx" -path '*/node_modules/@agentclientprotocol/claude-agent-acp/dist/index.js' -type f 2>/dev/null | tail -n 1 || true)"
+if [ -n "$acp_js" ]; then
+    exec node "$acp_js" "$@"
+fi
+
+# First launch populates npm's cache. Subsequent launches bypass npx above,
+# avoiding Android's phantom-process limit during normal agent startup.
+exec npx --yes --prefer-offline --no-audit --no-fund @agentclientprotocol/claude-agent-acp@0.64.2 "$@"
 "#;
     std::fs::write(&launcher, script).context("write Claude ACP launcher")?;
     let mut permissions = std::fs::metadata(&launcher)?.permissions();
     permissions.set_mode(0o700);
     std::fs::set_permissions(&launcher, permissions).context("chmod Claude ACP launcher")?;
+
+    // The registry-provided launch command is `claude-agent-acp`. Settings are
+    // persisted asynchronously, so on a fresh boot AgentRegistryStore can see
+    // that command before it sees our Custom-server replacement. Keep a small
+    // compatibility entry on the bootstrap PATH so either launch route reaches
+    // the same Android-aware wrapper instead of failing with status 127.
+    let prefix = std::env::var_os("PREFIX")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("/data/data/com.zdroid/files/usr"));
+    let compatibility_launcher = prefix.join("bin/claude-agent-acp");
+    if let Some(parent) = compatibility_launcher.parent() {
+        std::fs::create_dir_all(parent).context("create Claude ACP compatibility directory")?;
+    }
+    let compatibility_script = format!(
+        "#!/system/bin/sh\nexec {} \"$@\"\n",
+        launcher.to_string_lossy()
+    );
+    std::fs::write(&compatibility_launcher, compatibility_script)
+        .context("write Claude ACP compatibility launcher")?;
+    let mut permissions = std::fs::metadata(&compatibility_launcher)?.permissions();
+    permissions.set_mode(0o700);
+    std::fs::set_permissions(&compatibility_launcher, permissions)
+        .context("chmod Claude ACP compatibility launcher")?;
+    log::info!(
+        "zed_android: Claude ACP compatibility launcher = {}",
+        compatibility_launcher.display()
+    );
     Ok(launcher)
+}
+
+const RESOLV_CONF_NEEDLE: &[u8] = b"/etc/resolv.conf";
+const RESOLV_CONF_REPLACEMENT: &[u8] = b"/sdcard/.zed/r\0\0";
+
+fn patch_native_cli_binary(path: &Path) -> Result<bool> {
+    let metadata = std::fs::metadata(path)?;
+    if !metadata.is_file() || metadata.len() < 1_048_576 {
+        return Ok(false);
+    }
+
+    let mut bytes = std::fs::read(path)?;
+    let mut patched = false;
+    let mut offset = 0;
+    while let Some(relative) = bytes[offset..]
+        .windows(RESOLV_CONF_NEEDLE.len())
+        .position(|window| window == RESOLV_CONF_NEEDLE)
+    {
+        let start = offset + relative;
+        bytes[start..start + RESOLV_CONF_REPLACEMENT.len()]
+            .copy_from_slice(RESOLV_CONF_REPLACEMENT);
+        patched = true;
+        offset = start + RESOLV_CONF_REPLACEMENT.len();
+    }
+    if patched {
+        std::fs::write(path, bytes)?;
+    }
+    Ok(patched)
+}
+
+fn repair_installed_cli_dns() {
+    fn visit(path: &Path, depth: usize, patched: &mut usize) {
+        if depth == 0 || !path.exists() {
+            return;
+        }
+        let Ok(entries) = std::fs::read_dir(path) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                visit(&path, depth - 1, patched);
+                continue;
+            }
+            let is_cli_binary = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name == "codex" || name == "claude");
+            if is_cli_binary {
+                match patch_native_cli_binary(&path) {
+                    Ok(true) => {
+                        *patched += 1;
+                        log::info!("zed_android: repaired CLI DNS path in {}", path.display());
+                    }
+                    Ok(false) => {}
+                    Err(err) => log::warn!(
+                        "zed_android: could not repair CLI DNS path in {}: {err:#}",
+                        path.display()
+                    ),
+                }
+            }
+        }
+    }
+
+    let Some(prefix) = std::env::var_os("PREFIX").map(PathBuf::from) else {
+        return;
+    };
+    let mut patched = 0;
+    visit(&prefix.join("lib/node_modules"), 14, &mut patched);
+    log::info!("zed_android: native CLI DNS repair patched {patched} binaries");
 }
 
 struct AndroidAcpAgent {
@@ -319,6 +568,104 @@ fn ensure_cli_subscription_agents(fs: Arc<dyn Fs>, cx: &mut App) {
             None
         }
     };
+
+    // Apply the launch contract synchronously before any Project creates its
+    // AgentServerStore. Persisting settings below is intentionally async, but
+    // relying on that write alone lets a project register the cached Registry
+    // command first (`claude-agent-acp`) and fail with status 127 when the user
+    // opens a thread quickly. The persisted update contains the same values and
+    // replaces this temporary global override once its atomic write completes.
+    let mut runtime_settings =
+        project::agent_server_store::AllAgentServersSettings::get_global(cx).clone();
+    let codex = runtime_settings
+        .entry("codex-acp".into())
+        .or_insert_with(
+            || project::agent_server_store::CustomAgentServerSettings::Registry {
+                env: HashMap::default(),
+                default_mode: None,
+                default_model: None,
+                favorite_models: Vec::new(),
+                default_config_options: HashMap::default(),
+                favorite_config_option_values: HashMap::default(),
+            },
+        );
+    if let project::agent_server_store::CustomAgentServerSettings::Registry { env, .. } = codex {
+        if let Some(launcher) = codex_launcher.as_ref() {
+            env.insert("CODEX_PATH".to_string(), launcher.clone());
+        } else {
+            env.remove("CODEX_PATH");
+        }
+    }
+
+    if let Some(launcher) = claude_launcher.as_ref() {
+        let existing = runtime_settings.remove("claude-acp");
+        let (
+            env,
+            default_mode,
+            default_model,
+            favorite_models,
+            default_config_options,
+            favorite_config_option_values,
+        ) = match existing {
+            Some(project::agent_server_store::CustomAgentServerSettings::Custom {
+                command,
+                default_mode,
+                default_model,
+                favorite_models,
+                default_config_options,
+                favorite_config_option_values,
+            }) => (
+                command.env.unwrap_or_default(),
+                default_mode,
+                default_model,
+                favorite_models,
+                default_config_options,
+                favorite_config_option_values,
+            ),
+            Some(project::agent_server_store::CustomAgentServerSettings::Registry {
+                env,
+                default_mode,
+                default_model,
+                favorite_models,
+                default_config_options,
+                favorite_config_option_values,
+            }) => (
+                env,
+                default_mode,
+                default_model,
+                favorite_models,
+                default_config_options,
+                favorite_config_option_values,
+            ),
+            None => (
+                HashMap::default(),
+                None,
+                None,
+                Vec::new(),
+                HashMap::default(),
+                HashMap::default(),
+            ),
+        };
+        let mut env = env;
+        env.insert("CLAUDE_CODE_EXECUTABLE".to_string(), "claude".to_string());
+        runtime_settings.insert(
+            "claude-acp".into(),
+            project::agent_server_store::CustomAgentServerSettings::Custom {
+                command: project::agent_server_store::AgentServerCommand {
+                    path: launcher.clone(),
+                    args: Vec::new(),
+                    env: Some(env),
+                },
+                default_mode,
+                default_model,
+                favorite_models,
+                default_config_options,
+                favorite_config_option_values,
+            },
+        );
+    }
+    project::agent_server_store::AllAgentServersSettings::override_global(runtime_settings, cx);
+
     cx.global::<SettingsStore>()
         .update_settings_file(fs, move |content, _cx| {
             let agent_servers = content.agent_servers.get_or_insert_default();
@@ -543,6 +890,13 @@ fn android_main(app: AndroidApp) {
     // instead of the original `/etc/resolv.conf`. Falls back to public
     // DNS if ConnectivityManager gives nothing (no active network yet).
     gpui_android::dns_bridge::populate_resolv_conf(&app);
+    repair_installed_cli_dns();
+    if let Some(prefix) = std::env::var_os("PREFIX").map(PathBuf::from)
+        && let Err(err) =
+            zdroid_runtime::adapters::bootstrap_install::ensure_package_manager_launchers(&prefix)
+    {
+        log::warn!("zed_android: package-manager launcher setup failed: {err:#}");
+    }
 
     // Install zd-exec into <data>/files/bin/ from the APK-bundled
     // asset. Idempotent (skipped when on-disk byte length matches the
@@ -634,8 +988,9 @@ fn android_main(app: AndroidApp) {
         log::warn!("zed_android: terminal GitHub credential bridge failed: {err:#}");
     }
 
+    let dns_resolver = AndroidDnsResolver::new(&app);
     gpui_android::run(app, assets::Assets, move |cx: &mut App| {
-        if let Err(err) = boot(cx, &data_path) {
+        if let Err(err) = boot(cx, &data_path, dns_resolver) {
             error!("zed_android: boot failed: {err:#}");
         }
     });
@@ -813,7 +1168,7 @@ fn reload_zdroid_keymaps(cx: &mut App) {
     }
 }
 
-fn boot(cx: &mut App, data_path: &std::path::Path) -> Result<()> {
+fn boot(cx: &mut App, data_path: &std::path::Path, dns_resolver: AndroidDnsResolver) -> Result<()> {
     // android_main can run multiple times for one process when the activity
     // is recreated; paths' OnceLocks survive across invocations. The second
     // call panics with "set_custom_data_dir called after data_dir or
@@ -961,7 +1316,8 @@ fn boot(cx: &mut App, data_path: &std::path::Path) -> Result<()> {
     info!("zed_android: release_channel init");
 
     info!("zed_android: http client init");
-    let http = ReqwestClient::user_agent("zed_android/0.1")?;
+    let http =
+        ReqwestClient::user_agent_with_dns_resolver("zed_android/0.1", Arc::new(dns_resolver))?;
     cx.set_http_client(Arc::new(http));
     info!("zed_android: http client set");
 

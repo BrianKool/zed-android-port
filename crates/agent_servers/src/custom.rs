@@ -388,21 +388,24 @@ fn api_key_for_gemini_cli(cx: &mut App) -> Task<Result<String>> {
 
 fn is_registry_agent(agent_id: impl Into<AgentId>, cx: &App) -> bool {
     let agent_id = agent_id.into();
-    let is_in_registry = project::AgentRegistryStore::try_global(cx)
-        .map(|store| store.read(cx).agent(&agent_id).is_some())
-        .unwrap_or(false);
-    let is_settings_registry = cx.read_global(|settings: &SettingsStore, _| {
+    let settings_source = cx.read_global(|settings: &SettingsStore, _| {
         settings
             .get::<AllAgentServersSettings>(None)
             .get(agent_id.as_ref())
-            .is_some_and(|s| {
+            .map(|settings| {
                 matches!(
-                    s,
+                    settings,
                     project::agent_server_store::CustomAgentServerSettings::Registry { .. }
                 )
             })
     });
-    is_in_registry || is_settings_registry
+    if let Some(is_registry) = settings_source {
+        return is_registry;
+    }
+    let is_in_registry = project::AgentRegistryStore::try_global(cx)
+        .map(|store| store.read(cx).agent(&agent_id).is_some())
+        .unwrap_or(false);
+    is_in_registry
 }
 
 fn default_settings_for_agent() -> settings::CustomAgentServerSettings {
@@ -515,5 +518,28 @@ mod tests {
         cx.update(|cx| {
             assert!(is_registry_agent("agent-from-settings", cx));
         });
+    }
+
+    #[gpui::test]
+    fn test_custom_settings_override_same_registry_agent(cx: &mut TestAppContext) {
+        init_test(cx);
+        init_registry_with_agents(cx, &["claude-acp"]);
+        set_agent_server_settings(
+            cx,
+            vec![(
+                "claude-acp",
+                settings::CustomAgentServerSettings::Custom {
+                    path: "zdroid-claude-agent-acp".into(),
+                    args: Vec::new(),
+                    env: HashMap::default(),
+                    default_mode: None,
+                    default_model: None,
+                    favorite_models: Vec::new(),
+                    default_config_options: HashMap::default(),
+                    favorite_config_option_values: HashMap::default(),
+                },
+            )],
+        );
+        cx.update(|cx| assert!(!is_registry_agent("claude-acp", cx)));
     }
 }

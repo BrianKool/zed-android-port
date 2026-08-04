@@ -18119,6 +18119,7 @@ dependencies = [
  "which_key",
  "workspace",
  "zdroid_runtime",
+ "zed-reqwest",
  "zed_actions",
 ]
 

@@ -7,8 +7,8 @@ use crate::{
 use agent_settings::AgentSettings;
 use git::Clone as GitClone;
 use gpui::{
-    Action, App, Context, Entity, EventEmitter, FocusHandle, Focusable, InteractiveElement,
-    ParentElement, Render, Styled, Task, TaskExt, Window, actions,
+    Action, App, ClipboardItem, Context, Entity, EventEmitter, FocusHandle, Focusable,
+    InteractiveElement, ParentElement, Render, Styled, Task, TaskExt, Window, actions,
 };
 use gpui::{WeakEntity, linear_color_stop, linear_gradient};
 use menu::{SelectNext, SelectPrevious};
@@ -216,6 +216,7 @@ pub struct WelcomePage {
     fallback_to_recent_projects: bool,
     recent_workspaces: Option<Vec<RecentWorkspace>>,
     agent_setup_info_open: bool,
+    agent_setup_info_compact: bool,
 }
 
 impl WelcomePage {
@@ -257,6 +258,7 @@ impl WelcomePage {
             fallback_to_recent_projects,
             recent_workspaces: None,
             agent_setup_info_open: false,
+            agent_setup_info_compact: false,
         }
     }
 
@@ -370,12 +372,99 @@ impl WelcomePage {
             )
     }
 
-    fn render_agent_setup_info(&self, window: &Window, cx: &App) -> impl IntoElement {
+    fn run_agent_setup_command(
+        &mut self,
+        id: &'static str,
+        label: &'static str,
+        command: &'static str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        cx.write_to_clipboard(ClipboardItem::new_string(command.to_string()));
+        self.agent_setup_info_compact = true;
+        cx.notify();
+
+        let terminal_task = task::SpawnInTerminal {
+            id: task::TaskId(format!("zdroid-agent-setup-{id}")),
+            full_label: label.to_string(),
+            label: label.to_string(),
+            command: Some(command.to_string()),
+            command_label: command.to_string(),
+            use_new_terminal: true,
+            allow_concurrent_runs: false,
+            reveal: task::RevealStrategy::Always,
+            reveal_target: zed_actions::RevealTarget::Dock,
+            hide: task::HideStrategy::Never,
+            shell: task::Shell::System,
+            show_summary: true,
+            show_command: true,
+            ..Default::default()
+        };
+
+        self.workspace
+            .update(cx, |workspace, cx| {
+                workspace
+                    .spawn_in_terminal(terminal_task, window, cx)
+                    .detach();
+            })
+            .log_err();
+    }
+
+    fn render_agent_setup_info(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = cx.theme().colors();
-        let max_height = (window.viewport_size().height - px(220.0))
-            .max(px(180.0))
-            .min(px(520.0));
-        let command = |id: &'static str, text: &'static str| {
+        let show_install_label = window.viewport_size().width >= px(600.0);
+        let max_height = if self.agent_setup_info_compact {
+            if show_install_label {
+                px(320.0)
+            } else {
+                px(210.0)
+            }
+        } else {
+            (window.viewport_size().height - px(220.0))
+                .max(px(180.0))
+                .min(px(520.0))
+        };
+        let command = |id: &'static str,
+                       label: &'static str,
+                       text: &'static str,
+                       install_command: Option<&'static str>| {
+            let install_action = if show_install_label {
+                Button::new(format!("install-{id}"), "Run")
+                    .start_icon(Icon::new(IconName::PlayFilled).size(IconSize::Small))
+                    .style(ButtonStyle::Outlined)
+                    .disabled(install_command.is_none())
+                    .tooltip(move |window, cx| {
+                        Tooltip::text(if install_command.is_some() {
+                            "Run in terminal"
+                        } else {
+                            "No verified Android installer is available"
+                        })(window, cx)
+                    })
+                    .when_some(install_command, |button, install_command| {
+                        button.on_click(cx.listener(move |this, _, window, cx| {
+                            this.run_agent_setup_command(id, label, install_command, window, cx);
+                        }))
+                    })
+                    .into_any_element()
+            } else {
+                IconButton::new(format!("install-{id}"), IconName::PlayFilled)
+                    .icon_size(IconSize::Small)
+                    .disabled(install_command.is_none())
+                    .tooltip(move |window, cx| {
+                        Tooltip::text(if install_command.is_some() {
+                            "Run in terminal"
+                        } else {
+                            "No verified Android installer is available"
+                        })(window, cx)
+                    })
+                    .when_some(install_command, |button, install_command| {
+                        button.on_click(cx.listener(move |this, _, window, cx| {
+                            this.run_agent_setup_command(id, label, install_command, window, cx);
+                        }))
+                    })
+                    .into_any_element()
+            };
+
             h_flex()
                 .id(id)
                 .w_full()
@@ -395,9 +484,15 @@ impl WelcomePage {
                         .child(Label::new(text).buffer_font(cx).size(LabelSize::XSmall)),
                 )
                 .child(
-                    CopyButton::new(format!("copy-{id}"), text)
-                        .icon_size(IconSize::Small)
-                        .tooltip_label("Copy command"),
+                    h_flex()
+                        .flex_none()
+                        .gap_1()
+                        .child(
+                            CopyButton::new(format!("copy-{id}"), text)
+                                .icon_size(IconSize::Small)
+                                .tooltip_label("Copy command"),
+                        )
+                        .child(install_action),
                 )
         };
 
@@ -424,28 +519,74 @@ impl WelcomePage {
             )
             .child(Label::new("Base packages").size(LabelSize::Small))
             .child(command(
-                "agent-command-base",
-                "pkg update && pkg upgrade\npkg install nodejs-lts git",
+                "agent-command-repair",
+                "Repair package state",
+                "env LD_LIBRARY_PATH=\"$PREFIX/lib\" apt --fix-broken install -y",
+                Some("env LD_LIBRARY_PATH=\"$PREFIX/lib\" apt --fix-broken install -y"),
+            ))
+            .child(command(
+                "agent-command-update",
+                "Update packages",
+                "env LD_LIBRARY_PATH=\"$PREFIX/lib\" pkg update -y",
+                Some("env LD_LIBRARY_PATH=\"$PREFIX/lib\" pkg update -y"),
+            ))
+            .child(command(
+                "agent-command-upgrade",
+                "Upgrade packages",
+                "env LD_LIBRARY_PATH=\"$PREFIX/lib\" pkg upgrade -y",
+                Some("env LD_LIBRARY_PATH=\"$PREFIX/lib\" pkg upgrade -y"),
+            ))
+            .child(command(
+                "agent-command-base-install",
+                "Install base packages",
+                "env LD_LIBRARY_PATH=\"$PREFIX/lib\" pkg install -y nodejs-lts git",
+                Some("env LD_LIBRARY_PATH=\"$PREFIX/lib\" pkg install -y nodejs-lts git"),
             ))
             .child(Label::new("Codex").size(LabelSize::Small))
             .child(command(
-                "agent-command-codex",
-                "npm install -g @openai/codex\ncodex login",
+                "agent-command-codex-install",
+                "Install Codex",
+                "npm install -g @openai/codex",
+                Some("npm install -g @openai/codex"),
+            ))
+            .child(command(
+                "agent-command-codex-login",
+                "Sign in to Codex",
+                "codex login",
+                Some("codex login"),
             ))
             .child(Label::new("Claude Code").size(LabelSize::Small))
             .child(command(
-                "agent-command-claude",
-                "npm install -g @anthropic-ai/claude-code\nclaude\n/login",
+                "agent-command-claude-install",
+                "Install Claude",
+                "npm install -g @anthropic-ai/claude-code @agentclientprotocol/claude-agent-acp@0.64.2",
+                Some("npm install -g @anthropic-ai/claude-code @agentclientprotocol/claude-agent-acp@0.64.2"),
+            ))
+            .child(command(
+                "agent-command-claude-login",
+                "Sign in to Claude",
+                "claude",
+                Some("claude"),
             ))
             .child(Label::new("Gemini CLI").size(LabelSize::Small))
             .child(command(
-                "agent-command-gemini",
-                "npm install -g @google/gemini-cli\ngemini",
+                "agent-command-gemini-install",
+                "Install Gemini",
+                "npm install -g @google/gemini-cli",
+                Some("npm install -g @google/gemini-cli"),
+            ))
+            .child(command(
+                "agent-command-gemini-login",
+                "Sign in to Gemini",
+                "gemini",
+                Some("gemini"),
             ))
             .child(Label::new("Grok Build").size(LabelSize::Small))
             .child(command(
                 "agent-command-grok",
+                "Install Grok",
                 "Install the official Linux ARM64 build, then run:\ngrok\nACP: grok agent stdio",
+                None,
             ))
             .child(
                 Label::new(

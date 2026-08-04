@@ -17,7 +17,10 @@
 //!   - First-launch auto-open when no `runtime.toml` exists yet.
 
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 
 use gpui::{
     AnyElement, App, AppContext as _, Context, Entity, FocusHandle, Focusable, Render,
@@ -77,6 +80,7 @@ impl ProgressSink for ChannelProgressSink {
 /// (extraction doesn't touch `etc/`), and so it persists across
 /// editor APK updates the same way other user state does.
 const RUNTIME_TOML_PATH: &str = "/data/data/com.zdroid/files/usr/etc/zd-runtime.toml";
+static FIRST_RUNTIME_PICKER_OPENED: AtomicBool = AtomicBool::new(false);
 
 actions!(
     zdroid_runtime,
@@ -104,8 +108,20 @@ actions!(
 /// rendered behind any window stacked on top â€” bad UX.
 pub fn register(cx: &mut App) {
     cx.observe_new(
-        |workspace: &mut Workspace, _window, _cx: &mut Context<Workspace>| {
+        |workspace: &mut Workspace, _window, cx: &mut Context<Workspace>| {
             workspace.register_action(handle_pick_runtime);
+
+            if cfg!(target_os = "android")
+                && !std::path::Path::new(RUNTIME_TOML_PATH).exists()
+                && !FIRST_RUNTIME_PICKER_OPENED.swap(true, Ordering::AcqRel)
+            {
+                cx.defer(|cx| {
+                    log::info!(
+                        "zdroid_runtime_picker: opening automatically for first-time runtime setup"
+                    );
+                    open_runtime_picker(cx);
+                });
+            }
         },
     )
     .detach();
@@ -130,6 +146,10 @@ fn handle_pick_runtime(
 /// to settings_ui's ActionLink so we don't need a wrapper closure at
 /// every call site.
 pub fn open_runtime_picker_window(_window: &mut Window, cx: &mut App) {
+    open_runtime_picker(cx);
+}
+
+fn open_runtime_picker(cx: &mut App) {
     let existing = cx
         .windows()
         .into_iter()
@@ -296,6 +316,29 @@ impl RuntimePicker {
             let _ = this.update(cx, |this, cx| {
                 this.install_status = None;
                 this.entries = build_entries();
+                let bootstrap_ready = this.entries.iter().any(|entry| {
+                    entry.id == RuntimeId::Bootstrap
+                        && matches!(entry.health, HealthStatus::Healthy)
+                });
+                if this.install_error.is_none() && this.current.is_none() && bootstrap_ready {
+                    let path = std::path::PathBuf::from(RUNTIME_TOML_PATH);
+                    match RuntimeFile::with_defaults(RuntimeId::Bootstrap).save(&path) {
+                        Ok(()) => {
+                            this.current = Some(RuntimeId::Bootstrap);
+                            cx.set_global(onboarding::runtime_global::ActiveRuntime {
+                                current: Some(RuntimeId::Bootstrap),
+                            });
+                            log::info!(
+                                "zdroid_runtime_picker: first Bootstrap install selected without restart"
+                            );
+                        }
+                        Err(err) => {
+                            this.install_error = Some(format!(
+                                "Bootstrap installed, but its runtime selection could not be saved: {err:#}"
+                            ));
+                        }
+                    }
+                }
                 cx.notify();
             });
         })
@@ -313,6 +356,7 @@ impl RuntimePicker {
             log::info!("zdroid_runtime_picker: {:?} already active; no-op", id);
             return;
         }
+        let first_selection = self.current.is_none();
 
         let path = std::path::PathBuf::from(RUNTIME_TOML_PATH);
         let file = RuntimeFile::with_defaults(id);
@@ -344,7 +388,7 @@ impl RuntimePicker {
                 // appTasks sweep) all interact poorly with Android's
                 // evolving Background Activity Launch rules and per-
                 // OEM task lifecycle policies.
-                self.restart_required = true;
+                self.restart_required = !first_selection || id != RuntimeId::Bootstrap;
             }
             Err(err) => {
                 log::error!(
@@ -564,6 +608,13 @@ fn render_card(
                             )
                         }),
                 )
+                .when(id == RuntimeId::Bootstrap, |this| {
+                    this.child(
+                        Label::new("Recommended - required for AI agents")
+                            .size(LabelSize::XSmall)
+                            .color(Color::Accent),
+                    )
+                })
                 .child(
                     Label::new(tagline)
                         .size(LabelSize::Small)

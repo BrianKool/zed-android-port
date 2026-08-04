@@ -16,6 +16,7 @@ use std::fs;
 use std::io::{Cursor, Read, Write as _};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 use anyhow::{Context, Result, anyhow};
 
@@ -51,6 +52,7 @@ const SYMLINKS_DELIM: &str = "←";
 /// currently extracted. Re-extracts only fire when this doesn't match
 /// the latest release tag at download time.
 const VERSION_FILE: &str = ".bootstrap-version";
+const DEPENDENCY_REPAIR_FILE: &str = ".dependencies-repaired-v2";
 
 /// Download the latest release zip + extract into `<prefix>` atomically.
 /// Idempotent against `<prefix>/.bootstrap-version` — if the on-disk
@@ -70,6 +72,8 @@ pub fn install_latest(
     if let Ok(existing) = fs::read_to_string(&version_file)
         && existing.trim() == tag_name
     {
+        ensure_package_manager_launchers(prefix)?;
+        repair_bootstrap_dependencies(prefix, progress)?;
         log::info!("bootstrap_install: $PREFIX already at {tag_name}, skipping extract");
         progress.step(&format!("Bootstrap {tag_name} already installed"));
         return Ok(());
@@ -92,6 +96,9 @@ pub fn install_latest(
     swap_staging_into_prefix(&staging, prefix)
         .with_context(|| format!("swap staging into {}", prefix.display()))?;
 
+    ensure_package_manager_launchers(prefix)?;
+    repair_bootstrap_dependencies(prefix, progress)?;
+
     if let Some(parent) = version_file.parent() {
         fs::create_dir_all(parent)?;
     }
@@ -105,6 +112,226 @@ pub fn install_latest(
         prefix.display()
     );
     progress.step(&format!("Bootstrap {tag_name} installed"));
+    Ok(())
+}
+
+/// Put package-manager shims ahead of `$PREFIX/bin` on Zdroid's PATH.
+/// A newly unpacked Termux executable can run during dpkg cleanup before the
+/// post-invoke RUNPATH hook patches it, so scope `$PREFIX/lib` to this process
+/// tree instead of setting `LD_LIBRARY_PATH` globally for the Android app.
+pub fn ensure_package_manager_launchers(prefix: &Path) -> Result<()> {
+    let launcher_dir = prefix.join(".zed/bin");
+    fs::create_dir_all(&launcher_dir)
+        .with_context(|| format!("create launcher directory at {}", launcher_dir.display()))?;
+
+    for tool in ["pkg", "apt", "apt-get"] {
+        let target = prefix.join("bin").join(tool);
+        if !target.is_file() {
+            continue;
+        }
+        let launcher = launcher_dir.join(tool);
+        let script = format!(
+            "#!/system/bin/sh\n\
+             export LD_LIBRARY_PATH=\"$PREFIX/lib${{LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}}\"\n\
+             exec \"$PREFIX/bin/{tool}\" \"$@\"\n"
+        );
+        fs::write(&launcher, script)
+            .with_context(|| format!("write launcher at {}", launcher.display()))?;
+        let mut permissions = fs::metadata(&launcher)?.permissions();
+        permissions.set_mode(0o700);
+        fs::set_permissions(&launcher, permissions)
+            .with_context(|| format!("chmod launcher at {}", launcher.display()))?;
+    }
+
+    let dpkg_launcher = launcher_dir.join("zdroid-dpkg");
+    let dpkg_script = r#"#!/system/bin/sh
+PREFIX=${PREFIX:-/data/data/com.zdroid/files/usr}
+export PREFIX
+export TERMUX_APP__PACKAGE_NAME=com.zdroid
+export LD_LIBRARY_PATH="$PREFIX/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+
+rewrite_dpkg_metadata() {
+    info="$PREFIX/var/lib/dpkg/info"
+    if [ -d "$info" ]; then
+        find "$info" -type f -exec "$PREFIX/bin/sed" -i \
+            's|/data/data/com\.termux/|/data/data/com.zdroid/|g' {} + 2>/dev/null || true
+    fi
+    status="$PREFIX/var/lib/dpkg/status"
+    if [ -f "$status" ]; then
+        "$PREFIX/bin/sed" -i \
+            's|/data/data/com\.termux/|/data/data/com.zdroid/|g' "$status" 2>/dev/null || true
+    fi
+}
+
+# Rewrite incoming package archives before dpkg sees them. This covers direct
+# `dpkg -i` as well as apt's unpack calls, including transactions that unpack
+# and configure in one process where a post-invoke hook would be too late.
+preinstall="$PREFIX/etc/apt/zed-pre-install-rewrite.sh"
+has_debs=0
+for argument in "$@"; do
+    case "$argument" in
+        *.deb) has_debs=1 ;;
+    esac
+done
+if [ "$has_debs" -eq 1 ]; then
+    if [ ! -x "$preinstall" ]; then
+        echo "Zdroid-B: missing incoming package rewrite hook: $preinstall" >&2
+        exit 70
+    fi
+    for argument in "$@"; do
+        case "$argument" in
+            *.deb) printf '%s\n' "$argument" ;;
+        esac
+    done | "$preinstall"
+
+    # Refuse to start a transaction if control metadata still names the
+    # inaccessible Termux sandbox. Data binaries are handled by the ELF hook;
+    # this check targets maintainer scripts and conffiles that dpkg may execute
+    # or inspect immediately.
+    for argument in "$@"; do
+        case "$argument" in
+            *.deb)
+                verify_dir=$(mktemp -d) || exit 70
+                if ! "$PREFIX/bin/dpkg-deb" -e "$argument" "$verify_dir" >/dev/null 2>&1; then
+                    rm -rf "$verify_dir"
+                    echo "Zdroid-B: could not inspect package metadata: $argument" >&2
+                    exit 70
+                fi
+                if grep -rlI '/data/data/com\.termux/' "$verify_dir" >/dev/null 2>&1; then
+                    rm -rf "$verify_dir"
+                    echo "Zdroid-B: unsafe com.termux metadata remains in: $argument" >&2
+                    exit 70
+                fi
+                rm -rf "$verify_dir"
+                ;;
+        esac
+    done
+fi
+
+# Before fixes a transaction interrupted after unpack. After makes metadata
+# from incoming Termux packages safe before apt starts its configure pass.
+rewrite_dpkg_metadata
+"$PREFIX/bin/dpkg" "$@"
+result=$?
+rewrite_dpkg_metadata
+exit "$result"
+"#;
+    fs::write(&dpkg_launcher, dpkg_script)
+        .with_context(|| format!("write launcher at {}", dpkg_launcher.display()))?;
+    let mut permissions = fs::metadata(&dpkg_launcher)?.permissions();
+    permissions.set_mode(0o700);
+    fs::set_permissions(&dpkg_launcher, permissions)
+        .with_context(|| format!("chmod launcher at {}", dpkg_launcher.display()))?;
+
+    let user_dpkg_launcher = launcher_dir.join("dpkg");
+    fs::write(
+        &user_dpkg_launcher,
+        "#!/system/bin/sh\nexec \"$PREFIX/.zed/bin/zdroid-dpkg\" \"$@\"\n",
+    )
+    .with_context(|| format!("write launcher at {}", user_dpkg_launcher.display()))?;
+    let mut permissions = fs::metadata(&user_dpkg_launcher)?.permissions();
+    permissions.set_mode(0o700);
+    fs::set_permissions(&user_dpkg_launcher, permissions)
+        .with_context(|| format!("chmod launcher at {}", user_dpkg_launcher.display()))?;
+
+    let apt_config = prefix.join("etc/apt/apt.conf.d/96-zdroid-dpkg-wrapper");
+    if let Some(parent) = apt_config.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(
+        &apt_config,
+        format!("Dir::Bin::dpkg \"{}\";\n", dpkg_launcher.to_string_lossy()),
+    )
+    .with_context(|| format!("write apt config at {}", apt_config.display()))?;
+    Ok(())
+}
+
+fn bootstrap_env(prefix: &Path) -> Result<(PathBuf, PathBuf, String)> {
+    let home = prefix
+        .parent()
+        .map(|files| files.join("home"))
+        .unwrap_or_else(|| prefix.join("home"));
+    let tmp = prefix.join("tmp");
+    fs::create_dir_all(&home)?;
+    fs::create_dir_all(&tmp)?;
+    let path = format!(
+        "{}:{}",
+        prefix.join(".zed/bin").display(),
+        prefix.join("bin").display()
+    );
+    Ok((home, tmp, path))
+}
+
+fn run_bootstrap_command(prefix: &Path, label: &str, program: &Path, args: &[&str]) -> Result<()> {
+    let (home, tmp, path) = bootstrap_env(prefix)?;
+    let mut command = Command::new(program);
+    command
+        .args(args)
+        .env("PREFIX", prefix)
+        .env("HOME", &home)
+        .env("TMPDIR", &tmp)
+        .env("DEBIAN_FRONTEND", "noninteractive")
+        // Keep this scoped to bootstrap package-manager children. Setting it
+        // on Zdroid globally can make Android system binaries load Termux
+        // libraries, while omitting it makes dpkg cleanup fail when a freshly
+        // unpacked coreutils binary has not had its RUNPATH rewritten yet.
+        .env("LD_LIBRARY_PATH", prefix.join("lib"))
+        .env("PATH", path);
+
+    let termux_exec = prefix.join("lib/libtermux-exec.so");
+    if termux_exec.is_file() {
+        command.env("LD_PRELOAD", termux_exec);
+    }
+
+    let output = command
+        .output()
+        .with_context(|| format!("run {label} using {}", program.display()))?;
+
+    if output.status.success() {
+        return Ok(());
+    }
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    Err(anyhow!(
+        "{label} failed ({}): {}{}",
+        output.status,
+        stdout.trim(),
+        stderr.trim()
+    ))
+}
+
+/// Published bootstrap images currently contain a few preinstalled packages
+/// whose declared dependencies are not included in the archive (`clang` for
+/// golang/dpkg-perl and `rust-src` for rust-analyzer). Repair once immediately
+/// after extraction so the user's first `pkg upgrade` starts from a consistent
+/// dpkg state.
+fn repair_bootstrap_dependencies(prefix: &Path, progress: &mut dyn ProgressSink) -> Result<()> {
+    let marker = prefix.join(DEPENDENCY_REPAIR_FILE);
+    if marker.is_file() {
+        return Ok(());
+    }
+
+    let apt_get = prefix.join("bin/apt-get");
+    if !apt_get.is_file() {
+        return Err(anyhow!(
+            "{} is missing after bootstrap extraction",
+            apt_get.display()
+        ));
+    }
+
+    progress.step("Repairing bootstrap package dependencies");
+    run_bootstrap_command(
+        prefix,
+        "bootstrap dependency repair",
+        &apt_get,
+        &["--fix-broken", "install", "-y"],
+    )?;
+
+    fs::write(&marker, b"ok\n")
+        .with_context(|| format!("write dependency repair marker at {}", marker.display()))?;
+    progress.step("Bootstrap package dependencies repaired");
+    log::info!("bootstrap_install: package dependency repair completed");
     Ok(())
 }
 

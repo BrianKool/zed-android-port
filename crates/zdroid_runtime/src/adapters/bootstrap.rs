@@ -495,6 +495,14 @@ impl RuntimeProvider for BootstrapAdapter {
             ));
             ops.push((
                 "CURL_CA_BUNDLE".into(),
+                EnvOp::Set(cert_path.as_os_str().to_owned()),
+            ));
+            ops.push((
+                "NODE_EXTRA_CA_CERTS".into(),
+                EnvOp::Set(cert_path.as_os_str().to_owned()),
+            ));
+            ops.push((
+                "REQUESTS_CA_BUNDLE".into(),
                 EnvOp::Set(cert_path.into_os_string()),
             ));
         }

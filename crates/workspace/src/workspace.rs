@@ -5351,8 +5351,12 @@ impl Workspace {
             };
             match dock.position() {
                 DockPosition::Left => self.resize_left_dock(panel_size + amount, false, window, cx),
-                DockPosition::Bottom => self.resize_bottom_dock(panel_size + amount, false, window, cx),
-                DockPosition::Right => self.resize_right_dock(panel_size + amount, false, window, cx),
+                DockPosition::Bottom => {
+                    self.resize_bottom_dock(panel_size + amount, false, window, cx)
+                }
+                DockPosition::Right => {
+                    self.resize_right_dock(panel_size + amount, false, window, cx)
+                }
             }
         } else {
             self.center
@@ -6100,7 +6104,8 @@ impl Workspace {
         if self.notifications.is_empty() {
             None
         } else {
-            let compact = cfg!(target_os = "android") && window.viewport_size().width.as_f32() < 520.0;
+            let compact =
+                cfg!(target_os = "android") && window.viewport_size().width.as_f32() < 520.0;
             Some(
                 div()
                     .absolute()
@@ -7835,9 +7840,22 @@ impl Workspace {
                     container = container.min_w(min);
                 }
             } else {
-                let size = size_state
+                let mut size = size_state
                     .and_then(|state| state.size)
                     .unwrap_or_else(|| panel.default_size(window, cx));
+                #[cfg(target_os = "android")]
+                {
+                    // The IME reduces the GPUI SurfaceView height. A bottom dock
+                    // previously kept its pre-keyboard absolute height, allowing
+                    // a tall terminal's prompt to extend behind the keyboard.
+                    // Clamp only the rendered height so the user's preferred
+                    // expanded size returns when the keyboard closes.
+                    let minimum_center_height = px(96.);
+                    let available_height = window.viewport_size().height;
+                    let maximum_dock_height =
+                        (available_height - minimum_center_height).max(px(120.));
+                    size = size.min(maximum_dock_height);
+                }
                 container = container.h(size);
             }
         }

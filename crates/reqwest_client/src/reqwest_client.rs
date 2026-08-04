@@ -46,6 +46,22 @@ impl ReqwestClient {
         Ok(client.into())
     }
 
+    pub fn user_agent_with_dns_resolver<R>(
+        agent: &str,
+        resolver: std::sync::Arc<R>,
+    ) -> anyhow::Result<Self>
+    where
+        R: reqwest::dns::Resolve + 'static,
+    {
+        let mut map = HeaderMap::new();
+        map.insert(http::header::USER_AGENT, HeaderValue::from_str(agent)?);
+        let client = Self::builder()
+            .dns_resolver(resolver)
+            .default_headers(map)
+            .build()?;
+        Ok(client.into())
+    }
+
     pub fn proxy_and_user_agent(proxy: Option<Url>, user_agent: &str) -> anyhow::Result<Self> {
         let user_agent = HeaderValue::from_str(user_agent)?;
 
