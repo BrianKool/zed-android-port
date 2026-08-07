@@ -232,4 +232,3 @@ port. Later commits refine or replace parts of earlier implementations.
 | GitHub authentication and clone UI | `crates/git_ui/src/github_auth.rs`, `crates/git_ui/src/git_ui.rs` |
 | Foreground service and secure credentials | `android/app/src/main/kotlin/com/zdroid/` |
 | Responsive workspace/modals | `crates/workspace/src/`, `crates/settings_ui/src/` |
-
