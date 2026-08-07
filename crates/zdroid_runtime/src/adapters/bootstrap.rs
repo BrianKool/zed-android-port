@@ -16,7 +16,8 @@
 //! releases ship without it; the editor's APK doesn't bundle a
 //! userland anymore.
 
-use std::path::PathBuf;
+use std::ffi::OsString;
+use std::path::{Path, PathBuf};
 
 use crate::config::{BootstrapConfig, RuntimeId};
 use crate::health::{HealthStatus, ProgressSink};
@@ -42,6 +43,26 @@ impl BootstrapAdapter {
             self.config.prefix.join("sbin").join(program),
         ];
         candidates.into_iter().find(|p| p.exists())
+    }
+
+    fn node_options(data_path: &Path) -> OsString {
+        let require_option = format!(
+            "--require={}",
+            data_path.join("zdroid-node-dns.cjs").display()
+        );
+        let mut options = std::env::var_os("NODE_OPTIONS").unwrap_or_default();
+        if options
+            .to_string_lossy()
+            .split_whitespace()
+            .any(|option| option == require_option.as_str())
+        {
+            return options;
+        }
+        if !options.is_empty() {
+            options.push(" ");
+        }
+        options.push(require_option);
+        options
     }
 }
 
@@ -433,6 +454,10 @@ impl RuntimeProvider for BootstrapAdapter {
                 "SHELL".into(),
                 EnvOp::Set(prefix.join("bin/bash").into_os_string()),
             ),
+            (
+                "NODE_OPTIONS".into(),
+                EnvOp::Set(Self::node_options(data_path)),
+            ),
         ]
     }
 
@@ -481,6 +506,10 @@ impl RuntimeProvider for BootstrapAdapter {
                 EnvOp::Set(OsString::from(
                     "/data/data/com.zdroid/files/usr/lib/libtermux-exec.so",
                 )),
+            ),
+            (
+                "NODE_OPTIONS".into(),
+                EnvOp::Set(Self::node_options(data_path)),
             ),
         ];
         let cert_path = prefix.join("etc/tls/cert.pem");

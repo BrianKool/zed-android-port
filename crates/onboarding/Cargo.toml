@@ -49,6 +49,7 @@ zlog.workspace = true
 # lives in `crates/gpui_android/examples/zed_android/src/runtime_picker.rs`
 # and is reached from Settings → Android Runtime.
 [target.'cfg(target_os = "android")'.dependencies]
+futures.workspace = true
 zdroid_runtime = { path = "../zdroid_runtime" }
 
 [dev-dependencies]

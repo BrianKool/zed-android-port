@@ -1622,7 +1622,15 @@ impl Render for GitCloneModal {
 
 impl EventEmitter<DismissEvent> for GitCloneModal {}
 
-impl ModalView for GitCloneModal {}
+impl ModalView for GitCloneModal {
+    fn render_bare(&self) -> bool {
+        cfg!(target_os = "android")
+    }
+
+    fn android_full_size(&self) -> bool {
+        cfg!(target_os = "android")
+    }
+}
 
 #[cfg(test)]
 mod view_commit_tests {

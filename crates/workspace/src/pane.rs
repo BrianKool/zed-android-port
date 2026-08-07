@@ -4390,6 +4390,9 @@ impl Render for Pane {
 
         let should_display_tab_bar = self.should_display_tab_bar.clone();
         let display_tab_bar = should_display_tab_bar(window, cx);
+        let full_workspace = self
+            .active_item()
+            .is_some_and(|item| item.full_workspace(cx));
         let Some(project) = self.project.upgrade() else {
             return div().track_focus(&self.focus_handle(cx));
         };
@@ -4555,9 +4558,10 @@ impl Render for Pane {
                     cx.propagate();
                 }
             }))
-            .when(self.active_item().is_some() && display_tab_bar, |pane| {
-                pane.child((self.render_tab_bar.clone())(self, window, cx))
-            })
+            .when(
+                self.active_item().is_some() && display_tab_bar && !full_workspace,
+                |pane| pane.child((self.render_tab_bar.clone())(self, window, cx)),
+            )
             .child({
                 let has_worktrees = project.read(cx).visible_worktrees(cx).next().is_some();
                 // main content
@@ -4577,7 +4581,7 @@ impl Render for Pane {
                                 .v_flex()
                                 .size_full()
                                 .overflow_hidden()
-                                .child(self.toolbar.clone())
+                                .when(!full_workspace, |this| this.child(self.toolbar.clone()))
                                 .child(item.to_any_view())
                         } else {
                             let placeholder = div

@@ -72,6 +72,12 @@ struct ImeState {
 
 const CURSOR_BLINK_INTERVAL: Duration = Duration::from_millis(500);
 
+fn selected_web_url(selection: &str) -> Option<String> {
+    let selection = selection.trim();
+    let url = url::Url::parse(selection).ok()?;
+    matches!(url.scheme(), "http" | "https").then(|| selection.to_string())
+}
+
 /// Event to transmit the scroll from the element to the view
 #[derive(Clone, Debug, PartialEq)]
 pub struct ScrollTerminal(pub i32);
@@ -495,13 +501,24 @@ impl TerminalView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let selected_url = self
+            .terminal
+            .read(cx)
+            .last_content
+            .selection_text
+            .as_deref()
+            .and_then(selected_web_url);
         let assistant_enabled = self
             .workspace
             .upgrade()
             .and_then(|workspace| workspace.read(cx).panel::<TerminalPanel>(cx))
             .is_some_and(|terminal_panel| terminal_panel.read(cx).assistant_enabled());
-        let context_menu = ContextMenu::build(window, cx, |menu, _, _| {
-            menu.context(self.focus_handle.clone())
+        let focus_handle = self.focus_handle.clone();
+        let can_add_to_agent =
+            assistant_enabled && !matches!(self.mode, TerminalMode::Embedded { .. });
+        let context_menu = ContextMenu::build(window, cx, move |menu, _, _| {
+            let menu = menu
+                .context(focus_handle.clone())
                 .action("New Terminal", Box::new(NewTerminal::default()))
                 .action(
                     "New Center Terminal",
@@ -512,25 +529,30 @@ impl TerminalView {
                 .action("Paste", Box::new(Paste))
                 .action("Paste Text", Box::new(PasteText))
                 .action("Select All", Box::new(SelectAll))
-                .action("Clear", Box::new(Clear))
-                .when(
-                    assistant_enabled && !matches!(self.mode, TerminalMode::Embedded { .. }),
-                    |menu| {
-                        menu.separator()
-                            .action("Inline Assist", Box::new(InlineAssist::default()))
-                            .when(has_selection, |menu| {
-                                menu.action("Add to Agent Thread", Box::new(AddSelectionToThread))
-                            })
-                    },
-                )
-                .separator()
-                .action(
-                    "Close Terminal Tab",
-                    Box::new(CloseActiveItem {
-                        save_intent: None,
-                        close_pinned: true,
-                    }),
-                )
+                .action("Clear", Box::new(Clear));
+            let menu = if let Some(url) = selected_url.clone() {
+                menu.separator()
+                    .entry("Open in Browser", None, move |_, cx| {
+                        cx.open_url(&url);
+                    })
+            } else {
+                menu
+            };
+            menu.when(can_add_to_agent, |menu| {
+                menu.separator()
+                    .action("Inline Assist", Box::new(InlineAssist::default()))
+                    .when(has_selection, |menu| {
+                        menu.action("Add to Agent Thread", Box::new(AddSelectionToThread))
+                    })
+            })
+            .separator()
+            .action(
+                "Close Terminal Tab",
+                Box::new(CloseActiveItem {
+                    save_intent: None,
+                    close_pinned: true,
+                }),
+            )
         });
 
         window.focus(&context_menu.focus_handle(cx), cx);
@@ -2068,6 +2090,21 @@ mod tests {
     use util::rel_path::RelPath;
     use workspace::item::test::{TestItem, TestProjectItem};
     use workspace::{AppState, MultiWorkspace, SelectedEntry};
+
+    #[test]
+    fn selected_web_url_accepts_only_complete_web_urls() {
+        assert_eq!(
+            selected_web_url(" https://example.com/path?q=1 "),
+            Some("https://example.com/path?q=1".to_string())
+        );
+        assert_eq!(
+            selected_web_url("http://localhost:8080"),
+            Some("http://localhost:8080".to_string())
+        );
+        assert_eq!(selected_web_url("example.com"), None);
+        assert_eq!(selected_web_url("file:///tmp/example"), None);
+        assert_eq!(selected_web_url("https://example.com\nextra"), None);
+    }
 
     fn expected_drop_text(paths: &[PathBuf]) -> String {
         let mut text = String::new();

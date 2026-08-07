@@ -91,7 +91,7 @@ use workspace::{
 };
 
 const AGENT_PANEL_KEY: &str = "agent_panel";
-const MIN_PANEL_WIDTH: Pixels = px(300.);
+const MIN_PANEL_WIDTH: Pixels = px(220.);
 const LAST_USED_AGENT_KEY: &str = "agent_panel__last_used_external_agent";
 const LAST_CREATED_ENTRY_KIND_KEY: &str = "agent_panel__last_created_entry_kind";
 const TERMINAL_AGENT_TELEMETRY_ID: &str = "terminal";
@@ -5430,6 +5430,36 @@ impl AgentPanel {
                 }))
         };
 
+        let refresh_agent_button = |cx: &mut Context<Self>| {
+            (!showing_terminal && matches!(self.selected_agent, Agent::Custom { .. })).then(|| {
+                IconButton::new("refresh-agent-connection", IconName::RotateCw)
+                    .icon_size(IconSize::Small)
+                    .tooltip(Tooltip::text("Refresh Agent Credentials"))
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        let agent = this.selected_agent(cx);
+                        let Agent::Custom { id } = &agent else {
+                            return;
+                        };
+
+                        let server: Rc<dyn AgentServer> =
+                            Rc::new(agent_servers::CustomAgentServer::new(id.clone()));
+                        this.connection_store.update(cx, |store, cx| {
+                            store.force_restart_connection(agent.clone(), server, cx);
+                        });
+
+                        let active_conversation = this.active_conversation_view().cloned();
+                        if let Some(conversation_view) = active_conversation
+                            && conversation_view.read(cx).agent_key() == &agent
+                        {
+                            conversation_view.update(cx, |view, cx| {
+                                view.refresh_connection(window, cx);
+                            });
+                        }
+                        cx.notify();
+                    }))
+            })
+        };
+
         let max_content_width = AgentSettings::get_global(cx).max_content_width;
 
         let base_container = h_flex()
@@ -5504,6 +5534,7 @@ impl AgentPanel {
                         .gap_1()
                         .pl_1()
                         .pr_1()
+                        .when_some(refresh_agent_button(cx), |this, button| this.child(button))
                         .child(history_button(cx))
                         .child(full_screen_button)
                         .child(self.render_panel_options_menu(window, cx)),
@@ -5553,6 +5584,7 @@ impl AgentPanel {
                         .gap_1()
                         .pl_1()
                         .pr_1()
+                        .when_some(refresh_agent_button(cx), |this, button| this.child(button))
                         .child(history_button(cx))
                         .when(can_create_entries, |this| this.child(new_thread_menu))
                         .child(full_screen_button)

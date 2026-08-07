@@ -12,7 +12,28 @@ use anyhow::{Context, Result};
 use jni::{JavaVM, objects::JObject, objects::JString};
 
 const RESOLV_CONF_FILE_NAME: &str = "zdroid-resolv.conf";
+const NODE_DNS_PRELOAD_FILE_NAME: &str = "zdroid-node-dns.cjs";
 const FALLBACK_NAMESERVERS: &[&str] = &["1.1.1.1", "8.8.8.8"];
+
+// Node's c-ares resolver reads /etc/resolv.conf directly. Android does not
+// provide that file, so dns.resolve*() otherwise falls back to 127.0.0.1 and
+// SRV users such as the MongoDB driver fail with ECONNREFUSED.
+const NODE_DNS_PRELOAD: &str = r#"'use strict';
+const dns = require('node:dns');
+const fs = require('node:fs');
+const path = require('node:path');
+
+try {
+  const resolvPath = path.join(__dirname, 'zdroid-resolv.conf');
+  const servers = fs.readFileSync(resolvPath, 'utf8')
+    .split(/\r?\n/)
+    .map((line) => line.match(/^\s*nameserver\s+(\S+)/)?.[1])
+    .filter(Boolean);
+  if (servers.length > 0) dns.setServers(servers);
+} catch {
+  // Keep Node's normal resolver behavior if the bridge file is unavailable.
+}
+"#;
 
 /// Refresh the resolver file from Android's currently active network.
 pub fn populate_resolv_conf(android_app: &AndroidApp) {
@@ -57,6 +78,9 @@ fn populate_inner(android_app: &AndroidApp) -> Result<(std::path::PathBuf, usize
         .with_context(|| format!("write {}", temporary_path.display()))?;
     std::fs::rename(&temporary_path, &path)
         .with_context(|| format!("replace {}", path.display()))?;
+    let node_preload_path = data_path.join(NODE_DNS_PRELOAD_FILE_NAME);
+    std::fs::write(&node_preload_path, NODE_DNS_PRELOAD.as_bytes())
+        .with_context(|| format!("write {}", node_preload_path.display()))?;
     Ok((path, nameservers.len()))
 }
 

@@ -139,6 +139,16 @@ impl AgentConnectionStore {
         self.request_connection(key, server, cx)
     }
 
+    pub fn force_restart_connection(
+        &mut self,
+        key: Agent,
+        server: Rc<dyn AgentServer>,
+        cx: &mut Context<Self>,
+    ) -> Entity<AgentConnectionEntry> {
+        self.entries.remove(&key);
+        self.request_connection(key, server, cx)
+    }
+
     pub fn request_connection(
         &mut self,
         key: Agent,

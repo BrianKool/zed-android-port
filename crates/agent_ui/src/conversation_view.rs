@@ -30,13 +30,15 @@ use fs::Fs;
 use futures::FutureExt as _;
 use gpui::{
     Action, Animation, AnimationExt, AnyView, App, ClickEvent, ClipboardItem, CursorStyle,
-    ElementId, Empty, Entity, EventEmitter, FocusHandle, Focusable, Hsla, ListOffset, ListState,
-    ObjectFit, PlatformDisplay, ScrollHandle, SharedString, StyledText, Subscription, Task,
-    TaskExt, TextRun, TextStyle, WeakEntity, Window, WindowHandle, div, ease_in_out, img,
+    DismissEvent, ElementId, Empty, Entity, EventEmitter, FocusHandle, Focusable, Hsla, ListOffset,
+    ListState, ObjectFit, PlatformDisplay, ScrollHandle, SharedString, StyledText, Subscription,
+    Task, TaskExt, TextRun, TextStyle, WeakEntity, Window, WindowHandle, div, ease_in_out, img,
     linear_color_stop, linear_gradient, list, point, pulsating_between,
 };
 use language::{Buffer, Language, Rope};
-use language_model::{LanguageModelCompletionError, LanguageModelRegistry};
+use language_model::{
+    ANTHROPIC_PROVIDER_ID, LanguageModelCompletionError, LanguageModelRegistry, OPEN_AI_PROVIDER_ID,
+};
 use markdown::{
     CodeBlockRenderer, CopyButtonVisibility, Markdown, MarkdownElement, MarkdownFont, MarkdownStyle,
 };
@@ -60,8 +62,8 @@ use theme_settings::{AgentBufferFontSize, AgentUiFontSize};
 use ui::{
     Callout, CircularProgress, CommonAnimationExt, ContextMenu, ContextMenuEntry, CopyButton,
     DecoratedIcon, DiffStat, Disclosure, Divider, DividerColor, IconDecoration, IconDecorationKind,
-    KeyBinding, PopoverMenu, PopoverMenuHandle, TintColor, Tooltip, WithScrollbar, prelude::*,
-    right_click_menu,
+    KeyBinding, PopoverMenu, PopoverMenuHandle, SpinnerLabel, TintColor, Tooltip, WithScrollbar,
+    prelude::*, right_click_menu,
 };
 use util::{
     ResultExt, debug_panic, defer,
@@ -70,11 +72,11 @@ use util::{
     size::format_file_size,
     time::duration_alt_display,
 };
-use workspace::PathList;
 use workspace::{
     CollaboratorId, MultiWorkspace, NewTerminal, Toast, Workspace, notifications::NotificationId,
     path_link::sanitize_path_text,
 };
+use workspace::{ModalView, PathList};
 use zed_actions::agent::{Chat, ToggleModelSelector};
 use zed_actions::assistant::OpenRulesLibrary;
 
@@ -138,6 +140,61 @@ pub struct QueuedMessage {
     pub content: Vec<acp::ContentBlock>,
     pub tracked_buffers: Vec<Entity<Buffer>>,
 }
+
+struct AgentApiKeyModal {
+    focus_handle: FocusHandle,
+    title: SharedString,
+    configuration_view: AnyView,
+}
+
+impl AgentApiKeyModal {
+    fn new(title: SharedString, configuration_view: AnyView, cx: &mut Context<Self>) -> Self {
+        Self {
+            focus_handle: cx.focus_handle(),
+            title,
+            configuration_view,
+        }
+    }
+}
+
+impl Render for AgentApiKeyModal {
+    fn render(&mut self, window: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        v_flex()
+            .id("agent-api-key-dialog")
+            .w(vw(0.86, window))
+            .h(vh(0.60, window))
+            .max_w(rems_from_px(720.0))
+            .max_h(rems_from_px(640.0))
+            .max_w_full()
+            .max_h_full()
+            .min_w_0()
+            .gap_3()
+            .p_4()
+            .track_focus(&self.focus_handle)
+            .child(Headline::new(self.title.clone()).size(HeadlineSize::Small))
+            .child(
+                div()
+                    .id("agent-api-key-dialog-scroll")
+                    .w_full()
+                    .flex_1()
+                    .min_w_0()
+                    .min_h_0()
+                    .max_h_full()
+                    .overflow_y_scroll()
+                    .child(self.configuration_view.clone()),
+            )
+    }
+}
+
+impl ModalView for AgentApiKeyModal {}
+
+impl Focusable for AgentApiKeyModal {
+    fn focus_handle(&self, _: &App) -> FocusHandle {
+        self.focus_handle.clone()
+    }
+}
+
+impl EventEmitter<DismissEvent> for AgentApiKeyModal {}
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 enum ThreadFeedback {
@@ -687,6 +744,175 @@ impl AuthState {
 
 struct LoadingView {
     _load_task: Task<()>,
+    agent_id: AgentId,
+    _refresh_task: Task<()>,
+}
+
+#[cfg(target_os = "android")]
+fn android_agent_install_target_exists(agent_id: &AgentId) -> bool {
+    match agent_id.as_ref() {
+        "codex-acp" => std::fs::read_dir(
+            "/data/data/com.zdroid/files/home/.local/share/zdroid",
+        )
+        .ok()
+        .into_iter()
+        .flatten()
+        .flatten()
+        .any(|entry| {
+            entry
+                .file_name()
+                .to_str()
+                .is_some_and(|name| name.starts_with("codex-termux-"))
+                && entry
+                    .path()
+                    .join("node_modules/@mmmbuto/codex-cli-termux/bin/codex.bin")
+                    .is_file()
+        }),
+        "claude-acp" => {
+            let managed_root = Path::new(
+                "/data/data/com.zdroid/files/home/.local/share/zdroid/claude-code/node_modules",
+            );
+            let global_root =
+                Path::new("/data/data/com.zdroid/files/usr/lib/node_modules");
+            let cli_exists = managed_root
+                .join("@anthropic-ai/claude-code/cli.js")
+                .is_file()
+                || global_root
+                    .join("@anthropic-ai/claude-code/cli.js")
+                    .is_file();
+            let acp_exists = managed_root
+                .join("@agentclientprotocol/claude-agent-acp/dist/index.js")
+                .is_file()
+                || global_root
+                    .join("@agentclientprotocol/claude-agent-acp/dist/index.js")
+                    .is_file();
+            cli_exists && acp_exists
+        }
+        "gemini" => {
+            Path::new(
+                "/data/data/com.zdroid/files/home/.local/share/zdroid/gemini/node_modules/.bin/gemini",
+            )
+            .is_file()
+                || Path::new("/data/data/com.zdroid/files/usr/bin/gemini").is_file()
+        }
+        "github-copilot-cli" => {
+            Path::new(
+                "/data/data/com.zdroid/files/home/.local/share/zdroid/github-copilot-cli/node_modules/.bin/copilot",
+            )
+            .is_file()
+                || Path::new("/data/data/com.zdroid/files/usr/bin/copilot").is_file()
+        }
+        "grok-build" => {
+            Path::new("/data/data/com.zdroid/files/home/.grok/bin/grok").is_file()
+                || Path::new("/data/data/com.zdroid/files/usr/bin/grok").is_file()
+        }
+        _ => true,
+    }
+}
+
+#[cfg(target_os = "android")]
+fn android_agent_loading_label(agent_id: &AgentId) -> Option<SharedString> {
+    let (status_path, checking_label, starting_label) = match agent_id.as_ref() {
+        "codex-acp" => (
+            "/data/data/com.zdroid/files/home/.local/share/zdroid/agent-setup/codex-acp.status",
+            "Checking Codex CLI",
+            "Starting Codex agent",
+        ),
+        "claude-acp" => (
+            "/data/data/com.zdroid/files/home/.local/share/zdroid/agent-setup/claude-acp.status",
+            "Checking Claude CLI and ACP",
+            "Starting Claude agent",
+        ),
+        "gemini" => (
+            "/data/data/com.zdroid/files/home/.local/share/zdroid/agent-setup/gemini.status",
+            "Checking Gemini CLI",
+            "Starting Gemini agent",
+        ),
+        "github-copilot-cli" => (
+            "/data/data/com.zdroid/files/home/.local/share/zdroid/agent-setup/github-copilot-cli.status",
+            "Checking GitHub Copilot CLI",
+            "Starting GitHub Copilot agent",
+        ),
+        "grok-build" => (
+            "/data/data/com.zdroid/files/home/.local/share/zdroid/agent-setup/grok-build.status",
+            "Checking Grok Build",
+            "Starting Grok Build agent",
+        ),
+        _ => return None,
+    };
+
+    if let Ok(status) = std::fs::read_to_string(status_path) {
+        let status = status.trim();
+        if !status.is_empty() {
+            return Some(status.to_string().into());
+        }
+    }
+
+    Some(
+        if android_agent_install_target_exists(agent_id) {
+            starting_label
+        } else {
+            checking_label
+        }
+        .into(),
+    )
+}
+
+#[cfg(not(target_os = "android"))]
+fn android_agent_loading_label(_agent_id: &AgentId) -> Option<SharedString> {
+    None
+}
+
+#[cfg(target_os = "android")]
+fn android_agent_provisioning_task(agent_id: &AgentId) -> Option<(String, SharedString)> {
+    if android_agent_install_target_exists(agent_id) {
+        return None;
+    }
+
+    match agent_id.as_ref() {
+        "codex-acp" => Some((
+            "zdroid-agent-provision-codex".to_string(),
+            "Downloading Codex CLI".into(),
+        )),
+        "claude-acp" => Some((
+            "zdroid-agent-provision-claude".to_string(),
+            "Downloading Claude CLI and ACP".into(),
+        )),
+        "gemini" => Some((
+            "zdroid-agent-provision-gemini".to_string(),
+            "Downloading Gemini CLI".into(),
+        )),
+        "github-copilot-cli" => Some((
+            "zdroid-agent-provision-github-copilot".to_string(),
+            "Downloading GitHub Copilot CLI".into(),
+        )),
+        "grok-build" => Some((
+            "zdroid-agent-provision-grok-build".to_string(),
+            "Checking Grok Build compatibility".into(),
+        )),
+        _ => None,
+    }
+}
+
+#[cfg(target_os = "android")]
+fn android_agent_requires_auth_before_session(agent_id: &AgentId) -> bool {
+    if agent_id.as_ref() != "claude-acp" {
+        return false;
+    }
+    std::fs::read_to_string(
+        "/data/data/com.zdroid/files/home/.local/share/zdroid/agent-setup/claude-auth.status",
+    )
+    .is_ok_and(|status| status.trim() == "unauthenticated")
+}
+
+#[cfg(not(target_os = "android"))]
+fn android_agent_requires_auth_before_session(_agent_id: &AgentId) -> bool {
+    false
+}
+
+#[cfg(not(target_os = "android"))]
+fn android_agent_provisioning_task(_agent_id: &AgentId) -> Option<(String, SharedString)> {
+    None
 }
 
 impl ConnectedServerState {
@@ -831,6 +1057,10 @@ impl ConversationView {
         cx.notify();
     }
 
+    pub(crate) fn refresh_connection(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.reset(window, cx);
+    }
+
     fn reset(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let (resume_session_id, work_dirs, title) = self
             .root_thread_view()
@@ -904,6 +1134,11 @@ impl ConversationView {
             };
         }
         let session_work_dirs = work_dirs.unwrap_or_else(|| project.read(cx).default_path_list(cx));
+        let loading_agent_id = agent.agent_id();
+        let provisioning_task = android_agent_provisioning_task(&loading_agent_id);
+        if let Some((task_id, label)) = provisioning_task.as_ref() {
+            cx.start_background_task(task_id, label);
+        }
 
         let connection_entry = connection_store.update(cx, |store, cx| {
             store.request_connection(connection_key, agent.clone(), cx)
@@ -925,12 +1160,21 @@ impl ConversationView {
 
         let side = crate::agent_sidebar_side(cx);
         let thread_location = "current_worktree";
+        let provisioning_task_for_load = provisioning_task.clone();
+        let loading_agent_id_for_load = loading_agent_id.clone();
 
         let load_task = cx.spawn_in(window, async move |this, cx| {
             let connection = match connect_result.await {
                 Ok(AgentConnectedState { connection, .. }) => connection,
                 Err(err) => {
                     this.update_in(cx, |this, window, cx| {
+                        if let Some((task_id, _)) = provisioning_task_for_load.as_ref() {
+                            cx.finish_background_task(
+                                task_id,
+                                "Agent CLI installation failed",
+                                false,
+                            );
+                        }
                         this.handle_load_error(err, window, cx);
                         cx.notify();
                     })
@@ -946,6 +1190,24 @@ impl ConversationView {
                 side = side,
                 thread_location = thread_location
             );
+
+            if android_agent_requires_auth_before_session(&loading_agent_id_for_load) {
+                cx.update(|window, cx| {
+                    if let Some((task_id, _)) = provisioning_task_for_load.as_ref() {
+                        cx.finish_background_task(task_id, "Claude CLI installed", true);
+                    }
+                    Self::handle_auth_required(
+                        this,
+                        AuthRequired::new(),
+                        loading_agent_id_for_load,
+                        connection,
+                        window,
+                        cx,
+                    );
+                })
+                .log_err();
+                return;
+            }
 
             let mut resumed_without_history = false;
             let result = if let Some(session_id) = resume_session_id.clone() {
@@ -991,6 +1253,9 @@ impl ConversationView {
                 Err(e) => match e.downcast::<acp_thread::AuthRequired>() {
                     Ok(err) => {
                         cx.update(|window, cx| {
+                            if let Some((task_id, _)) = provisioning_task_for_load.as_ref() {
+                                cx.finish_background_task(task_id, "Agent CLI installed", true);
+                            }
                             Self::handle_auth_required(
                                 this,
                                 err,
@@ -1011,6 +1276,9 @@ impl ConversationView {
             this.update_in(cx, |this, window, cx| {
                 match result {
                     Ok(thread) => {
+                        if let Some((task_id, _)) = provisioning_task_for_load.as_ref() {
+                            cx.finish_background_task(task_id, "Agent CLI installed", true);
+                        }
                         let root_session_id = thread.read(cx).session_id().clone();
 
                         let conversation = cx.new(|cx| {
@@ -1050,6 +1318,13 @@ impl ConversationView {
                         );
                     }
                     Err(err) => {
+                        if let Some((task_id, _)) = provisioning_task_for_load.as_ref() {
+                            cx.finish_background_task(
+                                task_id,
+                                "Agent CLI installation failed",
+                                false,
+                            );
+                        }
                         this.handle_load_error(
                             LoadError::Other(err.to_string().into()),
                             window,
@@ -1061,8 +1336,35 @@ impl ConversationView {
             .log_err();
         });
 
+        let refresh_agent_id = loading_agent_id.clone();
+        let provisioning_task_for_refresh = provisioning_task.clone();
+        let refresh_task = cx.spawn_in(window, async move |this, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(Duration::from_millis(500))
+                    .await;
+                let is_loading = this
+                    .update(cx, |this, cx| {
+                        if let Some((task_id, _)) = provisioning_task_for_refresh.as_ref()
+                            && let Some(label) = android_agent_loading_label(&refresh_agent_id)
+                        {
+                            cx.start_background_task(task_id, &label);
+                        }
+                        let is_loading = this.is_loading();
+                        cx.notify();
+                        is_loading
+                    })
+                    .unwrap_or(false);
+                if !is_loading {
+                    break;
+                }
+            }
+        });
+
         let loading_view = cx.new(|_cx| LoadingView {
             _load_task: load_task,
+            agent_id: loading_agent_id,
+            _refresh_task: refresh_task,
         });
 
         ServerState::Loading {
@@ -1286,7 +1588,18 @@ impl ConversationView {
         window: &mut Window,
         cx: &mut App,
     ) {
-        let (configuration_view, subscription) = if let Some(provider_id) = &err.provider_id {
+        let provider_id = err.provider_id.or_else(|| {
+            if !cfg!(target_os = "android") {
+                return None;
+            }
+            match agent_id.as_ref() {
+                "claude-acp" => Some(ANTHROPIC_PROVIDER_ID),
+                "codex-acp" => Some(OPEN_AI_PROVIDER_ID),
+                _ => None,
+            }
+        });
+
+        let (configuration_view, subscription) = if let Some(provider_id) = &provider_id {
             let registry = LanguageModelRegistry::global(cx);
 
             let sub = window.subscribe(&registry, cx, {
@@ -1301,7 +1614,12 @@ impl ConversationView {
                             .map_or(false, |provider| provider.is_authenticated(cx))
                     {
                         this.update(cx, |this, cx| {
-                            this.reset(window, cx);
+                            if let Some(workspace) = this.workspace.upgrade() {
+                                workspace.update(cx, |workspace, cx| {
+                                    workspace.hide_modal(window, cx);
+                                });
+                            }
+                            this.refresh_connection(window, cx);
                         })
                         .ok();
                     }
@@ -1399,7 +1717,7 @@ impl ConversationView {
                     active.clear_thread_error(cx);
                 });
             }
-            self.reset(window, cx);
+            self.refresh_connection(window, cx);
         }
     }
 
@@ -1839,7 +2157,6 @@ impl ConversationView {
         let connection = connected.connection.clone();
 
         let AuthState::Unauthenticated {
-            configuration_view,
             pending_auth_method,
             ..
         } = &mut connected.auth_state
@@ -1850,7 +2167,6 @@ impl ConversationView {
         let agent_telemetry_id = connection.telemetry_id();
 
         if let Some(login_task) = connection.terminal_auth_task(&method, cx) {
-            configuration_view.take();
             pending_auth_method.replace(method.clone());
 
             let project = self.project.clone();
@@ -1906,7 +2222,7 @@ impl ConversationView {
                                 })
                             }
                         } else {
-                            this.reset(window, cx);
+                            this.refresh_connection(window, cx);
                         }
                         this.auth_task.take()
                     })
@@ -1916,7 +2232,6 @@ impl ConversationView {
             return;
         }
 
-        configuration_view.take();
         pending_auth_method.replace(method.clone());
 
         let authenticate = connection.authenticate(method, cx);
@@ -1952,7 +2267,7 @@ impl ConversationView {
                             active.update(cx, |active, cx| active.handle_thread_error(err, cx));
                         }
                     } else {
-                        this.reset(window, cx);
+                        this.refresh_connection(window, cx);
                     }
                     this.auth_task.take()
                 })
@@ -2031,6 +2346,12 @@ impl ConversationView {
         let Some(terminal_panel) = workspace.read(cx).panel::<TerminalPanel>(cx) else {
             return Task::ready(Err(anyhow!("Terminal panel is unavailable")));
         };
+
+        if cfg!(target_os = "android") && window.viewport_size().width.as_f32() < 700.0 {
+            workspace.update(cx, |workspace, cx| {
+                workspace.close_panel::<AgentPanel>(window, cx);
+            });
+        }
 
         window.spawn(cx, async move |cx| {
             let mut task = login.clone();
@@ -2167,19 +2488,12 @@ impl ConversationView {
         window: &mut Window,
         cx: &Context<Self>,
     ) -> impl IntoElement {
-        let auth_methods = connection.auth_methods();
-
         let agent_display_name = self
             .agent_server_store
             .read(cx)
             .agent_display_name(&self.agent.agent_id())
             .unwrap_or_else(|| self.agent.agent_id().0);
         let android_account_note = android_agent_account_note(&self.agent.agent_id());
-
-        let show_fallback_description = auth_methods.len() > 1
-            && configuration_view.is_none()
-            && description.is_none()
-            && pending_auth_method.is_none();
 
         let auth_buttons = || {
             h_flex().justify_end().flex_wrap().gap_1().children(
@@ -2226,7 +2540,7 @@ impl ConversationView {
         if pending_auth_method.is_some() {
             return Callout::new()
                 .icon(IconName::Info)
-                .title(format!("Authenticating to {}…", agent_display_name))
+                .title(format!("Authenticating to {}...", agent_display_name))
                 .actions_slot(
                     Icon::new(IconName::ArrowCircle)
                         .size(IconSize::Small)
@@ -2240,41 +2554,54 @@ impl ConversationView {
         Callout::new()
             .icon(IconName::Info)
             .title(format!("Authenticate to {}", agent_display_name))
-            .when(auth_methods.len() == 1, |this| {
-                this.actions_slot(auth_buttons())
+            .actions_slot({
+                let api_key_title: SharedString = match self.agent.agent_id().as_ref() {
+                    "claude-acp" => "Anthropic API key".into(),
+                    "codex-acp" => "OpenAI API key".into(),
+                    _ => "API key".into(),
+                };
+                h_flex()
+                    .justify_end()
+                    .flex_wrap()
+                    .gap_1()
+                    .child(auth_buttons())
+                    .children(configuration_view.cloned().map(|configuration_view| {
+                        Button::new("agent-api-key", "API key")
+                            .label_size(LabelSize::Small)
+                            .style(ButtonStyle::Outlined)
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                let Some(workspace) = this.workspace.upgrade() else {
+                                    return;
+                                };
+                                let title = api_key_title.clone();
+                                let configuration_view = configuration_view.clone();
+                                workspace.update(cx, |workspace, cx| {
+                                    workspace.toggle_modal(window, cx, |_, cx| {
+                                        AgentApiKeyModal::new(title, configuration_view, cx)
+                                    });
+                                });
+                            }))
+                    }))
             })
             .description_slot(
                 v_flex()
                     .text_ui(cx)
+                    .gap_1()
+                    .child(
+                        Label::new("Choose subscription sign-in or enter an API key.")
+                            .size(LabelSize::Small)
+                            .color(Color::Muted),
+                    )
                     .when_some(android_account_note, |this, note| {
-                        this.gap_1()
-                            .child(Label::new(note).size(LabelSize::Small).color(Color::Muted))
+                        this.child(Label::new(note).size(LabelSize::Small).color(Color::Muted))
                     })
-                    .map(|this| {
-                        if show_fallback_description {
-                            this.child(
-                                Label::new("Choose one of the following authentication options:")
-                                    .size(LabelSize::Small)
-                                    .color(Color::Muted),
-                            )
-                        } else {
-                            this.children(
-                                configuration_view
-                                    .cloned()
-                                    .map(|view| div().w_full().child(view)),
-                            )
-                            .children(description.map(|desc| {
-                                self.render_markdown(
-                                    desc.clone(),
-                                    MarkdownStyle::themed(MarkdownFont::Agent, window, cx),
-                                    cx,
-                                )
-                            }))
-                        }
-                    })
-                    .when(auth_methods.len() > 1, |this| {
-                        this.gap_1().child(auth_buttons())
-                    }),
+                    .children(description.map(|desc| {
+                        self.render_markdown(
+                            desc.clone(),
+                            MarkdownStyle::themed(MarkdownFont::Agent, window, cx),
+                            cx,
+                        )
+                    })),
             )
             .into_any_element()
     }
@@ -3144,21 +3471,61 @@ impl Render for ConversationView {
             .size_full()
             .bg(cx.theme().colors().panel_background)
             .child(match &self.server_state {
-                ServerState::Loading { .. } => v_flex()
-                    .flex_1()
-                    .size_full()
-                    .items_center()
-                    .justify_center()
-                    .child(
-                        Label::new("Loading…").color(Color::Muted).with_animation(
-                            "loading-agent-label",
-                            Animation::new(Duration::from_secs(2))
-                                .repeat()
-                                .with_easing(pulsating_between(0.3, 0.7)),
-                            |label, delta| label.alpha(delta),
-                        ),
-                    )
-                    .into_any(),
+                ServerState::Loading { _loading } => {
+                    let loading = _loading.read(cx);
+                    let label = android_agent_loading_label(&loading.agent_id)
+                        .unwrap_or_else(|| "Loading agent".into());
+
+                    v_flex()
+                        .flex_1()
+                        .size_full()
+                        .items_center()
+                        .justify_center()
+                        .child(
+                            v_flex()
+                                .w_full()
+                                .max_w(px(420.0))
+                                .px_4()
+                                .gap_3()
+                                .child(
+                                    h_flex()
+                                        .justify_center()
+                                        .gap_2()
+                                        .child(SpinnerLabel::dots_variant())
+                                        .child(
+                                            Label::new(label).color(Color::Muted).with_animation(
+                                                "loading-agent-label",
+                                                Animation::new(Duration::from_secs(2))
+                                                    .repeat()
+                                                    .with_easing(pulsating_between(0.55, 1.0)),
+                                                |label, delta| label.alpha(delta),
+                                            ),
+                                        ),
+                                )
+                                .child(
+                                    div()
+                                        .id("loading-agent-progress")
+                                        .w_full()
+                                        .h_1()
+                                        .rounded_full()
+                                        .bg(cx.theme().colors().border_variant)
+                                        .child(
+                                            div()
+                                                .size_full()
+                                                .rounded_full()
+                                                .bg(cx.theme().status().info)
+                                                .with_animation(
+                                                    "loading-agent-progress-pulse",
+                                                    Animation::new(Duration::from_millis(900))
+                                                        .repeat()
+                                                        .with_easing(pulsating_between(0.25, 0.9)),
+                                                    |bar, delta| bar.opacity(delta),
+                                                ),
+                                        ),
+                                ),
+                        )
+                        .into_any()
+                }
                 ServerState::LoadError { error: e, .. } => v_flex()
                     .flex_1()
                     .size_full()

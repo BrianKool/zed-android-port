@@ -63,6 +63,7 @@ pub struct State {
     settings: OpenAiCompatibleSettings,
     credentials_provider: Arc<dyn CredentialsProvider>,
     requires_api_key: bool,
+    local_api_key: Option<Arc<str>>,
     local_models: Option<LocalModelManager>,
 }
 
@@ -248,7 +249,7 @@ struct LocalModelCardData {
     can_delete: bool,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(default)]
 struct LocalRuntimeConfig {
     threads: u16,
@@ -362,6 +363,11 @@ impl State {
         }
         manager.active_model_id = Some(model_id.clone());
         let runtime = manager.runtime.clone();
+        let Some(api_key) = self.local_api_key.clone() else {
+            return Task::ready(Err(anyhow::anyhow!(
+                "local model authentication token is unavailable"
+            )));
+        };
         let local_model = &mut manager.models[model_index];
         if matches!(
             local_model.status,
@@ -397,7 +403,8 @@ impl State {
         cx.notify();
 
         cx.spawn(async move |this, cx| {
-            let result = install_local_model(&this, spec.clone(), &model_path, runtime, cx).await;
+            let result =
+                install_local_model(&this, spec.clone(), &model_path, runtime, api_key, cx).await;
             let successful = result.is_ok();
             let error_message = result.as_ref().err().map(|error| format!("{error:#}"));
             this.update(cx, |this, cx| {
@@ -447,15 +454,22 @@ impl State {
         Ok(id)
     }
 
-    fn update_local_runtime(
+    fn apply_local_runtime(
         &mut self,
-        update: impl FnOnce(&mut LocalRuntimeConfig),
+        runtime: LocalRuntimeConfig,
         cx: &mut Context<Self>,
-    ) {
+    ) -> Task<Result<()>> {
         let Some(manager) = self.local_models.as_mut() else {
-            return;
+            return Task::ready(Ok(()));
         };
-        update(&mut manager.runtime);
+
+        let restart_model_id = manager.active_model_id.clone().filter(|active_id| {
+            manager
+                .models
+                .iter()
+                .any(|model| model.spec.id == *active_id && model.server.is_some())
+        });
+        manager.runtime = runtime;
         for model in &mut manager.models {
             if let Some(mut server) = model.server.take() {
                 server.kill().ok();
@@ -468,6 +482,12 @@ impl State {
         }
         save_runtime_config(&manager.runtime).log_err();
         cx.notify();
+
+        if let Some(model_id) = restart_model_id {
+            self.install_local_model(model_id, cx)
+        } else {
+            Task::ready(Ok(()))
+        }
     }
 
     fn delete_local_model(&mut self, model_id: &str, cx: &mut Context<Self>) -> Result<()> {
@@ -538,6 +558,20 @@ fn validate_local_model_spec(spec: &LocalModelSpec) -> Result<()> {
 
 fn local_models_dir() -> PathBuf {
     paths::home_dir().join(".local/share/zdroid/models")
+}
+
+fn dpkg_package_is_installed(prefix: &Path, package: &str) -> bool {
+    let Ok(status) = std::fs::read_to_string(prefix.join("var/lib/dpkg/status")) else {
+        return false;
+    };
+    status.split("\n\n").any(|paragraph| {
+        paragraph
+            .lines()
+            .any(|line| line == format!("Package: {package}"))
+            && paragraph
+                .lines()
+                .any(|line| line == "Status: install ok installed")
+    })
 }
 
 fn runtime_config_path() -> PathBuf {
@@ -642,6 +676,7 @@ async fn install_local_model(
     spec: LocalModelSpec,
     model_path: &Path,
     runtime: LocalRuntimeConfig,
+    api_key: Arc<str>,
     cx: &mut AsyncApp,
 ) -> Result<()> {
     let prefix = bootstrap_prefix()?;
@@ -825,7 +860,12 @@ async fn install_local_model(
 
     let server_path = prefix.join("bin/llama-server");
     let vulkan_backend_path = prefix.join("lib/libggml-vulkan.so");
-    if !server_path.is_file() || !vulkan_backend_path.is_file() {
+    let android_vulkan_loader_installed =
+        dpkg_package_is_installed(&prefix, "vulkan-loader-android");
+    if !server_path.is_file()
+        || !vulkan_backend_path.is_file()
+        || !android_vulkan_loader_installed
+    {
         let package_manager = prefix.join(".zed/bin/pkg");
         let status = smol::process::Command::new(&package_manager)
             .args([
@@ -833,7 +873,8 @@ async fn install_local_model(
                 "-y",
                 "llama-cpp",
                 "llama-cpp-backend-vulkan",
-                "vulkan-loader",
+                "vulkan-loader-android",
+                "vulkan-loader-generic-",
                 "-o",
                 "Dpkg::Options::=--force-confdef",
                 "-o",
@@ -872,6 +913,10 @@ async fn install_local_model(
                 "127.0.0.1",
                 "--port",
                 "8080",
+                "--api-key",
+                api_key.as_ref(),
+                "--no-webui",
+                "--no-slots",
                 "-c",
                 &runtime.context_tokens.to_string(),
                 "-np",
@@ -882,8 +927,6 @@ async fn install_local_model(
                 &runtime.batch_size.to_string(),
             ])
             .env("PREFIX", &prefix)
-            .env("LD_LIBRARY_PATH", prefix.join("lib"))
-            .env("GGML_BACKEND_PATH", prefix.join("lib"))
             .stdout(Stdio::from(stdout))
             .stderr(Stdio::from(stderr));
         if runtime.threads > 0 {
@@ -895,6 +938,7 @@ async fn install_local_model(
             ]);
         }
         if use_vulkan && runtime.vulkan {
+            command.env("GGML_BACKEND_PATH", &vulkan_backend_path);
             command.args(["--gpu-layers", "99"]);
         } else {
             command.args(["--device", "none"]);
@@ -1071,6 +1115,13 @@ impl OpenAiCompatibleLanguageModelProvider {
                     runtime: load_runtime_config().unwrap_or_default(),
                 }
             });
+            let local_api_key = (!requires_api_key).then(|| {
+                Arc::<str>::from(format!(
+                    "{:032x}{:032x}",
+                    rand::random::<u128>(),
+                    rand::random::<u128>()
+                ))
+            });
             State {
                 settings_id: static_settings.is_none().then(|| state_id.clone()),
                 api_key_state: ApiKeyState::new(
@@ -1080,6 +1131,7 @@ impl OpenAiCompatibleLanguageModelProvider {
                 settings,
                 credentials_provider,
                 requires_api_key,
+                local_api_key,
                 local_models,
             }
         });
@@ -1240,21 +1292,26 @@ impl OpenAiCompatibleLanguageModel {
     > {
         let http_client = self.http_client.clone();
 
-        let (api_key, api_url, requires_api_key) = self.state.read_with(cx, |state, _cx| {
-            let api_url = &state.settings.api_url;
-            (
-                state.api_key_state.key(api_url),
-                state.settings.api_url.clone(),
-                state.requires_api_key,
-            )
-        });
+        let (api_key, local_api_key, api_url, requires_api_key) =
+            self.state.read_with(cx, |state, _cx| {
+                let api_url = &state.settings.api_url;
+                (
+                    state.api_key_state.key(api_url),
+                    state.local_api_key.clone(),
+                    state.settings.api_url.clone(),
+                    state.requires_api_key,
+                )
+            });
 
         let provider = self.provider_name.clone();
         let future = self.request_limiter.stream(async move {
-            let api_key = match (api_key, requires_api_key) {
-                (Some(api_key), _) => api_key,
-                (None, false) => Arc::<str>::from("zdroid-local"),
-                (None, true) => {
+            let api_key = match (api_key, local_api_key, requires_api_key) {
+                (Some(api_key), _, _) => api_key,
+                (None, Some(api_key), false) => api_key,
+                (None, None, false) => {
+                    return Err(LanguageModelCompletionError::NoApiKey { provider });
+                }
+                (None, _, true) => {
                     return Err(LanguageModelCompletionError::NoApiKey { provider });
                 }
             };
@@ -1280,21 +1337,26 @@ impl OpenAiCompatibleLanguageModel {
     {
         let http_client = self.http_client.clone();
 
-        let (api_key, api_url, requires_api_key) = self.state.read_with(cx, |state, _cx| {
-            let api_url = &state.settings.api_url;
-            (
-                state.api_key_state.key(api_url),
-                state.settings.api_url.clone(),
-                state.requires_api_key,
-            )
-        });
+        let (api_key, local_api_key, api_url, requires_api_key) =
+            self.state.read_with(cx, |state, _cx| {
+                let api_url = &state.settings.api_url;
+                (
+                    state.api_key_state.key(api_url),
+                    state.local_api_key.clone(),
+                    state.settings.api_url.clone(),
+                    state.requires_api_key,
+                )
+            });
 
         let provider = self.provider_name.clone();
         let future = self.request_limiter.stream(async move {
-            let api_key = match (api_key, requires_api_key) {
-                (Some(api_key), _) => api_key,
-                (None, false) => Arc::<str>::from("zdroid-local"),
-                (None, true) => {
+            let api_key = match (api_key, local_api_key, requires_api_key) {
+                (Some(api_key), _, _) => api_key,
+                (None, Some(api_key), false) => api_key,
+                (None, None, false) => {
+                    return Err(LanguageModelCompletionError::NoApiKey { provider });
+                }
+                (None, _, true) => {
                     return Err(LanguageModelCompletionError::NoApiKey { provider });
                 }
             };
@@ -1581,6 +1643,7 @@ struct ConfigurationView {
     pending_custom_model: Option<LocalModelSpec>,
     selected_local_model_id: Option<String>,
     custom_error: Option<String>,
+    pending_runtime: Option<LocalRuntimeConfig>,
     state: Entity<State>,
     load_credentials_task: Option<Task<()>>,
 }
@@ -1633,6 +1696,11 @@ impl ConfigurationView {
             pending_custom_model: None,
             selected_local_model_id: None,
             custom_error: None,
+            pending_runtime: state
+                .read(cx)
+                .local_models
+                .as_ref()
+                .map(|manager| manager.runtime.clone()),
             state,
             load_credentials_task,
         }
@@ -1679,6 +1747,39 @@ impl ConfigurationView {
         let task = self
             .state
             .update(cx, |state, cx| state.install_local_model(model_id, cx));
+        cx.spawn_in(window, async move |_, _| task.await)
+            .detach_and_log_err(cx);
+    }
+
+    fn update_pending_runtime(
+        &mut self,
+        update: impl FnOnce(&mut LocalRuntimeConfig),
+        cx: &mut Context<Self>,
+    ) {
+        let runtime = self.pending_runtime.get_or_insert_with(|| {
+            self.state
+                .read(cx)
+                .local_models
+                .as_ref()
+                .map(|manager| manager.runtime.clone())
+                .unwrap_or_default()
+        });
+        update(runtime);
+        cx.notify();
+    }
+
+    fn apply_pending_runtime(
+        &mut self,
+        _: &gpui::ClickEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(runtime) = self.pending_runtime.clone() else {
+            return;
+        };
+        let task = self
+            .state
+            .update(cx, |state, cx| state.apply_local_runtime(runtime, cx));
         cx.spawn_in(window, async move |_, _| task.await)
             .detach_and_log_err(cx);
     }
@@ -2008,7 +2109,7 @@ impl Render for ConfigurationView {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let requires_api_key = self.state.read(cx).requires_api_key;
         if !requires_api_key {
-            let (runtime, models, api_url) = {
+            let (applied_runtime, models, api_url) = {
                 let state = self.state.read(cx);
                 let Some(manager) = state.local_models.as_ref() else {
                     return div().into_any();
@@ -2030,6 +2131,11 @@ impl Render for ConfigurationView {
                     state.settings.api_url.clone(),
                 )
             };
+            let runtime = self
+                .pending_runtime
+                .clone()
+                .unwrap_or_else(|| applied_runtime.clone());
+            let runtime_changed = runtime != applied_runtime;
             let downloaded_models = models
                 .iter()
                 .filter(|model| !matches!(model.status, LocalModelStatus::NotDownloaded))
@@ -2174,20 +2280,21 @@ impl Render for ConfigurationView {
                 .child(v_flex().w_full().gap_2().p_3().rounded_sm().border_1().border_color(cx.theme().colors().border_variant)
                     .child(h_flex().flex_wrap().gap_2()
                         .child(Label::new(format!("CPU cores: {}", if runtime.threads == 0 { "Auto".into() } else { runtime.threads.to_string() })))
-                        .child(Button::new("cpu-auto", "Auto").style(ButtonStyle::Outlined).on_click({ let state = self.state.clone(); move |_, _, cx| state.update(cx, |state, cx| state.update_local_runtime(|config| config.threads = 0, cx)) }))
-                        .child(Button::new("cpu-minus", "-").style(ButtonStyle::Outlined).on_click({ let state = self.state.clone(); move |_, _, cx| state.update(cx, |state, cx| state.update_local_runtime(|config| config.threads = config.threads.max(2) - 1, cx)) }))
-                        .child(Button::new("cpu-plus", "+").style(ButtonStyle::Outlined).on_click({ let state = self.state.clone(); move |_, _, cx| state.update(cx, |state, cx| state.update_local_runtime(|config| config.threads = (config.threads.max(1) + 1).min(16), cx)) })))
+                        .child(Button::new("cpu-auto", "Auto").style(ButtonStyle::Outlined).on_click(cx.listener(|this, _, _, cx| this.update_pending_runtime(|config| config.threads = 0, cx))))
+                        .child(Button::new("cpu-minus", "-").style(ButtonStyle::Outlined).on_click(cx.listener(|this, _, _, cx| this.update_pending_runtime(|config| config.threads = config.threads.max(2) - 1, cx))))
+                        .child(Button::new("cpu-plus", "+").style(ButtonStyle::Outlined).on_click(cx.listener(|this, _, _, cx| this.update_pending_runtime(|config| config.threads = (config.threads.max(1) + 1).min(16), cx)))))
                     .child(h_flex().flex_wrap().gap_2().child(Label::new(format!("Context: {}K", runtime.context_tokens / 1024))).children([2048_u32, 4096, 8192].into_iter().map(|value| {
-                        Button::new(format!("context-{value}"), format!("{}K", value / 1024)).style(ButtonStyle::Outlined).on_click({ let state = self.state.clone(); move |_, _, cx| state.update(cx, |state, cx| state.update_local_runtime(|config| config.context_tokens = value, cx)) })
+                        Button::new(format!("context-{value}"), format!("{}K", value / 1024)).style(ButtonStyle::Outlined).on_click(cx.listener(move |this, _, _, cx| this.update_pending_runtime(|config| config.context_tokens = value, cx)))
                     })))
                     .child(h_flex().flex_wrap().gap_2().child(Label::new(format!("Batch: {}", runtime.batch_size))).children([128_u32, 256, 512].into_iter().map(|value| {
-                        Button::new(format!("batch-{value}"), value.to_string()).style(ButtonStyle::Outlined).on_click({ let state = self.state.clone(); move |_, _, cx| state.update(cx, |state, cx| state.update_local_runtime(|config| config.batch_size = value, cx)) })
+                        Button::new(format!("batch-{value}"), value.to_string()).style(ButtonStyle::Outlined).on_click(cx.listener(move |this, _, _, cx| this.update_pending_runtime(|config| config.batch_size = value, cx)))
                     })))
                     .child(h_flex().flex_wrap().gap_2().child(Label::new(format!("Maximum response: {} tokens", runtime.output_tokens))).children([512_u32, 1024, 2048, 4096].into_iter().map(|value| {
-                        Button::new(format!("output-{value}"), value.to_string()).style(ButtonStyle::Outlined).on_click({ let state = self.state.clone(); move |_, _, cx| state.update(cx, |state, cx| state.update_local_runtime(|config| config.output_tokens = value, cx)) })
+                        Button::new(format!("output-{value}"), value.to_string()).style(ButtonStyle::Outlined).on_click(cx.listener(move |this, _, _, cx| this.update_pending_runtime(|config| config.output_tokens = value, cx)))
                     })))
-                    .child(Button::new("toggle-vulkan", if runtime.vulkan { "Vulkan: Auto + CPU fallback" } else { "Vulkan: Off (CPU)" }).style(ButtonStyle::Outlined).on_click({ let state = self.state.clone(); move |_, _, cx| state.update(cx, |state, cx| state.update_local_runtime(|config| config.vulkan = !config.vulkan, cx)) }))
-                    .child(Label::new("Changing runtime settings stops the current model. Press Start on a model to apply them.").size(LabelSize::Small).color(Color::Muted)))
+                    .child(Button::new("toggle-vulkan", if runtime.vulkan { "Vulkan: Auto + CPU fallback" } else { "Vulkan: Off (CPU)" }).style(ButtonStyle::Outlined).on_click(cx.listener(|this, _, _, cx| this.update_pending_runtime(|config| config.vulkan = !config.vulkan, cx))))
+                    .child(Button::new("apply-local-runtime", "Apply").style(ButtonStyle::Filled).disabled(!runtime_changed).on_click(cx.listener(Self::apply_pending_runtime)))
+                    .child(Label::new(if runtime_changed { "Apply to save these settings. A running model will restart automatically." } else { "Runtime settings are applied." }).size(LabelSize::Small).color(Color::Muted)))
                 .when(!downloaded_model_cards.is_empty(), |this| {
                     this.child(Label::new("Downloaded models"))
                         .children(downloaded_model_cards)

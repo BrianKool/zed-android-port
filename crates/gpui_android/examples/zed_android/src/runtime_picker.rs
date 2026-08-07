@@ -32,10 +32,10 @@ use theme::ActiveTheme;
 use ui::{
     Button, Chip, Clickable, Color, Disableable, FixedWidth, FluentBuilder, Headline, HeadlineSize,
     Icon, IconName, IconSize, Label, LabelCommon, LabelSize, ParentElement, Styled, WithScrollbar,
-    div, h_flex, v_flex,
+    div, h_flex, v_flex, vh, vw,
 };
 use util::ResultExt as _;
-use workspace::{ModalView, MultiWorkspace, Workspace, client_side_decorations};
+use workspace::{DismissDecision, ModalView, MultiWorkspace, Workspace, client_side_decorations};
 use zdroid_runtime::{
     HealthStatus, RuntimeId, RuntimeProvider, adapters,
     adapters::chroot::SPAWND_RELEASE_URL,
@@ -309,6 +309,7 @@ impl RuntimePicker {
                             log::info!(
                                 "zdroid_runtime_picker: first Bootstrap install selected without restart"
                             );
+                            cx.emit(DismissEvent);
                         }
                         Err(err) => {
                             this.install_error = Some(format!(
@@ -367,6 +368,9 @@ impl RuntimePicker {
                 // evolving Background Activity Launch rules and per-
                 // OEM task lifecycle policies.
                 self.restart_required = !first_selection || id != RuntimeId::Bootstrap;
+                if first_selection && id == RuntimeId::Bootstrap {
+                    cx.emit(DismissEvent);
+                }
             }
             Err(err) => {
                 log::error!(
@@ -387,7 +391,23 @@ impl Focusable for RuntimePicker {
 
 impl EventEmitter<DismissEvent> for RuntimePicker {}
 
-impl ModalView for RuntimePicker {}
+impl ModalView for RuntimePicker {
+    fn on_before_dismiss(&mut self, _: &mut Window, _: &mut Context<Self>) -> DismissDecision {
+        DismissDecision::Dismiss(self.current.is_some())
+    }
+
+    fn render_bare(&self) -> bool {
+        cfg!(target_os = "android")
+    }
+
+    fn show_close_button(&self) -> bool {
+        self.current.is_some()
+    }
+
+    fn android_full_size(&self) -> bool {
+        true
+    }
+}
 
 impl Render for RuntimePicker {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -486,24 +506,24 @@ impl Render for RuntimePicker {
             .bg(bg)
             .child(content);
 
-        client_side_decorations(
-            v_flex()
-                .size_full()
-                .text_color(text)
-                .children(self.title_bar.clone())
-                .child(
-                    div()
-                        .relative()
-                        .flex_1()
-                        .min_h_0()
-                        .overflow_hidden()
-                        .child(scroll_viewport)
-                        .vertical_scrollbar_for(&self.scroll_handle, window, cx),
-                ),
-            window,
-            cx,
-            Tiling::default(),
-        )
+        let picker = v_flex()
+            .size_full()
+            .when(cfg!(target_os = "android"), |this| {
+                this.w(vw(0.9, window)).h(vh(0.9, window))
+            })
+            .text_color(text)
+            .children(self.title_bar.clone())
+            .child(
+                div()
+                    .relative()
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_hidden()
+                    .child(scroll_viewport)
+                    .vertical_scrollbar_for(&self.scroll_handle, window, cx),
+            );
+
+        client_side_decorations(picker, window, cx, Tiling::default())
     }
 }
 

@@ -24,6 +24,7 @@ log.workspace = true
 ndk = { version = "0.9", features = ["nativewindow", "api-level-26"] }
 raw-window-handle = "0.6"
 serde_json.workspace = true
+semver.workspace = true
 ureq = { version = "2", default-features = false, features = ["tls"] }
 util.workspace = true
 uuid.workspace = true

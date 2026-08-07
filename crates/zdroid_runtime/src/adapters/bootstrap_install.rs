@@ -15,10 +15,12 @@
 use std::fs;
 use std::io::{Cursor, Read, Write as _};
 use std::os::unix::fs::PermissionsExt;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 
 use anyhow::{Context, Result, anyhow};
+use serde::Deserialize;
+use sha2::{Digest, Sha256};
 
 use crate::health::ProgressSink;
 
@@ -40,6 +42,9 @@ const RELEASE_ASSET_NAME: &str = "bootstrap-aarch64.zip";
 /// `bootstrap-aarch64-r4.zip`, etc.
 const ASSET_NAME_PREFIX: &str = "bootstrap-aarch64";
 const ASSET_NAME_SUFFIX: &str = ".zip";
+const MAX_ARCHIVE_BYTES: u64 = 512 * 1024 * 1024;
+const MAX_EXTRACTED_BYTES: u64 = 4 * 1024 * 1024 * 1024;
+const MAX_ARCHIVE_ENTRIES: usize = 300_000;
 
 /// Manifest entry inside the bootstrap zip carrying symlink targets
 /// the zip format itself can't represent on extraction (Android's
@@ -391,8 +396,10 @@ fn download_bootstrap_asset(
 ) -> Result<Vec<u8>> {
     let canonical_url =
         format!("https://github.com/{release_repo}/releases/download/{tag}/{RELEASE_ASSET_NAME}");
-    match fetch_asset_bytes(&canonical_url, progress) {
+    match fetch_asset_bytes(&canonical_url, progress, 0) {
         Ok(bytes) => {
+            let asset = find_release_asset(release_repo, tag)?;
+            validate_bootstrap_asset(&bytes, &asset)?;
             log::info!("bootstrap_install: fetched canonical asset {RELEASE_ASSET_NAME}");
             Ok(bytes)
         }
@@ -401,20 +408,56 @@ fn download_bootstrap_asset(
                 "bootstrap_install: canonical {RELEASE_ASSET_NAME} 404'd on tag {tag}; \
                  falling back to API asset enumeration"
             );
-            let alt_name = find_alt_asset_name(release_repo, tag)?;
-            let alt_url =
-                format!("https://github.com/{release_repo}/releases/download/{tag}/{alt_name}");
-            log::info!("bootstrap_install: fetching alt asset {alt_name}");
-            match fetch_asset_bytes(&alt_url, progress) {
-                Ok(bytes) => Ok(bytes),
-                Err(FetchError::NotFound) => Err(anyhow!(
-                    "asset {alt_name} present in API listing but returned 404 on download"
-                )),
-                Err(FetchError::Other(e)) => Err(e),
+            let asset = find_release_asset(release_repo, tag)?;
+            if asset.size > MAX_ARCHIVE_BYTES {
+                return Err(anyhow!(
+                    "bootstrap asset {} is {} bytes, above the {}-byte safety limit",
+                    asset.name,
+                    asset.size,
+                    MAX_ARCHIVE_BYTES
+                ));
             }
+            let alt_url = format!(
+                "https://github.com/{release_repo}/releases/download/{tag}/{}",
+                asset.name
+            );
+            log::info!("bootstrap_install: fetching alt asset {}", asset.name);
+            let bytes = fetch_asset_bytes(&alt_url, progress, asset.size)
+                .map_err(FetchError::into_anyhow)?;
+            validate_bootstrap_asset(&bytes, &asset)?;
+            Ok(bytes)
         }
-        Err(FetchError::Other(e)) => Err(e),
+        Err(FetchError::Other(error)) => Err(error),
     }
+}
+
+fn validate_bootstrap_asset(bytes: &[u8], asset: &GitHubAsset) -> Result<()> {
+    if bytes.len() as u64 != asset.size {
+        return Err(anyhow!(
+            "bootstrap asset size mismatch: downloaded {}, GitHub reports {}",
+            bytes.len(),
+            asset.size
+        ));
+    }
+    let expected = asset
+        .digest
+        .as_deref()
+        .and_then(|digest| digest.strip_prefix("sha256:"))
+        .ok_or_else(|| anyhow!("GitHub did not provide a SHA-256 digest for {}", asset.name))?;
+    let actual = format!("{:x}", Sha256::digest(&bytes));
+    if !actual.eq_ignore_ascii_case(expected) {
+        return Err(anyhow!(
+            "bootstrap asset SHA-256 mismatch for {}",
+            asset.name
+        ));
+    }
+    log::info!(
+        "bootstrap_install: verified {} ({} bytes, sha256:{})",
+        asset.name,
+        asset.size,
+        actual
+    );
+    Ok(())
 }
 
 enum FetchError {
@@ -422,9 +465,19 @@ enum FetchError {
     Other(anyhow::Error),
 }
 
+impl FetchError {
+    fn into_anyhow(self) -> anyhow::Error {
+        match self {
+            FetchError::NotFound => anyhow!("bootstrap asset returned 404"),
+            FetchError::Other(error) => error,
+        }
+    }
+}
+
 fn fetch_asset_bytes(
     url: &str,
     progress: &mut dyn ProgressSink,
+    expected_size: u64,
 ) -> std::result::Result<Vec<u8>, FetchError> {
     let resp = ureq::get(url)
         .set("User-Agent", "zdroid-bootstrap-installer")
@@ -432,73 +485,85 @@ fn fetch_asset_bytes(
     let resp = match resp {
         Ok(resp) => resp,
         Err(ureq::Error::Status(404, _)) => return Err(FetchError::NotFound),
-        Err(e) => return Err(FetchError::Other(anyhow!("HTTP GET {url}: {e}"))),
+        Err(error) => return Err(FetchError::Other(anyhow!("HTTP GET {url}: {error}"))),
     };
     let cap = resp
         .header("Content-Length")
         .and_then(|s| s.parse::<usize>().ok())
         .unwrap_or(0);
-    let total = cap as u64;
-    let mut buf = Vec::with_capacity(cap);
+    if cap as u64 > MAX_ARCHIVE_BYTES {
+        return Err(FetchError::Other(anyhow!(
+            "bootstrap response is {cap} bytes, above the {MAX_ARCHIVE_BYTES}-byte safety limit"
+        )));
+    }
+    let total = if cap > 0 {
+        cap as u64
+    } else {
+        expected_size
+    };
+    let capacity = if expected_size <= usize::MAX as u64 {
+        expected_size as usize
+    } else {
+        cap
+    };
+    let mut buf = Vec::with_capacity(capacity);
     let mut reader = resp.into_reader();
-    let mut chunk = [0u8; 128 * 1024];
+    let mut chunk = [0u8; 1024 * 1024];
     loop {
         let read = reader
             .read(&mut chunk)
-            .map_err(|e| FetchError::Other(anyhow!("read body from {url}: {e}")))?;
+            .map_err(|error| FetchError::Other(anyhow!("read body from {url}: {error}")))?;
         if read == 0 {
             break;
         }
         buf.extend_from_slice(&chunk[..read]);
+        if buf.len() as u64 > MAX_ARCHIVE_BYTES {
+            return Err(FetchError::Other(anyhow!(
+                "bootstrap response exceeded the {MAX_ARCHIVE_BYTES}-byte safety limit"
+            )));
+        }
         progress.progress(buf.len() as u64, total);
     }
     Ok(buf)
 }
 
-/// Enumerate the release's assets via the GitHub API and return the
-/// first asset name matching `<ASSET_NAME_PREFIX>*<ASSET_NAME_SUFFIX>`.
-/// Used as a fallback when the canonical asset name 404s on download.
-fn find_alt_asset_name(release_repo: &str, tag: &str) -> Result<String> {
+#[derive(Deserialize)]
+struct GitHubRelease {
+    assets: Vec<GitHubAsset>,
+}
+
+#[derive(Deserialize)]
+struct GitHubAsset {
+    name: String,
+    size: u64,
+    digest: Option<String>,
+}
+
+/// Resolve the exact release asset and its GitHub-computed digest before
+/// downloading. Prefer the canonical name, then accept a versioned variant.
+fn find_release_asset(release_repo: &str, tag: &str) -> Result<GitHubAsset> {
     let url = format!("https://api.github.com/repos/{release_repo}/releases/tags/{tag}");
-    let body = ureq::get(&url)
+    let release: GitHubRelease = ureq::get(&url)
         .set("User-Agent", "zdroid-bootstrap-installer")
         .set("Accept", "application/vnd.github+json")
         .call()
         .map_err(|e| anyhow!("HTTP GET {url}: {e}"))?
-        .into_string()
-        .map_err(|e| anyhow!("read body from {url}: {e}"))?;
-    let candidates = parse_asset_names(&body);
-    candidates
-        .into_iter()
-        .find(|name| name.starts_with(ASSET_NAME_PREFIX) && name.ends_with(ASSET_NAME_SUFFIX))
+        .into_json()
+        .map_err(|e| anyhow!("parse release metadata from {url}: {e}"))?;
+    let asset_index = release
+        .assets
+        .iter()
+        .position(|asset| asset.name == RELEASE_ASSET_NAME)
+        .or_else(|| {
+            release.assets.iter().position(|asset| {
+                asset.name.starts_with(ASSET_NAME_PREFIX) && asset.name.ends_with(ASSET_NAME_SUFFIX)
+            })
+        })
         .ok_or_else(|| {
             anyhow!("release {tag} has no asset matching {ASSET_NAME_PREFIX}*{ASSET_NAME_SUFFIX}")
-        })
-}
-
-/// Walk the API JSON for `"name": "..."` strings under the `assets`
-/// array. Lightweight scrape: avoids pulling serde_json back as a
-/// dep for one fallback path that only fires on misnamed uploads.
-fn parse_asset_names(body: &str) -> Vec<String> {
-    let Some(assets_start) = body.find("\"assets\"") else {
-        return Vec::new();
-    };
-    let tail = &body[assets_start..];
-    let mut names = Vec::new();
-    let needle = "\"name\":";
-    let mut search = tail;
-    while let Some(idx) = search.find(needle) {
-        search = &search[idx + needle.len()..];
-        if let Some(quote_start) = search.find('"') {
-            let after_quote = &search[quote_start + 1..];
-            if let Some(quote_end) = after_quote.find('"') {
-                let name = &after_quote[..quote_end];
-                names.push(name.to_owned());
-                search = &after_quote[quote_end + 1..];
-            }
-        }
-    }
-    names
+        })?;
+    let mut assets = release.assets;
+    Ok(assets.swap_remove(asset_index))
 }
 
 fn extract_into_staging(zip_bytes: &[u8], staging: &Path) -> Result<()> {
@@ -536,11 +601,27 @@ fn extract_entries<R: Read + std::io::Seek>(
     archive: &mut zip::ZipArchive<R>,
     staging: &Path,
 ) -> Result<Vec<(String, String)>> {
+    if archive.len() > MAX_ARCHIVE_ENTRIES {
+        return Err(anyhow!(
+            "bootstrap archive has {} entries, above the {}-entry safety limit",
+            archive.len(),
+            MAX_ARCHIVE_ENTRIES
+        ));
+    }
     let mut symlinks = Vec::new();
+    let mut extracted_bytes = 0_u64;
 
     for i in 0..archive.len() {
         let mut entry = archive.by_index(i)?;
         let raw_name = entry.name().to_owned();
+        extracted_bytes = extracted_bytes
+            .checked_add(entry.size())
+            .ok_or_else(|| anyhow!("bootstrap extracted-size counter overflow"))?;
+        if extracted_bytes > MAX_EXTRACTED_BYTES {
+            return Err(anyhow!(
+                "bootstrap archive expands beyond the {MAX_EXTRACTED_BYTES}-byte safety limit"
+            ));
+        }
 
         if raw_name == SYMLINKS_ENTRY {
             let mut text = String::new();
@@ -607,8 +688,9 @@ fn extract_entries<R: Read + std::io::Seek>(
 
 fn replay_symlinks(staging: &Path, symlinks: &[(String, String)]) -> Result<()> {
     for (target, link_rel) in symlinks {
-        let link_rel = link_rel.trim_start_matches("./");
-        let link_abs = staging.join(link_rel);
+        let link_rel = safe_symlink_path(link_rel)?;
+        reject_symlink_ancestors(staging, &link_rel)?;
+        let link_abs = staging.join(&link_rel);
         if let Some(parent) = link_abs.parent() {
             fs::create_dir_all(parent)?;
         }
@@ -617,6 +699,56 @@ fn replay_symlinks(staging: &Path, symlinks: &[(String, String)]) -> Result<()> 
         }
         std::os::unix::fs::symlink(target, &link_abs)
             .with_context(|| format!("symlink {} -> {}", link_abs.display(), target))?;
+    }
+    Ok(())
+}
+
+fn safe_symlink_path(raw: &str) -> Result<PathBuf> {
+    let path = Path::new(raw);
+    let has_normal_component = path
+        .components()
+        .any(|component| matches!(component, Component::Normal(_)));
+    if path.as_os_str().is_empty()
+        || !has_normal_component
+        || path
+            .components()
+            .any(|component| !matches!(component, Component::Normal(_) | Component::CurDir))
+    {
+        return Err(anyhow!("unsafe bootstrap symlink path {raw:?}"));
+    }
+    Ok(path.to_path_buf())
+}
+
+fn reject_symlink_ancestors(staging: &Path, relative: &Path) -> Result<()> {
+    let Some(parent) = relative.parent() else {
+        return Ok(());
+    };
+    let mut current = staging.to_path_buf();
+    for component in parent.components() {
+        let Component::Normal(component) = component else {
+            continue;
+        };
+        current.push(component);
+        match fs::symlink_metadata(&current) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return Err(anyhow!(
+                    "bootstrap symlink path traverses another symlink at {}",
+                    current.display()
+                ));
+            }
+            Ok(metadata) if !metadata.is_dir() => {
+                return Err(anyhow!(
+                    "bootstrap symlink parent is not a directory: {}",
+                    current.display()
+                ));
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                fs::create_dir(&current)
+                    .with_context(|| format!("create symlink parent {}", current.display()))?;
+            }
+            Err(error) => return Err(error.into()),
+        }
     }
     Ok(())
 }

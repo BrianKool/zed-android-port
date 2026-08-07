@@ -314,17 +314,7 @@ impl AgentServer for CustomAgentServer {
         }
         if is_registry_agent {
             match agent_id.as_ref() {
-                CLAUDE_AGENT_ID => {
-                    extra_env.insert("ANTHROPIC_API_KEY".into(), "".into());
-                }
-                CODEX_ID => {
-                    if let Ok(api_key) = std::env::var("CODEX_API_KEY") {
-                        extra_env.insert("CODEX_API_KEY".into(), api_key);
-                    }
-                    if let Ok(api_key) = std::env::var("OPEN_AI_API_KEY") {
-                        extra_env.insert("OPEN_AI_API_KEY".into(), api_key);
-                    }
-                }
+                CLAUDE_AGENT_ID | CODEX_ID => {}
                 GEMINI_ID => {
                     extra_env.insert("SURFACE".to_owned(), "zed".to_owned());
                 }
@@ -333,9 +323,41 @@ impl AgentServer for CustomAgentServer {
         }
         let store = delegate.store.downgrade();
         cx.spawn(async move |cx| {
-            if is_registry_agent && agent_id.as_ref() == GEMINI_ID {
-                if let Some(api_key) = cx.update(api_key_for_gemini_cli).await.ok() {
-                    extra_env.insert("GEMINI_API_KEY".into(), api_key);
+            if is_registry_agent {
+                match agent_id.as_ref() {
+                    CLAUDE_AGENT_ID => {
+                        if let Some(api_key) = cx
+                            .update(|cx| {
+                                api_key_for_cli(
+                                    "ANTHROPIC_API_KEY",
+                                    "https://api.anthropic.com",
+                                    cx,
+                                )
+                            })
+                            .await
+                            .ok()
+                        {
+                            extra_env.insert("ANTHROPIC_API_KEY".into(), api_key);
+                        }
+                    }
+                    CODEX_ID => {
+                        if let Some(api_key) = cx
+                            .update(|cx| {
+                                api_key_for_cli("OPENAI_API_KEY", "https://api.openai.com/v1", cx)
+                            })
+                            .await
+                            .ok()
+                        {
+                            extra_env.insert("OPENAI_API_KEY".into(), api_key.clone());
+                            extra_env.insert("CODEX_API_KEY".into(), api_key);
+                        }
+                    }
+                    GEMINI_ID => {
+                        if let Some(api_key) = cx.update(api_key_for_gemini_cli).await.ok() {
+                            extra_env.insert("GEMINI_API_KEY".into(), api_key);
+                        }
+                    }
+                    _ => {}
                 }
             }
             let command = store
@@ -367,6 +389,22 @@ impl AgentServer for CustomAgentServer {
     fn into_any(self: Rc<Self>) -> Rc<dyn std::any::Any> {
         self
     }
+}
+
+fn api_key_for_cli(env_name: &str, api_url: &str, cx: &mut App) -> Task<Result<String>> {
+    if let Some(key) = EnvVar::new(env_name.into()).value {
+        return Task::ready(Ok(key));
+    }
+    let credentials_provider = zed_credentials_provider::global(cx);
+    let api_url = api_url.to_string();
+    cx.spawn(async move |cx| {
+        Ok(
+            ApiKey::load_from_system_keychain(&api_url, credentials_provider.as_ref(), cx)
+                .await?
+                .key()
+                .to_string(),
+        )
+    })
 }
 
 fn api_key_for_gemini_cli(cx: &mut App) -> Task<Result<String>> {

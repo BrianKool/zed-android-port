@@ -220,7 +220,7 @@ impl<'de> Deserialize<'de> for Oid {
 
 impl Default for Oid {
     fn default() -> Self {
-        Self(libgit::Oid::zero())
+        Self(libgit::Oid::ZERO_SHA1)
     }
 }
 

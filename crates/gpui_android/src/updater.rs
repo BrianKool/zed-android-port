@@ -1,5 +1,5 @@
 //! In-app updater for the Zdroid Android port. Hits the GitHub Releases
-//! page for `Dylanmurzello/zed-android-port`, compares the latest tag
+//! page for `BrianKool/zed-android-port`, compares the latest tag
 //! against the running app's `versionName`, and (when newer) downloads
 //! the signed APK to the app's cache dir and hands it to Android's
 //! package installer via the `MainActivity.launchPackageInstaller` JNI
@@ -46,21 +46,21 @@ fn android_app() -> Result<&'static AndroidApp> {
 /// Repo we ship APK releases from. Kept here (not in a config file)
 /// so a malicious user-config tweak can't redirect the auto-updater
 /// at a third-party APK.
-pub const RELEASE_REPO: &str = "Dylanmurzello/zed-android-port";
+pub const RELEASE_REPO: &str = "BrianKool/zed-android-port";
 
-/// Asset name conventions the updater knows how to find. v0.2.0/v0.2.1
-/// shipped with `app-release.apk` (gradle's default release-output
-/// name); v0.2.2 onward switched to the prettier `Zdroid-X.Y.Z.apk`
-/// for user-facing downloads but the updater code wasn't updated, so
-/// the auto-update path silently 404'd between those versions. The
-/// fix is to try both: the primary name follows the
-/// `Zdroid-X.Y.Z.apk` convention so future releases just need the
-/// pretty name, and `app-release.apk` stays as a fallback so a
-/// stale release that uploaded only the gradle default still works.
+/// Reject unexpectedly large responses before filling the app cache. The
+/// current APK is well below this ceiling; the margin leaves room for Zed
+/// growth without allowing an unbounded response to exhaust device storage.
+const MAX_APK_BYTES: u64 = 512 * 1024 * 1024;
+
+/// Asset name conventions the updater knows how to find.
+/// The primary name follows Zdroid-B's public release convention.
+/// `app-release.apk` remains a fallback for a release assembled directly by
+/// Gradle. Both URLs are pinned to [`RELEASE_REPO`].
 /// Walked in order; first 200 wins.
 fn candidate_asset_names(version: &str) -> [String; 2] {
     [
-        format!("Zdroid-{version}.apk"),
+        format!("Zdroid-B-{version}.apk"),
         "app-release.apk".to_string(),
     ]
 }
@@ -129,51 +129,28 @@ pub fn fetch_latest_tag() -> Result<String> {
         Err(ureq::Error::Status(_, resp)) => resp,
         Err(e) => return Err(anyhow!("HTTP GET {url}: {e}")),
     };
-    let location = resp.header("Location").ok_or_else(|| {
-        anyhow!(
-            "no Location header on {url}; got status {}",
-            resp.status()
-        )
-    })?;
+    let location = resp
+        .header("Location")
+        .ok_or_else(|| anyhow!("no Location header on {url}; got status {}", resp.status()))?;
     let marker = "/releases/tag/";
     let after = location.find(marker).map(|i| &location[i + marker.len()..]);
     let tag = after
         .and_then(|s| s.split('/').next().filter(|t| !t.is_empty()))
-        .ok_or_else(|| {
-            anyhow!("expected `/releases/tag/<tag>` in Location {location}")
-        })?;
+        .ok_or_else(|| anyhow!("expected `/releases/tag/<tag>` in Location {location}"))?;
     Ok(tag.trim_start_matches('v').to_owned())
 }
 
 /// Compare two semantic versions (both stripped of the leading `v`).
 /// Returns `true` if `latest` is strictly newer than `current`.
-/// Pre-release suffixes (`-pre`, `-rc.1`, etc.) sort after the bare
-/// semver — we use the same lexicographic-after-split rule as upstream
-/// semver crates so `0.2.0` < `0.2.1-pre` < `0.2.1`.
+/// Uses the `semver` crate so pre-release and build metadata follow the
+/// standard ordering rules.
 pub fn is_newer(current: &str, latest: &str) -> bool {
-    fn parse(v: &str) -> (Vec<u64>, &str) {
-        let (numeric, suffix) = match v.find('-') {
-            Some(i) => (&v[..i], &v[i..]),
-            None => (v, ""),
-        };
-        let parts = numeric
-            .split('.')
-            .map(|s| s.parse::<u64>().unwrap_or(0))
-            .collect::<Vec<_>>();
-        (parts, suffix)
-    }
-    let (cur_n, cur_s) = parse(current);
-    let (new_n, new_s) = parse(latest);
-    if new_n != cur_n {
-        return new_n > cur_n;
-    }
-    // Same numeric: stable (no suffix) > any pre-release; among pre-
-    // releases, lexicographic.
-    match (cur_s.is_empty(), new_s.is_empty()) {
-        (true, true) => false,
-        (true, false) => false,
-        (false, true) => true,
-        (false, false) => new_s > cur_s,
+    match (
+        semver::Version::parse(current),
+        semver::Version::parse(latest),
+    ) {
+        (Ok(current), Ok(latest)) => latest > current,
+        _ => false,
     }
 }
 
@@ -218,8 +195,7 @@ fn system_cache_dir(android_app: &AndroidApp) -> Result<PathBuf> {
     let file = env
         .call_method(&activity, "getCacheDir", "()Ljava/io/File;", &[])?
         .l()?;
-    let path_value =
-        env.call_method(&file, "getAbsolutePath", "()Ljava/lang/String;", &[])?;
+    let path_value = env.call_method(&file, "getAbsolutePath", "()Ljava/lang/String;", &[])?;
     let s: JString = path_value.l()?.into();
     let path: String = env.get_string(&s)?.into();
     Ok(PathBuf::from(path))
@@ -231,9 +207,7 @@ fn system_cache_dir(android_app: &AndroidApp) -> Result<PathBuf> {
 pub fn check_for_update() -> Result<UpdateCheck> {
     let latest = fetch_latest_tag().context("resolve latest release tag")?;
     let current = current_version();
-    log::info!(
-        "updater: check_for_update current={current:?} latest={latest:?}"
-    );
+    log::info!("updater: check_for_update current={current:?} latest={latest:?}");
     if current.is_empty() {
         return Err(anyhow!(
             "can't determine current app version; PackageManager returned empty"
@@ -249,9 +223,7 @@ pub fn check_for_update() -> Result<UpdateCheck> {
         let download_urls = candidate_asset_names(&latest)
             .into_iter()
             .map(|name| {
-                format!(
-                    "https://github.com/{RELEASE_REPO}/releases/download/v{latest}/{name}"
-                )
+                format!("https://github.com/{RELEASE_REPO}/releases/download/v{latest}/{name}")
             })
             .collect();
         Ok(UpdateCheck::Available {
@@ -288,8 +260,8 @@ pub fn download_apk(tag: &str, urls: &[String]) -> Result<PathBuf> {
     // resolves to. One-time migration: if the old wrong directory
     // exists from a previous failed attempt, wipe it so stale 225 MB
     // APKs don't sit on disk forever.
-    let cache_root = system_cache_dir(android_app)
-        .context("query Context.getCacheDir() via JNI")?;
+    let cache_root =
+        system_cache_dir(android_app).context("query Context.getCacheDir() via JNI")?;
     let stale_dir = android_app
         .internal_data_path()
         .map(|p| p.join("cache").join(CACHE_SUBDIR));
@@ -320,11 +292,7 @@ pub fn download_apk(tag: &str, urls: &[String]) -> Result<PathBuf> {
             let _ = std::fs::remove_file(&dest);
         }
         log::info!("updater: downloading {url} -> {}", dest.display());
-        let resp = match agent
-            .get(url)
-            .set("User-Agent", USER_AGENT)
-            .call()
-        {
+        let resp = match agent.get(url).set("User-Agent", USER_AGENT).call() {
             Ok(resp) => resp,
             Err(err) => {
                 log::warn!("updater: GET {url} failed: {err:#}; trying next candidate");
@@ -332,9 +300,19 @@ pub fn download_apk(tag: &str, urls: &[String]) -> Result<PathBuf> {
                 continue;
             }
         };
+        if let Some(length) = resp
+            .header("Content-Length")
+            .and_then(|value| value.parse::<u64>().ok())
+            && length > MAX_APK_BYTES
+        {
+            last_err = Some(anyhow!(
+                "update APK is {length} bytes, above the {MAX_APK_BYTES}-byte safety limit"
+            ));
+            continue;
+        }
         let mut reader = resp.into_reader();
-        let mut file = std::fs::File::create(&dest)
-            .with_context(|| format!("create {}", dest.display()))?;
+        let mut file =
+            std::fs::File::create(&dest).with_context(|| format!("create {}", dest.display()))?;
         let mut buf = vec![0u8; 64 * 1024];
         let mut total: u64 = 0;
         let read_result = (|| -> Result<()> {
@@ -346,6 +324,11 @@ pub fn download_apk(tag: &str, urls: &[String]) -> Result<PathBuf> {
                 std::io::Write::write_all(&mut file, &buf[..n])
                     .with_context(|| format!("write {}", dest.display()))?;
                 total += n as u64;
+                if total > MAX_APK_BYTES {
+                    return Err(anyhow!(
+                        "update APK exceeded the {MAX_APK_BYTES}-byte safety limit"
+                    ));
+                }
             }
             Ok(())
         })();
@@ -357,6 +340,7 @@ pub fn download_apk(tag: &str, urls: &[String]) -> Result<PathBuf> {
             }
             Err(err) => {
                 log::warn!("updater: streaming {url} failed: {err:#}; trying next candidate");
+                let _ = std::fs::remove_file(&dest);
                 last_err = Some(err);
                 continue;
             }
@@ -409,5 +393,7 @@ mod tests {
         assert!(is_newer("0.2.0", "0.2.1-pre"));
         assert!(is_newer("0.2.1-pre", "0.2.1"));
         assert!(!is_newer("0.2.1", "0.2.1-pre"));
+        assert!(!is_newer("not-a-version", "1.0.1"));
+        assert!(!is_newer("1.0.0", "not-a-version"));
     }
 }

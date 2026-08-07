@@ -12,6 +12,10 @@ object ZdroidBrowserLauncher {
 
     fun open(context: Context, url: String) {
         val uri = Uri.parse(url)
+        val scheme = uri.scheme?.lowercase()
+        require((scheme == "http" || scheme == "https") && !uri.host.isNullOrBlank()) {
+            "Only HTTP(S) browser URLs are allowed"
+        }
         val intent = Intent(Intent.ACTION_VIEW, uri).apply {
             addCategory(Intent.CATEGORY_BROWSABLE)
             addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)

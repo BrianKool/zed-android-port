@@ -1,6 +1,5 @@
 use crate::{
-    NewFile, Open, OpenMode, PathList, RecentWorkspace, SerializedWorkspaceLocation,
-    ToggleWorkspaceSidebar, Workspace,
+    NewFile, Open, OpenMode, PathList, RecentWorkspace, SerializedWorkspaceLocation, Workspace,
     item::{Item, ItemEvent},
     persistence::WorkspaceDb,
 };
@@ -366,7 +365,6 @@ impl WelcomePage {
                             .size(rems_from_px(12.)),
                     )
                     .on_click(move |_, window, cx| {
-                        focus.dispatch_action(&ToggleWorkspaceSidebar, window, cx);
                         focus.dispatch_action(&ToggleFocus, window, cx);
                     }),
             )

@@ -488,7 +488,15 @@ impl GithubAccountsModal {
 }
 
 impl EventEmitter<DismissEvent> for GithubAccountsModal {}
-impl ModalView for GithubAccountsModal {}
+impl ModalView for GithubAccountsModal {
+    fn android_full_size(&self) -> bool {
+        cfg!(target_os = "android")
+    }
+
+    fn show_close_button(&self) -> bool {
+        !cfg!(target_os = "android")
+    }
+}
 
 impl Focusable for GithubAccountsModal {
     fn focus_handle(&self, cx: &App) -> FocusHandle {

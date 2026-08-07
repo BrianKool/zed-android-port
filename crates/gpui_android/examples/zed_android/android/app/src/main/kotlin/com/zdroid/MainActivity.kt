@@ -38,6 +38,7 @@ import androidx.core.view.WindowInsetsControllerCompat
 import com.google.androidgamesdk.GameActivity
 import java.io.File
 import java.io.FileOutputStream
+import java.security.MessageDigest
 
 /// SAF flows go through legacy `startActivityForResult` instead of
 /// `ActivityResultLauncher` because `ActivityResultRegistry` silently
@@ -1370,13 +1371,15 @@ class MainActivity : GameActivity(), ImeHost {
                         Intent.FLAG_GRANT_WRITE_URI_PERMISSION or
                         Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION
                 )
-                // Suggest the primary external storage root so the picker
-                // lands somewhere familiar instead of "Recent".
+                // Keep project import / clone destination selection inside
+                // Zdroid's own SAF root. Android DocumentsUI may still show
+                // other providers in its side rail, but this starts users in
+                // the only root that maps cleanly back to a POSIX path.
                 putExtra(
                     DocumentsContract.EXTRA_INITIAL_URI,
                     DocumentsContract.buildRootUri(
-                        "com.android.externalstorage.documents",
-                        "primary"
+                        "com.zdroid.documents",
+                        File(filesDir, "home").absolutePath
                     )
                 )
             }
@@ -1494,6 +1497,10 @@ class MainActivity : GameActivity(), ImeHost {
             Log.e(TAG_UPDATE, "launchPackageInstaller: APK missing at $apkPath")
             return false
         }
+        if (!isTrustedUpdateApk(file)) {
+            Log.e(TAG_UPDATE, "launchPackageInstaller: rejected untrusted APK at $apkPath")
+            return false
+        }
         return try {
             val uri = FileProvider.getUriForFile(
                 this,
@@ -1509,6 +1516,40 @@ class MainActivity : GameActivity(), ImeHost {
             true
         } catch (t: Throwable) {
             Log.e(TAG_UPDATE, "launchPackageInstaller dispatch failed", t)
+            false
+        }
+    }
+
+    @Suppress("DEPRECATION")
+    private fun isTrustedUpdateApk(file: File): Boolean {
+        return try {
+            val flags = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                PackageManager.GET_SIGNING_CERTIFICATES
+            } else {
+                PackageManager.GET_SIGNATURES
+            }
+            val current = packageManager.getPackageInfo(packageName, flags)
+            val archive = packageManager.getPackageArchiveInfo(file.absolutePath, flags)
+                ?: return false
+            if (archive.packageName != packageName) return false
+
+            fun signerDigests(info: android.content.pm.PackageInfo): Set<String> {
+                val signatures = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                    info.signingInfo?.apkContentsSigners.orEmpty()
+                } else {
+                    info.signatures.orEmpty()
+                }
+                return signatures.map { signature ->
+                    MessageDigest.getInstance("SHA-256")
+                        .digest(signature.toByteArray())
+                        .joinToString("") { byte -> "%02x".format(byte.toInt() and 0xff) }
+                }.toSet()
+            }
+
+            val currentSigners = signerDigests(current)
+            currentSigners.isNotEmpty() && currentSigners == signerDigests(archive)
+        } catch (t: Throwable) {
+            Log.e(TAG_UPDATE, "Could not verify update APK", t)
             false
         }
     }

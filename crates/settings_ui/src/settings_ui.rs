@@ -4242,7 +4242,11 @@ impl EventEmitter<DismissEvent> for SettingsWindow {}
 
 impl ModalView for SettingsWindow {
     fn render_bare(&self) -> bool {
-        false
+        cfg!(target_os = "android")
+    }
+
+    fn android_full_size(&self) -> bool {
+        cfg!(target_os = "android")
     }
 }
 

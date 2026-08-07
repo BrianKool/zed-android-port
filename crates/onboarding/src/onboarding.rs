@@ -4,9 +4,9 @@ use cloud_api_types::Plan;
 use db::kvp::KeyValueStore;
 use fs::Fs;
 use gpui::{
-    Action, AnyElement, App, AppContext, AsyncWindowContext, Context, Entity, EventEmitter,
-    FocusHandle, Focusable, Global, IntoElement, KeyContext, Render, ScrollHandle, SharedString,
-    Subscription, Task, WeakEntity, Window, actions,
+    Action, AnyElement, App, AppContext, AsyncWindowContext, Context, DismissEvent, Entity,
+    EventEmitter, FocusHandle, Focusable, Global, IntoElement, KeyContext, Render, ScrollHandle,
+    SharedString, Subscription, Task, WeakEntity, Window, actions,
 };
 use notifications::status_toast::StatusToast;
 use project::agent_server_store::AllAgentServersSettings;
@@ -15,15 +15,14 @@ use serde::Deserialize;
 use settings::{SettingsStore, VsCodeSettingsSource};
 use std::sync::Arc;
 use ui::{
-    Divider, KeyBinding, ParentElement as _, StatefulInteractiveElement, Vector, VectorName,
-    WithScrollbar as _, prelude::*, rems_from_px,
+    Divider, KeyBinding, ParentElement as _, ProgressBar, SpinnerLabel, StatefulInteractiveElement,
+    Vector, VectorName, WithScrollbar as _, prelude::*, rems_from_px,
 };
 
 pub use workspace::welcome::ShowWelcome;
 use workspace::welcome::WelcomePage;
 use workspace::{
-    AppState, Workspace, WorkspaceId,
-    dock::DockPosition,
+    AppState, DismissDecision, ModalView, Workspace, WorkspaceId,
     item::{Item, ItemEvent},
     notifications::NotifyResultExt as _,
     open_new, register_serializable_item, with_active_or_new_workspace,
@@ -91,7 +90,7 @@ pub fn init(cx: &mut App) {
                     if let Some(existing) = existing {
                         workspace.activate_item(&existing, true, true, window, cx);
                     } else {
-                        let settings_page = Onboarding::new(workspace, cx);
+                        let settings_page = Onboarding::new(workspace, false, cx);
                         workspace.add_item_to_active_pane(
                             Box::new(settings_page),
                             None,
@@ -190,25 +189,34 @@ pub fn show_onboarding_view(app_state: Arc<AppState>, cx: &mut App) -> Task<anyh
         cx,
         |workspace, window, cx| {
             {
-                workspace.toggle_dock(DockPosition::Left, window, cx);
-                let onboarding_page = Onboarding::new(workspace, cx);
+                workspace.close_all_docks(window, cx);
+                let onboarding_page = Onboarding::new(workspace, true, cx);
                 workspace.add_item_to_center(Box::new(onboarding_page.clone()), window, cx);
 
                 window.focus(&onboarding_page.focus_handle(cx), cx);
 
                 cx.notify();
             };
-            let kvp = KeyValueStore::global(cx);
-            db::write_and_log(cx, move || async move {
-                kvp.write_kvp(FIRST_OPEN.to_string(), "false".to_string())
-                    .await
-            });
+            // Android permission and runtime-picker activities can recreate the
+            // workspace while onboarding is still in progress. Do not mark the
+            // first-run flow complete until the user actually presses Finish.
+            #[cfg(not(target_os = "android"))]
+            mark_onboarding_complete(cx);
         },
     )
 }
 
+fn mark_onboarding_complete(cx: &mut App) {
+    let kvp = KeyValueStore::global(cx);
+    db::write_and_log(cx, move || async move {
+        kvp.write_kvp(FIRST_OPEN.to_string(), "false".to_string())
+            .await
+    });
+}
+
 struct Onboarding {
     workspace: WeakEntity<Workspace>,
+    initial_flow: bool,
     focus_handle: FocusHandle,
     user_store: Entity<UserStore>,
     scroll_handle: ScrollHandle,
@@ -221,8 +229,373 @@ struct Onboarding {
     _runtime_subscription: Subscription,
 }
 
+#[cfg(target_os = "android")]
+struct EssentialSetupState {
+    label: SharedString,
+    progress: f32,
+    running: bool,
+    error: Option<SharedString>,
+}
+
+#[cfg(target_os = "android")]
+struct EssentialSetupModal {
+    focus_handle: FocusHandle,
+    state: EssentialSetupState,
+}
+
+#[cfg(target_os = "android")]
+enum EssentialSetupMessage {
+    Step { label: String, progress: f32 },
+    Error(String),
+    Done,
+}
+
+#[cfg(target_os = "android")]
+fn android_essential_setup_done() -> bool {
+    std::path::Path::new("/data/data/com.zdroid/files/usr/.zed/essential-packages-ok-v1").is_file()
+}
+
+#[cfg(target_os = "android")]
+fn run_android_essential_setup(tx: futures::channel::mpsc::UnboundedSender<EssentialSetupMessage>) {
+    use std::{
+        fs,
+        process::Command,
+        thread,
+        time::{Duration, Instant},
+    };
+
+    let prefix = "/data/data/com.zdroid/files/usr";
+    let home = "/data/data/com.zdroid/files/home";
+    let marker = format!("{prefix}/.zed/essential-packages-ok-v1");
+    let path = format!("{prefix}/.zed/bin:{prefix}/bin:{prefix}/bin/applets:/system/bin");
+    let commands = [
+        (
+            "Initialising package system",
+            "\"$PREFIX/.zed/bin/apt\" --fix-broken install -y",
+            0.05,
+            0.15,
+        ),
+        (
+            "Updating package index",
+            "\"$PREFIX/.zed/bin/pkg\" update -y",
+            0.15,
+            0.30,
+        ),
+        (
+            "Upgrading base packages",
+            "DEBIAN_FRONTEND=noninteractive \"$PREFIX/.zed/bin/pkg\" upgrade -y -o Dpkg::Options::=\"--force-confdef\" -o Dpkg::Options::=\"--force-confold\"",
+            0.30,
+            0.80,
+        ),
+        (
+            "Installing Node.js and Git",
+            "\"$PREFIX/.zed/bin/pkg\" install -y nodejs-lts git",
+            0.80,
+            0.95,
+        ),
+    ];
+
+    if android_essential_setup_done() {
+        let _ = tx.unbounded_send(EssentialSetupMessage::Done);
+        return;
+    }
+
+    if !std::path::Path::new(&format!("{prefix}/.zed/bin/pkg")).is_file() {
+        let _ = tx.unbounded_send(EssentialSetupMessage::Error(
+            "Zdroid Bootstrap is not installed yet. Install Bootstrap in Android Runtime first."
+                .to_string(),
+        ));
+        return;
+    }
+
+    for (label, command, start_progress, end_progress) in commands.iter() {
+        let _ = tx.unbounded_send(EssentialSetupMessage::Step {
+            label: (*label).to_string(),
+            progress: *start_progress,
+        });
+
+        let mut child = match Command::new("/system/bin/sh")
+            .arg("-c")
+            .arg(command)
+            .env("PREFIX", prefix)
+            .env("HOME", home)
+            .env("PATH", &path)
+            .env("LD_LIBRARY_PATH", format!("{prefix}/lib"))
+            .current_dir(home)
+            .spawn()
+        {
+            Ok(child) => child,
+            Err(error) => {
+                let _ = tx.unbounded_send(EssentialSetupMessage::Error(format!(
+                    "{label} failed to start: {error}"
+                )));
+                return;
+            }
+        };
+
+        let started_at = Instant::now();
+        let mut heartbeat = 0_u32;
+        let status = loop {
+            match child.try_wait() {
+                Ok(Some(status)) => break Ok(status),
+                Ok(None) => {
+                    thread::sleep(Duration::from_secs(8));
+                    heartbeat += 1;
+                    let elapsed = started_at.elapsed().as_secs();
+                    let progress_span = end_progress - start_progress;
+                    let heartbeat_progress = (*start_progress
+                        + progress_span * 0.85 * (heartbeat as f32 / 30.0))
+                        .min(*end_progress - 0.01);
+                    let _ = tx.unbounded_send(EssentialSetupMessage::Step {
+                        label: format!("{label}... still working ({elapsed}s)"),
+                        progress: heartbeat_progress,
+                    });
+                }
+                Err(error) => break Err(error),
+            }
+        };
+
+        match status {
+            Ok(status) if status.success() => {}
+            Ok(status) => {
+                let _ = tx.unbounded_send(EssentialSetupMessage::Error(format!(
+                    "{label} failed with exit code {}",
+                    status.code().unwrap_or(-1)
+                )));
+                return;
+            }
+            Err(error) => {
+                let _ = tx.unbounded_send(EssentialSetupMessage::Error(format!(
+                    "{label} failed while waiting: {error}"
+                )));
+                return;
+            }
+        }
+
+        let _ = tx.unbounded_send(EssentialSetupMessage::Step {
+            label: format!("{label} completed"),
+            progress: *end_progress,
+        });
+    }
+
+    let _ = tx.unbounded_send(EssentialSetupMessage::Step {
+        label: "Finalising essential packages".to_string(),
+        progress: 1.0,
+    });
+    if let Some(parent) = std::path::Path::new(&marker).parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    match fs::write(&marker, b"ok\n") {
+        Ok(()) => {
+            let _ = tx.unbounded_send(EssentialSetupMessage::Done);
+        }
+        Err(error) => {
+            let _ = tx.unbounded_send(EssentialSetupMessage::Error(format!(
+                "Essential packages installed, but setup marker could not be saved: {error}"
+            )));
+        }
+    }
+}
+
+#[cfg(target_os = "android")]
+impl EssentialSetupModal {
+    fn new(cx: &mut Context<Self>) -> Self {
+        let mut modal = Self {
+            focus_handle: cx.focus_handle(),
+            state: EssentialSetupState {
+                label: "Initialising essential packages".into(),
+                progress: 0.0,
+                running: false,
+                error: None,
+            },
+        };
+        modal.start(cx);
+        modal
+    }
+
+    fn start(&mut self, cx: &mut Context<Self>) {
+        use futures::StreamExt as _;
+
+        if self.state.running {
+            return;
+        }
+
+        let (tx, mut rx) = futures::channel::mpsc::unbounded::<EssentialSetupMessage>();
+        self.state = EssentialSetupState {
+            label: "Initialising essential packages".into(),
+            progress: 0.0,
+            running: true,
+            error: None,
+        };
+        cx.start_background_task(
+            "zdroid-essential-packages",
+            "Initialising essential packages",
+        );
+        cx.background_executor()
+            .spawn(async move { run_android_essential_setup(tx) })
+            .detach();
+
+        cx.spawn(async move |this, cx| {
+            while let Some(message) = rx.next().await {
+                let done = matches!(message, EssentialSetupMessage::Done);
+                let _ = this.update(cx, |this, cx| {
+                    match message {
+                        EssentialSetupMessage::Step { label, progress } => {
+                            cx.start_background_task("zdroid-essential-packages", &label);
+                            this.state = EssentialSetupState {
+                                label: label.into(),
+                                progress,
+                                running: true,
+                                error: None,
+                            };
+                        }
+                        EssentialSetupMessage::Error(error) => {
+                            cx.finish_background_task(
+                                "zdroid-essential-packages",
+                                "Initialising essential packages",
+                                false,
+                            );
+                            this.state = EssentialSetupState {
+                                label: "Essential package setup failed".into(),
+                                progress: 0.0,
+                                running: false,
+                                error: Some(error.into()),
+                            };
+                        }
+                        EssentialSetupMessage::Done => {
+                            cx.finish_background_task(
+                                "zdroid-essential-packages",
+                                "Initialising essential packages",
+                                true,
+                            );
+                            this.state = EssentialSetupState {
+                                label: "Initialisation complete".into(),
+                                progress: 1.0,
+                                running: false,
+                                error: None,
+                            };
+                        }
+                    }
+                    cx.notify();
+                    if done {
+                        cx.emit(DismissEvent);
+                    }
+                });
+            }
+        })
+        .detach();
+    }
+}
+
+#[cfg(target_os = "android")]
+impl Render for EssentialSetupModal {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let is_upgrade = self
+            .state
+            .label
+            .as_ref()
+            .starts_with("Upgrading base packages");
+
+        v_flex()
+            .id("zdroid-essential-setup-dialog")
+            .w(rems_from_px(560.0))
+            .max_w_full()
+            .max_h_full()
+            .min_w_0()
+            .gap_3()
+            .p_4()
+            .track_focus(&self.focus_handle)
+            .child(Headline::new("Setting up Zdroid-B").size(HeadlineSize::Small))
+            .child(
+                Label::new(
+                    "Installing the essential Linux packages used by the terminal and AI agents.",
+                )
+                .size(LabelSize::Small)
+                .color(Color::Muted),
+            )
+            .child(
+                h_flex()
+                    .w_full()
+                    .justify_between()
+                    .gap_3()
+                    .child(
+                        h_flex()
+                            .flex_1()
+                            .min_w_0()
+                            .gap_2()
+                            .when(self.state.running, |this| {
+                                this.child(SpinnerLabel::dots_variant().size(LabelSize::Small))
+                            })
+                            .child(
+                                Label::new(self.state.label.clone())
+                                    .size(LabelSize::Small)
+                                    .truncate(),
+                            ),
+                    )
+                    .child(
+                        Label::new(format!("{:.0}%", self.state.progress * 100.0))
+                            .flex_shrink_0()
+                            .size(LabelSize::XSmall)
+                            .color(Color::Muted),
+                    ),
+            )
+            .child(ProgressBar::new(
+                "zdroid-essential-setup-progress",
+                self.state.progress * 100.0,
+                100.0,
+                cx,
+            ))
+            .when(is_upgrade && self.state.error.is_none(), |this| {
+                this.child(
+                    Label::new(
+                        "The first package upgrade can take around 10 minutes. It will continue in the background and the notification will keep updating.",
+                    )
+                    .size(LabelSize::XSmall)
+                    .color(Color::Muted),
+                )
+            })
+            .when_some(self.state.error.clone(), |this, error| {
+                this.child(
+                    v_flex()
+                        .gap_2()
+                        .child(
+                            Label::new(error)
+                                .size(LabelSize::XSmall)
+                                .color(Color::Error),
+                        )
+                        .child(
+                            Button::new("retry-essential-setup", "Retry")
+                                .style(ButtonStyle::Filled)
+                                .on_click(cx.listener(|this, _, _, cx| this.start(cx))),
+                        ),
+                )
+            })
+    }
+}
+
+#[cfg(target_os = "android")]
+impl ModalView for EssentialSetupModal {
+    fn on_before_dismiss(&mut self, _: &mut Window, _: &mut Context<Self>) -> DismissDecision {
+        DismissDecision::Dismiss(!self.state.running)
+    }
+
+    fn show_close_button(&self) -> bool {
+        !self.state.running
+    }
+}
+
+#[cfg(target_os = "android")]
+impl Focusable for EssentialSetupModal {
+    fn focus_handle(&self, _: &App) -> FocusHandle {
+        self.focus_handle.clone()
+    }
+}
+
+#[cfg(target_os = "android")]
+impl EventEmitter<DismissEvent> for EssentialSetupModal {}
+
 impl Onboarding {
-    fn new(workspace: &Workspace, cx: &mut App) -> Entity<Self> {
+    fn new(workspace: &Workspace, initial_flow: bool, cx: &mut App) -> Entity<Self> {
         let font_family_cache = theme::FontFamilyCache::global(cx);
 
         let installed_agents = cx
@@ -271,22 +644,45 @@ impl Onboarding {
 
             Self {
                 workspace: workspace.weak_handle(),
+                initial_flow,
                 focus_handle: cx.focus_handle(),
                 scroll_handle: ScrollHandle::new(),
                 user_store: workspace.user_store().clone(),
                 _settings_subscription: cx
                     .observe_global::<SettingsStore>(move |_, cx| cx.notify()),
-                _runtime_subscription: cx
-                    .observe_global::<crate::runtime_global::ActiveRuntime>(
-                        move |_, cx| cx.notify(),
-                    ),
+                _runtime_subscription: cx.observe_global::<crate::runtime_global::ActiveRuntime>(
+                    move |_, cx| cx.notify(),
+                ),
             }
         })
     }
 
-    fn on_finish(_: &Finish, _: &mut Window, cx: &mut App) {
+    #[cfg(not(target_os = "android"))]
+    fn handle_finish(&mut self, _: &Finish, _: &mut Window, cx: &mut Context<Self>) {
         telemetry::event!("Finish Setup");
         go_to_welcome_page(cx);
+    }
+
+    #[cfg(target_os = "android")]
+    fn handle_finish(&mut self, _: &Finish, window: &mut Window, cx: &mut Context<Self>) {
+        telemetry::event!("Finish Setup");
+
+        if self.initial_flow {
+            mark_onboarding_complete(cx);
+        }
+
+        if android_essential_setup_done() {
+            go_to_welcome_page(cx);
+            return;
+        }
+
+        let workspace = self.workspace.clone();
+        go_to_welcome_page(cx);
+        if let Some(workspace) = workspace.upgrade() {
+            workspace.update(cx, |workspace, cx| {
+                workspace.toggle_modal(window, cx, |_, cx| EssentialSetupModal::new(cx));
+            });
+        }
     }
 
     fn handle_sign_in(&mut self, _: &SignIn, window: &mut Window, cx: &mut Context<Self>) {
@@ -313,8 +709,8 @@ impl Onboarding {
 }
 
 impl Render for Onboarding {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        div()
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let root = div()
             .image_cache(gpui::retain_all("onboarding-page"))
             .key_context({
                 let mut ctx = KeyContext::new_with_defaults();
@@ -324,8 +720,18 @@ impl Render for Onboarding {
             })
             .track_focus(&self.focus_handle)
             .size_full()
-            .bg(cx.theme().colors().editor_background)
-            .on_action(Self::on_finish)
+            .bg(cx.theme().colors().editor_background);
+
+        let waiting_for_initial_runtime = cfg!(target_os = "android")
+            && self.initial_flow
+            && cx
+                .try_global::<crate::runtime_global::ActiveRuntime>()
+                .is_none_or(|runtime| runtime.current.is_none());
+        if waiting_for_initial_runtime {
+            return root.into_any_element();
+        }
+
+        root.on_action(cx.listener(Self::handle_finish))
             .on_action(cx.listener(Self::handle_sign_in))
             .on_action(Self::handle_open_account)
             .on_action(cx.listener(|_, _: &menu::SelectNext, window, cx| {
@@ -350,11 +756,27 @@ impl Render for Onboarding {
                             .mx_auto()
                             .p_12()
                             .gap_6()
-                            .child(
+                            .child({
+                                let compact = window.viewport_size().width < px(560.0);
+                                let finish_button = Button::new("finish_setup", "Finish Setup")
+                                    .style(ButtonStyle::Filled)
+                                    .size(ButtonSize::Medium)
+                                    .when(compact, |button| button.full_width())
+                                    .when(!compact, |button| button.width(rems_from_px(200.)))
+                                    .key_binding(KeyBinding::for_action_in(
+                                        &Finish,
+                                        &self.focus_handle,
+                                        cx,
+                                    ))
+                                    .on_click(|_, window, cx| {
+                                        window.dispatch_action(Finish.boxed_clone(), cx);
+                                    });
+
                                 h_flex()
                                     .w_full()
                                     .gap_4()
                                     .justify_between()
+                                    .when(compact, |this| this.flex_col().items_start().gap_3())
                                     .child(
                                         h_flex()
                                             .gap_4()
@@ -373,26 +795,14 @@ impl Render for Onboarding {
                                                     ),
                                             ),
                                     )
-                                    .child({
-                                        Button::new("finish_setup", "Finish Setup")
-                                            .style(ButtonStyle::Filled)
-                                            .size(ButtonSize::Medium)
-                                            .width(rems_from_px(200.))
-                                            .key_binding(KeyBinding::for_action_in(
-                                                &Finish,
-                                                &self.focus_handle,
-                                                cx,
-                                            ))
-                                            .on_click(|_, window, cx| {
-                                                window.dispatch_action(Finish.boxed_clone(), cx);
-                                            })
-                                    }),
-                            )
+                                    .child(finish_button)
+                            })
                             .child(Divider::horizontal().color(ui::DividerColor::BorderVariant))
                             .child(self.render_page(cx)),
                     )
                     .track_scroll(&self.scroll_handle),
             )
+            .into_any_element()
     }
 }
 
@@ -419,6 +829,10 @@ impl Item for Onboarding {
         false
     }
 
+    fn full_workspace(&self) -> bool {
+        cfg!(target_os = "android") && self.initial_flow
+    }
+
     fn can_split(&self) -> bool {
         true
     }
@@ -431,14 +845,13 @@ impl Item for Onboarding {
     ) -> Task<Option<Entity<Self>>> {
         Task::ready(Some(cx.new(|cx| Onboarding {
             workspace: self.workspace.clone(),
+            initial_flow: false,
             user_store: self.user_store.clone(),
             scroll_handle: ScrollHandle::new(),
             focus_handle: cx.focus_handle(),
             _settings_subscription: cx.observe_global::<SettingsStore>(move |_, cx| cx.notify()),
-            _runtime_subscription: cx
-                .observe_global::<crate::runtime_global::ActiveRuntime>(
-                    move |_, cx| cx.notify(),
-                ),
+            _runtime_subscription:
+                cx.observe_global::<crate::runtime_global::ActiveRuntime>(move |_, cx| cx.notify()),
         })))
     }
 
@@ -633,7 +1046,7 @@ impl workspace::SerializableItem for Onboarding {
         let db = persistence::OnboardingPagesDb::global(cx);
         window.spawn(cx, async move |cx| {
             if let Some(_) = db.get_onboarding_page(item_id, workspace_id)? {
-                workspace.update(cx, |workspace, cx| Onboarding::new(workspace, cx))
+                workspace.update(cx, |workspace, cx| Onboarding::new(workspace, false, cx))
             } else {
                 Err(anyhow::anyhow!("No onboarding page to deserialize"))
             }

@@ -1,9 +1,9 @@
 use gpui::{
     AnyView, DismissEvent, Entity, EventEmitter, FocusHandle, Focusable as _, ManagedView,
-    MouseButton, Subscription, hsla, relative,
+    MouseButton, StatefulInteractiveElement, Subscription, hsla,
 };
 use ui::prelude::*;
-use ui::{IconButton, IconName, Tooltip};
+use ui::{IconButton, IconName, Tooltip, vh, vw};
 
 #[derive(Debug)]
 pub enum DismissDecision {
@@ -27,6 +27,14 @@ pub trait ModalView: ManagedView {
     fn render_bare(&self) -> bool {
         false
     }
+
+    fn show_close_button(&self) -> bool {
+        true
+    }
+
+    fn android_full_size(&self) -> bool {
+        false
+    }
 }
 
 trait ModalViewHandle {
@@ -34,6 +42,8 @@ trait ModalViewHandle {
     fn view(&self) -> AnyView;
     fn fade_out_background(&self, cx: &mut App) -> bool;
     fn render_bare(&self, cx: &mut App) -> bool;
+    fn show_close_button(&self, cx: &mut App) -> bool;
+    fn android_full_size(&self, cx: &mut App) -> bool;
 }
 
 impl<V: ModalView> ModalViewHandle for Entity<V> {
@@ -51,6 +61,14 @@ impl<V: ModalView> ModalViewHandle for Entity<V> {
 
     fn render_bare(&self, cx: &mut App) -> bool {
         self.read(cx).render_bare()
+    }
+
+    fn show_close_button(&self, cx: &mut App) -> bool {
+        self.read(cx).show_close_button()
+    }
+
+    fn android_full_size(&self, cx: &mut App) -> bool {
+        self.read(cx).android_full_size()
     }
 }
 
@@ -203,6 +221,9 @@ impl Render for ModalLayer {
         }
 
         if cfg!(target_os = "android") {
+            let render_bare = active_modal.modal.render_bare(cx);
+            let show_close_button = active_modal.modal.show_close_button(cx);
+            let android_full_size = active_modal.modal.android_full_size(cx);
             return div()
                 .absolute()
                 .size_full()
@@ -231,38 +252,51 @@ impl Render for ModalLayer {
                             div()
                                 .id("zdroid-floating-dialog")
                                 .relative()
-                                .w(relative(0.9))
-                                .h(relative(0.9))
-                                .min_w_0()
-                                .min_h_0()
-                                .overflow_hidden()
-                                .rounded_md()
-                                .border_1()
-                                .border_color(cx.theme().colors().border)
-                                .bg(cx.theme().colors().elevated_surface_background)
+                                // Use viewport lengths here instead of percentages of an
+                                // intrinsically-sized parent. A size-full modal child can
+                                // otherwise create a circular layout and collapse to a line.
+                                .min_w(vw(0.8, window))
+                                .max_w(vw(0.9, window))
+                                .min_h(vh(0.5, window))
+                                .max_h(vh(0.9, window))
+                                .when(android_full_size, |this| {
+                                    this.w(vw(0.9, window)).h(vh(0.9, window))
+                                })
+                                // Let modal content determine the height between the
+                                // 50% floor and 90% ceiling. Scrolling on this bounded
+                                // dialog (rather than on a 50%-minimum inner child)
+                                // prevents long views from getting stuck at the floor.
+                                .overflow_y_scroll()
+                                .when(!render_bare, |this| {
+                                    this.rounded_md()
+                                        .border_1()
+                                        .border_color(cx.theme().colors().border)
+                                        .bg(cx.theme().colors().elevated_surface_background)
+                                })
                                 .occlude()
                                 .child(
                                     div()
-                                        .size_full()
+                                        .w_full()
                                         .min_w_0()
-                                        .min_h_0()
-                                        .overflow_hidden()
+                                        .when(android_full_size, |this| this.h_full().min_h_0())
                                         .child(active_modal.modal.view()),
                                 )
-                                .child(
-                                    div().absolute().top_2().right_2().child(
-                                        IconButton::new(
-                                            "close-zdroid-floating-dialog",
-                                            IconName::Close,
-                                        )
-                                        .tooltip(Tooltip::text("Close"))
-                                        .on_click(
-                                            cx.listener(|this, _, window, cx| {
-                                                this.hide_modal(window, cx);
-                                            }),
+                                .when(show_close_button, |this| {
+                                    this.child(
+                                        div().absolute().top_2().right_2().child(
+                                            IconButton::new(
+                                                "close-zdroid-floating-dialog",
+                                                IconName::Close,
+                                            )
+                                            .tooltip(Tooltip::text("Close"))
+                                            .on_click(
+                                                cx.listener(|this, _, window, cx| {
+                                                    this.hide_modal(window, cx);
+                                                }),
+                                            ),
                                         ),
-                                    ),
-                                )
+                                    )
+                                })
                                 .on_mouse_down(MouseButton::Left, |_, _, cx| {
                                     cx.stop_propagation();
                                 })

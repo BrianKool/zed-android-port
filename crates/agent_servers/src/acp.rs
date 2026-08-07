@@ -1007,16 +1007,24 @@ impl AcpConnection {
                 "env": {},
             });
             let meta = acp::Meta::from_iter([("terminal-auth".to_string(), value)]);
-            let mut methods = vec![acp::AuthMethod::Agent(
-                acp::AuthMethodAgent::new("zdroid-chatgpt-login", "ChatGPT")
+            vec![acp::AuthMethod::Agent(
+                acp::AuthMethodAgent::new("zdroid-chatgpt-login", "Subscription")
                     .description("Sign in with your ChatGPT subscription in the Zdroid-B terminal")
                     .meta(meta),
-            )];
-            methods.extend(response.auth_methods.into_iter().filter(|method| {
-                let name = method.name().to_ascii_lowercase();
-                !name.contains("chatgpt") && !name.contains("website")
-            }));
-            methods
+            )]
+        } else if cfg!(target_os = "android") && agent_id.0.as_ref() == "claude-acp" {
+            let value = serde_json::json!({
+                "label": "Sign in to Claude",
+                "command": "/data/data/com.zdroid/files/usr/.zed/bin/claude",
+                "args": [],
+                "env": {},
+            });
+            let meta = acp::Meta::from_iter([("terminal-auth".to_string(), value)]);
+            vec![acp::AuthMethod::Agent(
+                acp::AuthMethodAgent::new("zdroid-claude-login", "Subscription")
+                    .description("Sign in with your Claude subscription in the Zdroid-B terminal")
+                    .meta(meta),
+            )]
         } else {
             response.auth_methods
         };

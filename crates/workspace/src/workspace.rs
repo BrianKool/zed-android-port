@@ -8501,6 +8501,9 @@ impl Render for Workspace {
             .map(|(_, notification)| notification.entity_id())
             .collect::<Vec<_>>();
         let bottom_dock_layout = WorkspaceSettings::get_global(cx).bottom_dock_layout;
+        let full_workspace = self
+            .active_item(cx)
+            .is_some_and(|item| item.full_workspace(cx));
 
         let pane_render_context = PaneRenderContext {
             follower_states: &self.follower_states,
@@ -8522,7 +8525,9 @@ impl Render for Workspace {
             .items_start()
             .text_color(colors.text)
             .overflow_hidden()
-            .children(self.titlebar_item.clone())
+            .when(!full_workspace, |this| {
+                this.children(self.titlebar_item.clone())
+            })
             .on_modifiers_changed(move |_, _, cx| {
                 for &id in &notification_entities {
                     cx.notify(id);
@@ -8897,7 +8902,7 @@ impl Render for Workspace {
                             }))
                             .children(self.render_notifications(window, cx)),
                     )
-                    .when(self.status_bar_visible(cx), |parent| {
+                    .when(!full_workspace && self.status_bar_visible(cx), |parent| {
                         parent.child(self.status_bar.clone())
                     })
                     .child(self.toast_layer.clone()),

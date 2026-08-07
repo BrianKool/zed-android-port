@@ -181,12 +181,22 @@ impl LanguageModelRegistry {
 
     pub fn providers(&self) -> Vec<Arc<dyn LanguageModelProvider>> {
         let zed_provider_id = LanguageModelProviderId("zed.dev".into());
+        #[cfg(target_os = "android")]
+        let local_provider_id = LanguageModelProviderId("zdroid-local".into());
         let mut providers = Vec::with_capacity(self.providers.len());
         if let Some(provider) = self.providers.get(&zed_provider_id) {
             providers.push(provider.clone());
         }
+        #[cfg(target_os = "android")]
+        if let Some(provider) = self.providers.get(&local_provider_id) {
+            providers.push(provider.clone());
+        }
         providers.extend(self.providers.values().filter_map(|p| {
-            if p.id() != zed_provider_id {
+            let is_pinned_provider = p.id() == zed_provider_id;
+            #[cfg(target_os = "android")]
+            let is_pinned_provider = is_pinned_provider || p.id() == local_provider_id;
+
+            if !is_pinned_provider {
                 Some(p.clone())
             } else {
                 None

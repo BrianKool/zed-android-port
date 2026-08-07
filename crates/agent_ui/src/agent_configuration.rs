@@ -1191,11 +1191,7 @@ impl AgentConfiguration {
             )
         };
 
-        let restart_button = matches!(
-            connection_status,
-            AgentConnectionStatus::Connected | AgentConnectionStatus::Connecting
-        )
-        .then(|| {
+        let restart_button = {
             IconButton::new(
                 SharedString::from(format!("restart-{}", id)),
                 IconName::RotateCw,
@@ -1203,7 +1199,7 @@ impl AgentConfiguration {
             .disabled(connection_status == AgentConnectionStatus::Connecting)
             .icon_color(Color::Muted)
             .icon_size(IconSize::Small)
-            .tooltip(Tooltip::text("Restart Agent Connection"))
+            .tooltip(Tooltip::text("Refresh Agent Connection"))
             .on_click(cx.listener({
                 let agent = agent.clone();
                 move |this, _, _window, cx| {
@@ -1214,7 +1210,7 @@ impl AgentConfiguration {
                     });
                 }
             }))
-        });
+        };
 
         let uninstall_button = match source {
             ExternalAgentSource::Registry => {
@@ -1284,7 +1280,7 @@ impl AgentConfiguration {
         AiSettingItem::new(id, display_name, status, source_kind)
             .icon(icon)
             .when_some(running_version, |this, version| this.detail_label(version))
-            .when_some(restart_button, |this, button| this.action(button))
+            .action(restart_button)
             .when_some(uninstall_button, |this, button| this.action(button))
     }
 }
