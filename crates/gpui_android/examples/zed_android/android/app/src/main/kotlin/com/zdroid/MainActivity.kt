@@ -14,6 +14,7 @@ import android.os.Handler
 import android.os.Looper
 import android.os.Process
 import android.provider.DocumentsContract
+import android.provider.OpenableColumns
 import android.util.Log
 import android.view.InputDevice
 import android.view.KeyEvent
@@ -24,6 +25,10 @@ import android.view.ViewGroup
 import android.view.animation.AccelerateDecelerateInterpolator
 import android.widget.FrameLayout
 import android.widget.ImageView
+import android.widget.LinearLayout
+import android.widget.ProgressBar
+import android.widget.TextView
+import android.widget.Toast
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import androidx.core.content.FileProvider
@@ -32,6 +37,7 @@ import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import com.google.androidgamesdk.GameActivity
 import java.io.File
+import java.io.FileOutputStream
 
 /// SAF flows go through legacy `startActivityForResult` instead of
 /// `ActivityResultLauncher` because `ActivityResultRegistry` silently
@@ -51,6 +57,125 @@ import java.io.File
 class MainActivity : GameActivity(), ImeHost {
     /// MainActivity is always gpui's primary window — id 0.
     override val imeWindowId: Long = 0L
+
+    @Volatile
+    private var storagePermissionRequestInFlight = false
+    @Volatile
+    private var initialPermissionFlowSettled = false
+    private var initialNotificationStage = 0
+
+    @Suppress("unused")
+    fun startAgentBackgroundTask(taskId: String, description: String) {
+        runOnUiThread {
+            requestAgentNotificationPermissionIfNeeded()
+            AgentForegroundService.startTask(this, taskId, description)
+        }
+    }
+
+    @Suppress("unused")
+    fun finishAgentBackgroundTask(taskId: String, description: String, successful: Boolean) {
+        runOnUiThread {
+            AgentForegroundService.finishTask(this, taskId, description, successful)
+        }
+    }
+
+    @Suppress("unused")
+    fun setBackgroundExecutionEnabled(enabled: Boolean) {
+        runOnUiThread {
+            if (enabled && !initialPermissionFlowSettled) {
+                AgentForegroundService.persistBackgroundExecutionEnabled(this, true)
+            } else {
+                AgentForegroundService.setBackgroundExecutionEnabled(this, enabled)
+            }
+        }
+    }
+
+    private fun startBackgroundExecutionIfEnabled() {
+        if (AgentForegroundService.isBackgroundExecutionEnabled(this)) {
+            AgentForegroundService.setBackgroundExecutionEnabled(this, true)
+        }
+    }
+
+    private fun requestAgentNotificationPermissionIfNeeded() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) return
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) ==
+            PackageManager.PERMISSION_GRANTED) return
+
+        if (!initialPermissionFlowSettled) {
+            Log.i(TAG, "Agent notification permission is covered by initial permission flow")
+            return
+        }
+
+        val preferences = getSharedPreferences("zdroid_permissions", Context.MODE_PRIVATE)
+        if (preferences.getBoolean("asked_agent_notifications", false)) return
+        preferences.edit().putBoolean("asked_agent_notifications", true).apply()
+        ActivityCompat.requestPermissions(
+            this,
+            arrayOf(Manifest.permission.POST_NOTIFICATIONS),
+            REQ_NOTIFICATION_PERMISSION,
+        )
+    }
+
+    private fun continueInitialPermissionFlow() {
+        storagePermissionRequestInFlight = false
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU ||
+            ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) ==
+            PackageManager.PERMISSION_GRANTED
+        ) {
+            initialPermissionFlowSettled = true
+            Log.i(TAG, "Initial permission flow settled without notification prompt")
+            startBackgroundExecutionIfEnabled()
+            return
+        }
+
+        val preferences = getSharedPreferences("zdroid_permissions", Context.MODE_PRIVATE)
+        if (preferences.getBoolean("asked_agent_notifications", false)) {
+            initialPermissionFlowSettled = true
+            Log.i(TAG, "Initial permission flow settled; notification permission was already asked")
+            startBackgroundExecutionIfEnabled()
+            return
+        }
+        preferences.edit().putBoolean("asked_agent_notifications", true).apply()
+        initialNotificationStage = 1
+        Log.i(TAG, "Initial permission flow waiting to create notification channels")
+        if (hasWindowFocus()) {
+            beginLegacyNotificationPermissionPrompt()
+        }
+    }
+
+    private fun beginLegacyNotificationPermissionPrompt() {
+        if (initialNotificationStage != 1) return
+        initialNotificationStage = 2
+        Log.i(TAG, "Initial permission flow creating notification channels")
+        AgentForegroundService.ensureNotificationChannels(this)
+
+        // targetSdk <= 32 gives prompt timing to Android. If this device does
+        // not display a dialog (already answered or OEM policy), do not leave
+        // first-run setup blocked forever.
+        splashHandler.postDelayed({
+            if (initialNotificationStage == 2) {
+                initialNotificationStage = 0
+                initialPermissionFlowSettled = true
+                Log.i(TAG, "Initial permission flow settled; no notification dialog appeared")
+                startBackgroundExecutionIfEnabled()
+            }
+        }, 1500L)
+    }
+
+    @Suppress("unused") // called from Rust via JNI
+    fun isInitialPermissionFlowSettled(): Boolean = initialPermissionFlowSettled
+
+    @Suppress("unused")
+    fun writeCredential(url: String, username: String, password: ByteArray): Boolean =
+        SecureCredentialStore.write(this, url, username, password)
+
+    @Suppress("unused")
+    fun readCredential(url: String): ByteArray? =
+        SecureCredentialStore.read(this, url)
+
+    @Suppress("unused")
+    fun deleteCredential(url: String): Boolean =
+        SecureCredentialStore.delete(this, url)
     /// Splash overlay shown from `super.onCreate` until the gpui-side
     /// flips `nativeIsZedReady` after first paint. Sits above the
     /// GameActivity `SurfaceView` so the animated Zdroid sigil is
@@ -60,12 +185,28 @@ class MainActivity : GameActivity(), ImeHost {
     private var splashOverlay: FrameLayout? = null
     private val splashHandler = Handler(Looper.getMainLooper())
     private var splashRemoved: Boolean = false
+    private var importOverlay: FrameLayout? = null
+    private var openTreeImportsForeignProviders: Boolean = false
 
     /// Focusable invisible view that owns the IME `InputConnection`.
     /// Installed in `onCreate`. Rust signals show/hide via JNI calls
     /// to `showIme()` / `hideIme()` on this Activity; those methods
     /// requestFocus on the host and invoke `InputMethodManager`.
     private var imeHostView: ImeHostView? = null
+    private var selectionOverlay: SelectionOverlayController? = null
+
+    @Suppress("unused")
+    fun updateSelectionUi(
+        visible: Boolean,
+        startX: Float,
+        startY: Float,
+        endX: Float,
+        endY: Float,
+    ) {
+        runOnUiThread {
+            selectionOverlay?.update(visible, startX, startY, endX, endY)
+        }
+    }
 
     /// Programming extras row (Esc/Tab/Ctrl/Alt/arrows). Inflated
     /// lazily on first enable so we don't pay the layout cost when
@@ -119,6 +260,7 @@ class MainActivity : GameActivity(), ImeHost {
     /// flag the IME would receive show / focus events 60+ times per
     /// second and flicker visibly.
     private var imeShown: Boolean = false
+    private var textInputActive: Boolean = false
 
     /// Set right before we call `imm.hideSoftInputFromWindow` from
     /// our own code (hideIme / toggleIme). The WindowInsets listener
@@ -158,14 +300,16 @@ class MainActivity : GameActivity(), ImeHost {
     }
 
     /// Reconcile the `ExtraKeysView`'s presence in the content view
-    /// against the two gates: the user setting
-    /// (`programmingExtrasRowEnabled`) and the OS-side IME state
-    /// (`imeShown`). Called whenever either input changes. Inflates
+    /// against the focused input kind, the user setting, and the
+    /// OS-side IME state. Terminal input always gets the Termux-style
+    /// row; the setting controls whether editors get it too. Inflates
     /// the view lazily on first enable, then toggles visibility on
     /// subsequent changes, then removes the view when the setting
     /// is turned off entirely so we don't pay the layout cost.
     private fun updateExtrasRowVisibility() {
-        val shouldShow = programmingExtrasRowEnabled && imeShown
+        val extrasEnabledForTarget =
+            currentImeMode == ImeInputMode.TERMINAL || programmingExtrasRowEnabled
+        val shouldShow = extrasEnabledForTarget && imeShown
         if (shouldShow) {
             if (extraKeysView == null) {
                 val view = ExtraKeysView(this) { pending, locked ->
@@ -182,8 +326,12 @@ class MainActivity : GameActivity(), ImeHost {
                 extraKeysView = view
             }
             extraKeysView?.visibility = View.VISIBLE
+            extraKeysView?.post {
+                applyImeViewportInset(viewportBottomInset(lastImeInsetBottom))
+            }
         } else {
             extraKeysView?.visibility = View.GONE
+            applyImeViewportInset(lastImeInsetBottom)
         }
     }
 
@@ -197,7 +345,7 @@ class MainActivity : GameActivity(), ImeHost {
         runOnUiThread {
             if (programmingExtrasRowEnabled == enabled) return@runOnUiThread
             programmingExtrasRowEnabled = enabled
-            if (!enabled) {
+            if (!enabled && currentImeMode != ImeInputMode.TERMINAL) {
                 // Tear down completely so the disabled state is also
                 // free of layout overhead, not just visually hidden.
                 extraKeysView?.let { (it.parent as? android.view.ViewGroup)?.removeView(it) }
@@ -218,32 +366,38 @@ class MainActivity : GameActivity(), ImeHost {
     @Suppress("unused")
     fun showIme() {
         runOnUiThread {
-            val host = imeHostView ?: run {
-                Log.w("zdroid_ime", "showIme: imeHostView is null, skipping")
-                return@runOnUiThread
-            }
-            if (imeManuallyDismissed) {
-                Log.i("zdroid_ime", "showIme suppressed (user dismissed)")
-                return@runOnUiThread
-            }
-            Log.i(
-                "zdroid_ime",
-                "showIme called imeShown=$imeShown hostFocused=${host.isFocused}"
-            )
-            if (imeShown) return@runOnUiThread
-            if (!host.isFocused) host.requestFocus()
-            // Use WindowInsetsControllerCompat for the show path too
-            // (matches hide). `imm.showSoftInput` requires focused
-            // text-input AND has a documented "first call silently
-            // fails" race when window state is mid-transition — the
-            // observed symptom where toggleIme:showing was followed
-            // by WindowInsets immediately reporting IME hidden because
-            // imm.show didn't actually take effect. InsetsController
-            // routes through the OS-level inset animation directly.
-            programmaticShowPending = true
-            androidx.core.view.WindowInsetsControllerCompat(window, window.decorView)
-                .show(androidx.core.view.WindowInsetsCompat.Type.ime())
-            setImeShown(true)
+            textInputActive = true
+            requestImeShow(clearManualDismiss = false)
+        }
+    }
+
+    @Suppress("unused")
+    fun reassertIme() {
+        runOnUiThread {
+            textInputActive = true
+            requestImeShow(clearManualDismiss = true)
+        }
+    }
+
+    private fun requestImeShow(clearManualDismiss: Boolean, retry: Boolean = false) {
+        val host = imeHostView ?: return
+        if (clearManualDismiss) setImeManuallyDismissed(false)
+        if (imeManuallyDismissed || imeShown || !textInputActive || !hasWindowFocus()) return
+
+        if (!host.isFocused) host.requestFocus()
+        val imm = getSystemService(Context.INPUT_METHOD_SERVICE)
+            as android.view.inputmethod.InputMethodManager
+        programmaticShowPending = true
+        androidx.core.view.WindowInsetsControllerCompat(window, window.decorView)
+            .show(androidx.core.view.WindowInsetsCompat.Type.ime())
+        imm.showSoftInput(host, android.view.inputmethod.InputMethodManager.SHOW_IMPLICIT)
+
+        if (!retry) {
+            host.postDelayed({
+                if (!imeShown && textInputActive && hasWindowFocus() && !imeManuallyDismissed) {
+                    requestImeShow(clearManualDismiss = false, retry = true)
+                }
+            }, 180L)
         }
     }
 
@@ -252,6 +406,7 @@ class MainActivity : GameActivity(), ImeHost {
     @Suppress("unused")
     fun hideIme() {
         runOnUiThread {
+            textInputActive = false
             Log.i("zdroid_ime", "hideIme called imeShown=$imeShown")
             if (!imeShown) return@runOnUiThread
             programmaticHidePending = true
@@ -296,10 +451,9 @@ class MainActivity : GameActivity(), ImeHost {
     @Suppress("unused")
     fun toggleIme() {
         runOnUiThread {
-            val host = imeHostView ?: return@runOnUiThread
-            val imm = getSystemService(Context.INPUT_METHOD_SERVICE)
-                as android.view.inputmethod.InputMethodManager
+            if (imeHostView == null) return@runOnUiThread
             if (imeShown) {
+                textInputActive = false
                 Log.i("zdroid_ime", "toggleIme: hiding (manual dismiss)")
                 programmaticHidePending = true
                 // Modern hide path — see hideIme rationale. Sidesteps
@@ -311,10 +465,8 @@ class MainActivity : GameActivity(), ImeHost {
                 setImeManuallyDismissed(true)
             } else {
                 Log.i("zdroid_ime", "toggleIme: showing (clearing manual-dismiss)")
-                if (!host.isFocused) host.requestFocus()
-                imm.showSoftInput(host, 0)
-                setImeShown(true)
-                setImeManuallyDismissed(false)
+                textInputActive = true
+                requestImeShow(clearManualDismiss = true)
             }
         }
     }
@@ -382,7 +534,13 @@ class MainActivity : GameActivity(), ImeHost {
                 "zdroid_ime",
                 "restartImeForTarget: switching mode ${currentImeMode} -> $modeId"
             )
+            if (currentImeMode == ImeInputMode.TERMINAL && modeId != ImeInputMode.TERMINAL) {
+                extraKeysView?.clearModifiers()
+                extraKeysPendingMeta = 0
+                extraKeysLockedMeta = 0
+            }
             currentImeMode = modeId
+            updateExtrasRowVisibility()
             // Focus moved to a different input target — fresh
             // auto-show budget. Any prior manual dismiss applied
             // to the outgoing target, not this one.
@@ -477,6 +635,7 @@ class MainActivity : GameActivity(), ImeHost {
         val host = ImeHostView(this)
         addContentView(host, android.view.ViewGroup.LayoutParams(1, 1))
         imeHostView = host
+        selectionOverlay = SelectionOverlayController(this, imeWindowId)
 
         // Detect when the IME is dismissed by the user (Back press,
         // swipe-down on the keyboard) rather than programmatically by
@@ -509,6 +668,8 @@ class MainActivity : GameActivity(), ImeHost {
                         "zdroid_ime",
                         "WindowInsets: IME hidden (programmatic, keeping manual-dismiss flag)"
                     )
+                } else if (!hasWindowFocus()) {
+                    Log.i("zdroid_ime", "WindowInsets: IME hidden while window inactive")
                 } else {
                     Log.i(
                         "zdroid_ime",
@@ -533,6 +694,7 @@ class MainActivity : GameActivity(), ImeHost {
             // row so it floats just above the keyboard, following the
             // IME show/hide animation smoothly.
             extraKeysView?.translationY = -imeBottom.toFloat()
+            applyImeViewportInset(viewportBottomInset(imeBottom))
 
             lastImeInsetBottom = imeBottom
             insets
@@ -737,6 +899,31 @@ class MainActivity : GameActivity(), ImeHost {
         return null
     }
 
+    /** Include the Termux-style extras row in the area GPUI must avoid. */
+    private fun viewportBottomInset(imeBottom: Int): Int {
+        if (imeBottom <= 0) return 0
+        val extrasHeight = extraKeysView
+            ?.takeIf { it.visibility == View.VISIBLE }
+            ?.height
+            ?: 0
+        return imeBottom + extrasHeight
+    }
+
+    /** Keep the GPUI surface above the soft keyboard and extras row. */
+    private fun applyImeViewportInset(bottomInset: Int) {
+        val surface = findSurfaceView(window.decorView) ?: return
+        val params = surface.layoutParams
+        if (params is ViewGroup.MarginLayoutParams) {
+            if (params.bottomMargin == bottomInset) return
+            params.bottomMargin = bottomInset
+            surface.layoutParams = params
+            surface.requestLayout()
+            Log.i("zdroid_ime", "GPUI viewport bottom inset=$bottomInset")
+        } else {
+            Log.w("zdroid_ime", "SurfaceView has no margin layout params; IME resize skipped")
+        }
+    }
+
     /// Attach an animated splash overlay above the GameActivity
     /// SurfaceView. Stays visible until the gpui-Rust side flips
     /// `nativeIsZedReady` (first paint completed), at which point
@@ -805,6 +992,83 @@ class MainActivity : GameActivity(), ImeHost {
                 splashOverlay = null
             }
             .start()
+    }
+
+    private fun showProjectImportOverlay() {
+        runOnUiThread {
+            if (importOverlay != null) return@runOnUiThread
+            val density = resources.displayMetrics.density
+            val overlay = FrameLayout(this).apply {
+                isClickable = true
+                setBackgroundColor(0x66000000)
+                layoutParams = ViewGroup.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                )
+            }
+            val panel = LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                gravity = android.view.Gravity.CENTER
+                setPadding(
+                    (24 * density).toInt(),
+                    (22 * density).toInt(),
+                    (24 * density).toInt(),
+                    (22 * density).toInt(),
+                )
+                background = android.graphics.drawable.GradientDrawable().apply {
+                    setColor(0xFF2F3136.toInt())
+                    cornerRadius = 10 * density
+                    setStroke((1 * density).toInt(), 0xFF4A4D55.toInt())
+                }
+            }
+            val spinner = ProgressBar(this).apply {
+                isIndeterminate = true
+            }
+            val label = TextView(this).apply {
+                text = "Importing project into Zdroid..."
+                setTextColor(0xFFE6E6E6.toInt())
+                textSize = 16f
+                gravity = android.view.Gravity.CENTER
+            }
+            panel.addView(
+                spinner,
+                LinearLayout.LayoutParams(
+                    (44 * density).toInt(),
+                    (44 * density).toInt(),
+                ).apply {
+                    bottomMargin = (14 * density).toInt()
+                    gravity = android.view.Gravity.CENTER_HORIZONTAL
+                },
+            )
+            panel.addView(
+                label,
+                LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.WRAP_CONTENT,
+                    LinearLayout.LayoutParams.WRAP_CONTENT,
+                ),
+            )
+            overlay.addView(
+                panel,
+                FrameLayout.LayoutParams(
+                    FrameLayout.LayoutParams.WRAP_CONTENT,
+                    FrameLayout.LayoutParams.WRAP_CONTENT,
+                ).apply {
+                    gravity = android.view.Gravity.CENTER
+                    leftMargin = (20 * density).toInt()
+                    rightMargin = (20 * density).toInt()
+                },
+            )
+            (window.decorView as? ViewGroup)?.addView(overlay)
+            importOverlay = overlay
+        }
+    }
+
+    private fun hideProjectImportOverlay() {
+        runOnUiThread {
+            val overlay = importOverlay ?: return@runOnUiThread
+            (overlay.parent as? ViewGroup)?.removeView(overlay)
+            importOverlay = null
+        }
     }
 
     // installCapturedPointerListenerOnAll removed: we no longer
@@ -913,7 +1177,48 @@ class MainActivity : GameActivity(), ImeHost {
             InputModality.setNonPointer()
             applyCursorVisibility()
         }
+        if (event != null) offsetEventToSurface(event)
         return super.dispatchTouchEvent(event)
+    }
+
+    override fun dispatchGenericMotionEvent(event: MotionEvent): Boolean {
+        offsetEventToSurface(event)
+        if (event.actionMasked == MotionEvent.ACTION_SCROLL) {
+            val source = event.source
+            val isPointer = source and InputDevice.SOURCE_MOUSE != 0 ||
+                source and InputDevice.SOURCE_TOUCHPAD != 0 ||
+                source and InputDevice.SOURCE_STYLUS != 0
+            if (isPointer) {
+                val (maxX, maxY) = visibleBounds()
+                cursorX = event.x.coerceIn(0f, maxX - 1f)
+                cursorY = event.y.coerceIn(0f, maxY - 1f)
+                forwardCapturedPointer(event)
+                return true
+            }
+        }
+        return super.dispatchGenericMotionEvent(event)
+    }
+
+    private var lastSurfaceOffsetX = Int.MIN_VALUE
+    private var lastSurfaceOffsetY = Int.MIN_VALUE
+
+    /** GameActivity reports freeform-window events in decor coordinates. */
+    private fun offsetEventToSurface(event: MotionEvent) {
+        val surface = findSurfaceView(window.decorView) ?: return
+        val surfaceLocation = IntArray(2)
+        val decorLocation = IntArray(2)
+        surface.getLocationInWindow(surfaceLocation)
+        window.decorView.getLocationInWindow(decorLocation)
+        val offsetX = surfaceLocation[0] - decorLocation[0]
+        val offsetY = surfaceLocation[1] - decorLocation[1]
+        if (offsetX != lastSurfaceOffsetX || offsetY != lastSurfaceOffsetY) {
+            Log.i("zdroid_input", "surface input origin offset=($offsetX,$offsetY)")
+            lastSurfaceOffsetX = offsetX
+            lastSurfaceOffsetY = offsetY
+        }
+        if (offsetX != 0 || offsetY != 0) {
+            event.offsetLocation(-offsetX.toFloat(), -offsetY.toFloat())
+        }
     }
 
     override fun dispatchKeyEvent(event: KeyEvent): Boolean {
@@ -929,14 +1234,22 @@ class MainActivity : GameActivity(), ImeHost {
 
     override fun onWindowFocusChanged(hasFocus: Boolean) {
         super.onWindowFocusChanged(hasFocus)
-        if (hasFocus) {
-            if (hasIndirectPointer()) {
-                Log.i(TAG_CAPTURE, "requestPointerCapture()")
-                window.decorView.requestPointerCapture()
+        when {
+            hasFocus && initialNotificationStage == 1 -> beginLegacyNotificationPermissionPrompt()
+            !hasFocus && initialNotificationStage == 2 -> {
+                initialNotificationStage = 3
+                Log.i(TAG, "Initial notification permission dialog took focus")
             }
-        } else {
-            window.decorView.releasePointerCapture()
+            hasFocus && initialNotificationStage == 3 -> {
+                initialNotificationStage = 0
+                initialPermissionFlowSettled = true
+                Log.i(TAG, "Initial permission flow settled after notification dialog")
+                startBackgroundExecutionIfEnabled()
+            }
         }
+        // DeX needs the system cursor to remain free so the user can reach
+        // window borders and controls. Never acquire relative pointer capture.
+        window.decorView.releasePointerCapture()
         // Move the sprite to the current cursor position so the
         // first visible-frame after a focus regain is correct, but
         // visibility itself is determined by `InputModality.isPointer()`
@@ -945,6 +1258,9 @@ class MainActivity : GameActivity(), ImeHost {
         // the cursor when the user was in touch mode.
         if (hasFocus && trackpadModeActive) {
             cursorOverlay?.move(cursorX, cursorY)
+        }
+        if (hasFocus && textInputActive && !imeManuallyDismissed) {
+            imeHostView?.postDelayed({ requestImeShow(clearManualDismiss = false) }, 120L)
         }
         applyCursorVisibility()
     }
@@ -1037,20 +1353,17 @@ class MainActivity : GameActivity(), ImeHost {
         Log.i(TAG, "openUrl: $url")
         runOnUiThread {
             try {
-                startActivity(
-                    Intent(Intent.ACTION_VIEW, Uri.parse(url)).apply {
-                        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                    }
-                )
+                ZdroidBrowserLauncher.open(this, url)
             } catch (t: Throwable) {
-                Log.e(TAG, "openUrl: startActivity ACTION_VIEW failed for $url", t)
+                Log.e(TAG, "openUrl failed for $url", t)
             }
         }
     }
 
-    fun launchOpenTree() {
-        Log.i(TAG, "launchOpenTree() invoked")
+    fun launchOpenTree(importForeignProviders: Boolean) {
+        Log.i(TAG, "launchOpenTree(importForeignProviders=$importForeignProviders) invoked")
         runOnUiThread {
+            openTreeImportsForeignProviders = importForeignProviders
             val intent = Intent(Intent.ACTION_OPEN_DOCUMENT_TREE).apply {
                 addFlags(
                     Intent.FLAG_GRANT_READ_URI_PERMISSION or
@@ -1072,6 +1385,7 @@ class MainActivity : GameActivity(), ImeHost {
                 Log.i(TAG, "startActivityForResult OPEN_DOCUMENT_TREE dispatched")
             } catch (t: Throwable) {
                 Log.e(TAG, "OPEN_DOCUMENT_TREE dispatch threw", t)
+                openTreeImportsForeignProviders = false
                 onPickerResult("")
             }
         }
@@ -1116,20 +1430,26 @@ class MainActivity : GameActivity(), ImeHost {
         }
         if (needed.isEmpty()) {
             Log.i(TAG, "requestStoragePermissions: already granted")
-            return 1
+            runOnUiThread { continueInitialPermissionFlow() }
+            return 0
         }
         Log.i(TAG, "requestStoragePermissions: prompting for ${needed.joinToString(",")}")
+        storagePermissionRequestInFlight = true
         runOnUiThread {
-            ActivityCompat.requestPermissions(this, needed.toTypedArray(), REQ_STORAGE_PERMS)
+            try {
+                ActivityCompat.requestPermissions(this, needed.toTypedArray(), REQ_STORAGE_PERMS)
+            } catch (error: Throwable) {
+                Log.e(TAG, "Storage permission request failed", error)
+                continueInitialPermissionFlow()
+            }
         }
         return 0
     }
 
     /// Returns Android's currently-active DNS server IPs as a comma-joined
-    /// string. The Rust side writes them to /sdcard/.zed/r in resolv.conf
-    /// format so Bun-compiled CLIs (whose c-ares is patched to read from
-    /// /sdcard/.zed/r) can do DNS without proot. Falls back to empty
-    /// string if no active network — caller layers in public-DNS defaults.
+    /// string. Rust stores them in app-private storage; native CLI launchers
+    /// expose that file as /proc/self/fd/9 so static resolvers work without
+    /// shared-storage permission. An empty result uses public-DNS defaults.
     @Suppress("unused") // called from Rust via JNI
     fun getActiveDnsServers(): String {
         val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
@@ -1215,6 +1535,8 @@ class MainActivity : GameActivity(), ImeHost {
     /// the process here guarantees the next launch starts fresh with
     /// zero stale static state.
     override fun onDestroy() {
+        selectionOverlay?.destroy()
+        selectionOverlay = null
         Log.i(TAG, "onDestroy isFinishing=$isFinishing — exiting process for clean restart")
         splashHandler.removeCallbacksAndMessages(null)
         cursorOverlay?.release()
@@ -1230,6 +1552,15 @@ class MainActivity : GameActivity(), ImeHost {
         grantResults: IntArray,
     ) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode == REQ_NOTIFICATION_PERMISSION) {
+            val granted = grantResults.firstOrNull() == PackageManager.PERMISSION_GRANTED
+            Log.i(TAG, "Agent notification permission granted=$granted")
+            initialPermissionFlowSettled = true
+            initialNotificationStage = 0
+            Log.i(TAG, "Initial permission flow settled after notification result")
+            startBackgroundExecutionIfEnabled()
+            return
+        }
         if (requestCode != REQ_STORAGE_PERMS) {
             return
         }
@@ -1237,6 +1568,7 @@ class MainActivity : GameActivity(), ImeHost {
             "${perm.removePrefix("android.permission.")}=${if (granted == PackageManager.PERMISSION_GRANTED) "OK" else "DENIED"}"
         }
         Log.i(TAG, "onRequestPermissionsResult: $results")
+        continueInitialPermissionFlow()
     }
 
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
@@ -1246,6 +1578,9 @@ class MainActivity : GameActivity(), ImeHost {
         }
         if (resultCode != Activity.RESULT_OK) {
             Log.i(TAG, "picker cancelled (req=$requestCode resultCode=$resultCode)")
+            if (requestCode == REQ_OPEN_TREE) {
+                openTreeImportsForeignProviders = false
+            }
             onPickerResult("")
             return
         }
@@ -1261,7 +1596,134 @@ class MainActivity : GameActivity(), ImeHost {
                 Log.w(TAG, "takePersistableUriPermission failed", t)
             }
         }
-        onPickerResult(uri?.toString() ?: "")
+        val shouldImportTree = requestCode == REQ_OPEN_TREE &&
+            openTreeImportsForeignProviders &&
+            uri != null &&
+            !isDirectlyAccessibleTree(uri)
+        openTreeImportsForeignProviders = false
+        if (shouldImportTree) {
+            importAndReturnTree(uri)
+        } else {
+            onPickerResult(uri?.toString() ?: "")
+        }
+    }
+
+    /**
+     * RealFs needs a POSIX path. Shared storage and Zdroid's own provider can
+     * be translated directly; another app's provider (notably Termux) cannot
+     * because Android prevents this process from traversing that app's data
+     * directory even after the user grants a SAF URI.
+     */
+    private fun isDirectlyAccessibleTree(uri: Uri): Boolean =
+        uri.authority == "com.android.externalstorage.documents" ||
+            uri.authority == "com.zdroid.documents"
+
+    /** Import a foreign SAF tree into Zdroid's private home, then return it
+     * through our own provider URI so the Rust side can open it normally. */
+    private fun importAndReturnTree(treeUri: Uri) {
+        showProjectImportOverlay()
+        Thread({
+            try {
+                val imported = importDocumentTree(treeUri)
+                val encodedPath = Uri.encode(imported.absolutePath)
+                Log.i(TAG, "Imported SAF tree $treeUri to ${imported.absolutePath}")
+                runOnUiThread {
+                    Toast.makeText(this, "Project imported", Toast.LENGTH_SHORT).show()
+                }
+                onPickerResult("content://com.zdroid.documents/tree/$encodedPath")
+            } catch (t: Throwable) {
+                Log.e(TAG, "Failed to import SAF tree $treeUri", t)
+                runOnUiThread {
+                    Toast.makeText(
+                        this,
+                        "Could not import project: ${t.message ?: "unknown error"}",
+                        Toast.LENGTH_LONG,
+                    ).show()
+                }
+                onPickerResult("zdroid-error:${Uri.encode(t.message ?: t.javaClass.simpleName)}")
+            } finally {
+                hideProjectImportOverlay()
+            }
+        }, "zdroid-saf-import").start()
+    }
+
+    private fun importDocumentTree(treeUri: Uri): File {
+        val rootId = DocumentsContract.getTreeDocumentId(treeUri)
+        val rootUri = DocumentsContract.buildDocumentUriUsingTree(treeUri, rootId)
+        val displayName = queryDisplayName(rootUri).ifBlank { "imported-project" }
+        val safeName = sanitizeDocumentName(displayName)
+        val importsRoot = File(filesDir, "home/imported-projects").apply { mkdirs() }
+        val destination = uniqueDestination(importsRoot, safeName)
+        if (!destination.mkdirs()) {
+            error("Could not create ${destination.absolutePath}")
+        }
+
+        try {
+            copyDocumentChildren(treeUri, rootId, destination)
+        } catch (t: Throwable) {
+            destination.deleteRecursively()
+            throw t
+        }
+        return destination
+    }
+
+    private fun copyDocumentChildren(treeUri: Uri, parentId: String, destination: File) {
+        val childrenUri = DocumentsContract.buildChildDocumentsUriUsingTree(treeUri, parentId)
+        val projection = arrayOf(
+            DocumentsContract.Document.COLUMN_DOCUMENT_ID,
+            DocumentsContract.Document.COLUMN_DISPLAY_NAME,
+            DocumentsContract.Document.COLUMN_MIME_TYPE,
+        )
+        contentResolver.query(childrenUri, projection, null, null, null)?.use { cursor ->
+            val idColumn = cursor.getColumnIndexOrThrow(projection[0])
+            val nameColumn = cursor.getColumnIndexOrThrow(projection[1])
+            val mimeColumn = cursor.getColumnIndexOrThrow(projection[2])
+            while (cursor.moveToNext()) {
+                val documentId = cursor.getString(idColumn)
+                val name = sanitizeDocumentName(cursor.getString(nameColumn) ?: "unnamed")
+                val mime = cursor.getString(mimeColumn)
+                val target = File(destination, name)
+                if (mime == DocumentsContract.Document.MIME_TYPE_DIR) {
+                    if (!target.mkdirs() && !target.isDirectory) {
+                        error("Could not create ${target.absolutePath}")
+                    }
+                    copyDocumentChildren(treeUri, documentId, target)
+                } else {
+                    val documentUri =
+                        DocumentsContract.buildDocumentUriUsingTree(treeUri, documentId)
+                    val input = contentResolver.openInputStream(documentUri)
+                        ?: error("Could not read $name")
+                    input.use { source ->
+                        FileOutputStream(target).use { sink -> source.copyTo(sink) }
+                    }
+                }
+            }
+        } ?: error("The selected provider did not expose the folder contents")
+    }
+
+    private fun queryDisplayName(documentUri: Uri): String {
+        val projection = arrayOf(OpenableColumns.DISPLAY_NAME)
+        return contentResolver.query(documentUri, projection, null, null, null)?.use { cursor ->
+            if (cursor.moveToFirst()) cursor.getString(0) ?: "" else ""
+        } ?: ""
+    }
+
+    private fun sanitizeDocumentName(name: String): String {
+        val sanitized = name.replace(Regex("[\\u0000/\\\\]"), "_").trim()
+        return when (sanitized) {
+            "", ".", ".." -> "unnamed"
+            else -> sanitized
+        }
+    }
+
+    private fun uniqueDestination(parent: File, baseName: String): File {
+        var candidate = File(parent, baseName)
+        var suffix = 2
+        while (candidate.exists()) {
+            candidate = File(parent, "$baseName-$suffix")
+            suffix += 1
+        }
+        return candidate
     }
 
     private external fun onPickerResult(uriString: String)
@@ -1273,6 +1735,7 @@ class MainActivity : GameActivity(), ImeHost {
         private const val REQ_OPEN_TREE = 0xA1
         private const val REQ_CREATE_DOCUMENT = 0xA2
         private const val REQ_STORAGE_PERMS = 0xA3
+        private const val REQ_NOTIFICATION_PERMISSION = 0xA4
         /// Software cursor side length in dp. Scaled by display
         /// density at instantiation time to give the sprite a
         /// consistent visual size across devices.

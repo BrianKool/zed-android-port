@@ -31,8 +31,19 @@ impl StdioTransport {
         cx: &AsyncApp,
     ) -> Result<Self> {
         let builder = ShellBuilder::new(&Shell::System, cfg!(windows)).non_interactive();
-        let mut command =
-            builder.build_std_command(Some(binary.executable.display().to_string()), &binary.args);
+        let executable = binary.executable.display().to_string();
+        #[cfg(target_os = "android")]
+        let mut command = {
+            let mut args = Vec::with_capacity(binary.args.len() + 1);
+            args.push(executable);
+            args.extend(binary.args.iter().cloned());
+            builder.build_std_command(
+                Some("/data/data/com.zdroid/files/bin/zd-exec".to_string()),
+                &args,
+            )
+        };
+        #[cfg(not(target_os = "android"))]
+        let mut command = builder.build_std_command(Some(executable), &binary.args);
 
         command.envs(binary.env.unwrap_or_default());
 

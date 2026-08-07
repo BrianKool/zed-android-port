@@ -235,6 +235,7 @@ impl Render for WorktreePicker {
         v_flex()
             .key_context("WorktreePicker")
             .w(rems(34.))
+            .max_w_full()
             .elevation_3(cx)
             .child(self.picker.clone())
             .on_modifiers_changed(cx.listener(Self::handle_modifiers_changed))

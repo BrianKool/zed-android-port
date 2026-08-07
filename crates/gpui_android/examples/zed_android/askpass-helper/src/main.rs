@@ -44,14 +44,16 @@ use std::os::unix::net::UnixStream;
 use std::process::ExitCode;
 
 fn main() -> ExitCode {
-    let socket = match env::args().find_map(|a| {
-        a.strip_prefix("--askpass=").map(String::from)
-    }) {
+    if let Some(socket) = env::args()
+        .find_map(|argument| argument.strip_prefix("--git-credential=").map(String::from))
+    {
+        return git_credential(&socket);
+    }
+
+    let socket = match env::args().find_map(|a| a.strip_prefix("--askpass=").map(String::from)) {
         Some(s) if !s.is_empty() => s,
         _ => {
-            eprintln!(
-                "zed-askpass-helper: missing or empty --askpass=<socket> argument"
-            );
+            eprintln!("zed-askpass-helper: missing or empty --askpass=<socket> argument");
             return ExitCode::from(2);
         }
     };
@@ -59,9 +61,7 @@ fn main() -> ExitCode {
     let mut stream = match UnixStream::connect(&socket) {
         Ok(s) => s,
         Err(err) => {
-            eprintln!(
-                "zed-askpass-helper: connect {socket}: {err}"
-            );
+            eprintln!("zed-askpass-helper: connect {socket}: {err}");
             return ExitCode::from(1);
         }
     };
@@ -98,5 +98,46 @@ fn main() -> ExitCode {
         return ExitCode::from(1);
     }
 
+    ExitCode::SUCCESS
+}
+
+fn git_credential(socket: &str) -> ExitCode {
+    let operation =
+        env::args().find(|argument| matches!(argument.as_str(), "get" | "store" | "erase"));
+    if operation.as_deref() != Some("get") {
+        return ExitCode::SUCCESS;
+    }
+
+    let mut request = Vec::new();
+    if let Err(err) = io::stdin().read_to_end(&mut request) {
+        eprintln!("zed-askpass-helper: read credential request: {err}");
+        return ExitCode::from(1);
+    }
+
+    let mut stream = match UnixStream::connect(socket) {
+        Ok(stream) => stream,
+        Err(err) => {
+            eprintln!("zed-askpass-helper: connect credential socket {socket}: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    if let Err(err) = stream.write_all(&request) {
+        eprintln!("zed-askpass-helper: write credential request: {err}");
+        return ExitCode::from(1);
+    }
+    if let Err(err) = stream.shutdown(std::net::Shutdown::Write) {
+        eprintln!("zed-askpass-helper: finish credential request: {err}");
+        return ExitCode::from(1);
+    }
+
+    let mut response = Vec::new();
+    if let Err(err) = stream.read_to_end(&mut response) {
+        eprintln!("zed-askpass-helper: read credential response: {err}");
+        return ExitCode::from(1);
+    }
+    if let Err(err) = io::stdout().write_all(&response) {
+        eprintln!("zed-askpass-helper: write credential response: {err}");
+        return ExitCode::from(1);
+    }
     ExitCode::SUCCESS
 }

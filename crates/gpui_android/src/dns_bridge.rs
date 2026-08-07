@@ -1,47 +1,25 @@
-//! JNI bridge that pulls Android's currently-active DNS server IPs and
-//! materializes them as a `resolv.conf`-format file at `/sdcard/.zed/r`.
+//! JNI bridge that mirrors Android's active DNS servers into app-private
+//! storage for native Linux-style CLIs.
 //!
-//! Why this exists: Bun-compiled CLIs (claude, codex, future tools) link
-//! musl statically and call c-ares with the compile-time-hardcoded path
-//! `/etc/resolv.conf`. Android has no `/etc/resolv.conf` (it routes DNS
-//! through `netd` and the Java `ConnectivityManager` API, which musl
-//! can't reach). The launcher generator's deep-walk hex-patches the
-//! literal `/etc/resolv.conf` in those binaries to the shorter
-//! `/sdcard/.zed/r` (16 → 14 bytes, padded with NULs to keep the slot
-//! width). This module's job is to make sure that path exists with
-//! valid `nameserver <IP>` lines whenever the app boots, so the
-//! patched binaries find real DNS servers when c-ares opens it.
-//!
-//! The hidden `.zed/` namespace keeps the writes off the user-visible
-//! `/sdcard` root. App-private storage would be cleaner but its path
-//! (`/data/data/<pkg>/files/...`) is way longer than the 16-byte slot
-//! the binary patch can fit.
-//!
-//! Falls back to public DNS (1.1.1.1, 8.8.8.8) if `ConnectivityManager`
-//! gives us no active network — happens during boot before WiFi
-//! attaches, or when the user is offline. The patched CLIs may still
-//! fail to resolve at that point, but they'll fail with a clean
-//! `network unreachable` instead of a `/etc/resolv.conf: no such file`.
-
-use std::path::Path;
+//! Static musl/Bun binaries cannot use Android's netd resolver and normally
+//! read the compile-time path `/etc/resolv.conf`, which Android does not have.
+//! Zdroid patches that 16-byte literal to `/proc/self/fd/9`; each launcher
+//! opens the private resolver file as descriptor 9 before executing the CLI.
+//! This keeps DNS independent of shared-storage permissions.
 
 use android_activity::AndroidApp;
 use anyhow::{Context, Result};
 use jni::{JavaVM, objects::JObject, objects::JString};
 
-const RESOLV_CONF_PATH: &str = "/sdcard/.zed/r";
+const RESOLV_CONF_FILE_NAME: &str = "zdroid-resolv.conf";
 const FALLBACK_NAMESERVERS: &[&str] = &["1.1.1.1", "8.8.8.8"];
 
-/// Read Android's active-network DNS servers via JNI, write them to
-/// `/sdcard/.zed/r` in resolv.conf format. Idempotent — overwrites the
-/// file on every call so a network change followed by a re-call picks
-/// up the new servers. Caller fires this at boot and may fire again on
-/// `MainEvent::ConfigChanged` if the network appears to have switched.
+/// Refresh the resolver file from Android's currently active network.
 pub fn populate_resolv_conf(android_app: &AndroidApp) {
     match populate_inner(android_app) {
-        Ok(servers) => log::info!(
+        Ok((path, servers)) => log::info!(
             "dns_bridge: wrote {} ({} nameserver{} from Android)",
-            RESOLV_CONF_PATH,
+            path.display(),
             servers,
             if servers == 1 { "" } else { "s" }
         ),
@@ -49,23 +27,25 @@ pub fn populate_resolv_conf(android_app: &AndroidApp) {
     }
 }
 
-fn populate_inner(android_app: &AndroidApp) -> Result<usize> {
+fn populate_inner(android_app: &AndroidApp) -> Result<(std::path::PathBuf, usize)> {
     let servers = query_android_dns(android_app).unwrap_or_default();
     let nameservers: Vec<String> = if servers.is_empty() {
         log::info!(
-            "dns_bridge: ConnectivityManager returned no DNS servers \
-             (no active network?); falling back to public DNS"
+            "dns_bridge: ConnectivityManager returned no DNS servers; \
+             falling back to public DNS"
         );
         FALLBACK_NAMESERVERS.iter().map(|s| s.to_string()).collect()
     } else {
         servers
     };
 
-    let path = Path::new(RESOLV_CONF_PATH);
-    if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir)
-            .with_context(|| format!("create {}", dir.display()))?;
-    }
+    let data_path = android_app
+        .internal_data_path()
+        .context("Android internal data path is unavailable")?;
+    std::fs::create_dir_all(&data_path)
+        .with_context(|| format!("create {}", data_path.display()))?;
+    let path = data_path.join(RESOLV_CONF_FILE_NAME);
+    let temporary_path = data_path.join(format!("{RESOLV_CONF_FILE_NAME}.tmp"));
 
     let mut content = String::new();
     for ns in &nameservers {
@@ -73,9 +53,11 @@ fn populate_inner(android_app: &AndroidApp) -> Result<usize> {
         content.push_str(ns);
         content.push('\n');
     }
-    std::fs::write(path, content.as_bytes())
-        .with_context(|| format!("write {}", path.display()))?;
-    Ok(nameservers.len())
+    std::fs::write(&temporary_path, content.as_bytes())
+        .with_context(|| format!("write {}", temporary_path.display()))?;
+    std::fs::rename(&temporary_path, &path)
+        .with_context(|| format!("replace {}", path.display()))?;
+    Ok((path, nameservers.len()))
 }
 
 fn query_android_dns(android_app: &AndroidApp) -> Result<Vec<String>> {
@@ -85,9 +67,16 @@ fn query_android_dns(android_app: &AndroidApp) -> Result<Vec<String>> {
         .context("attach_current_thread for dns query")?;
     let activity = unsafe { JObject::from_raw(android_app.activity_as_ptr() as _) };
     let result = env
-        .call_method(&activity, "getActiveDnsServers", "()Ljava/lang/String;", &[])
+        .call_method(
+            &activity,
+            "getActiveDnsServers",
+            "()Ljava/lang/String;",
+            &[],
+        )
         .context("MainActivity.getActiveDnsServers")?;
-    let result_obj = result.l().context("getActiveDnsServers returned non-object")?;
+    let result_obj = result
+        .l()
+        .context("getActiveDnsServers returned non-object")?;
     if result_obj.is_null() {
         return Ok(Vec::new());
     }

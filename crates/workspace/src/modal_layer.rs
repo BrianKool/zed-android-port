@@ -1,8 +1,9 @@
 use gpui::{
     AnyView, DismissEvent, Entity, EventEmitter, FocusHandle, Focusable as _, ManagedView,
-    MouseButton, Subscription,
+    MouseButton, Subscription, hsla, relative,
 };
 use ui::prelude::*;
+use ui::{IconButton, IconName, Tooltip};
 
 #[derive(Debug)]
 pub enum DismissDecision {
@@ -192,13 +193,85 @@ impl ModalLayer {
 }
 
 impl Render for ModalLayer {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let Some(active_modal) = &self.active_modal else {
             return div().into_any_element();
         };
 
-        if active_modal.modal.render_bare(cx) {
+        if !cfg!(target_os = "android") && active_modal.modal.render_bare(cx) {
             return active_modal.modal.view().into_any_element();
+        }
+
+        if cfg!(target_os = "android") {
+            return div()
+                .absolute()
+                .size_full()
+                .inset_0()
+                .occlude()
+                .bg(hsla(0.0, 0.0, 0.0, 0.48))
+                .on_action(cx.listener(|this, _: &menu::Cancel, window, cx| {
+                    this.hide_modal(window, cx);
+                }))
+                .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                    // Android dialogs are blocking. Tapping the dimmed workspace
+                    // must never discard partially entered settings or forms.
+                    cx.stop_propagation();
+                })
+                .on_mouse_up(MouseButton::Left, |_, _, cx| {
+                    cx.stop_propagation();
+                })
+                .child(
+                    v_flex()
+                        .id("modal-layer-content")
+                        .size_full()
+                        .items_center()
+                        .justify_center()
+                        .track_focus(&active_modal.focus_handle)
+                        .child(
+                            div()
+                                .id("zdroid-floating-dialog")
+                                .relative()
+                                .w(relative(0.9))
+                                .h(relative(0.9))
+                                .min_w_0()
+                                .min_h_0()
+                                .overflow_hidden()
+                                .rounded_md()
+                                .border_1()
+                                .border_color(cx.theme().colors().border)
+                                .bg(cx.theme().colors().elevated_surface_background)
+                                .occlude()
+                                .child(
+                                    div()
+                                        .size_full()
+                                        .min_w_0()
+                                        .min_h_0()
+                                        .overflow_hidden()
+                                        .child(active_modal.modal.view()),
+                                )
+                                .child(
+                                    div().absolute().top_2().right_2().child(
+                                        IconButton::new(
+                                            "close-zdroid-floating-dialog",
+                                            IconName::Close,
+                                        )
+                                        .tooltip(Tooltip::text("Close"))
+                                        .on_click(
+                                            cx.listener(|this, _, window, cx| {
+                                                this.hide_modal(window, cx);
+                                            }),
+                                        ),
+                                    ),
+                                )
+                                .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                                    cx.stop_propagation();
+                                })
+                                .on_mouse_up(MouseButton::Left, |_, _, cx| {
+                                    cx.stop_propagation();
+                                }),
+                        ),
+                )
+                .into_any_element();
         }
 
         div()
@@ -219,12 +292,22 @@ impl Render for ModalLayer {
             )
             .child(
                 v_flex()
-                    .h(px(0.0))
-                    .top_20()
+                    .id("modal-layer-content")
+                    .when(cfg!(target_os = "android"), |this| {
+                        this.size_full().p_2().overflow_y_scroll()
+                    })
+                    .when(!cfg!(target_os = "android"), |this| {
+                        this.h(px(0.0)).top_20()
+                    })
                     .items_center()
                     .track_focus(&active_modal.focus_handle)
                     .child(
                         h_flex()
+                            .when(cfg!(target_os = "android"), |this| {
+                                this.w_full()
+                                    .max_h(window.viewport_size().height - px(16.0))
+                                    .justify_center()
+                            })
                             .occlude()
                             .child(active_modal.modal.view())
                             .on_mouse_down(MouseButton::Left, |_, _, cx| {

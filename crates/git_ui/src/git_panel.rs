@@ -12,7 +12,7 @@ use crate::{
 use agent_settings::AgentSettings;
 use alacritty_terminal::vte::ansi;
 use anyhow::Context as _;
-use askpass::AskPassDelegate;
+use askpass::{AskPassDelegate, EncryptedPassword};
 use collections::{BTreeMap, HashMap, HashSet};
 use db::kvp::KeyValueStore;
 use editor::{
@@ -35,8 +35,8 @@ use git::status::{DiffStat, StageStatus};
 use git::{Amend, Commit, Signoff, ToggleStaged, repository::RepoPath, status::FileStatus};
 use git::{
     ExpandCommitEditor, GitHostingProviderRegistry, GitRemote, RestoreTrackedFiles, StageAll,
-    StashAll, StashApply, StashPop, ToggleFillCommitEditor, TrashUntrackedFiles, UnstageAll,
-    parse_git_remote_url,
+    StashAll, StashApply, StashPop, StashSelected, ToggleFillCommitEditor, TrashUntrackedFiles,
+    UnstageAll, parse_git_remote_url,
 };
 use gpui::{
     AbsoluteLength, Action, Anchor, AsyncApp, AsyncWindowContext, Bounds, ClickEvent, DismissEvent,
@@ -208,6 +208,11 @@ fn git_panel_context_menu(
                 StashAll.boxed_clone(),
             )
             .action_disabled_when(!state.has_stash_items, "Stash Pop", StashPop.boxed_clone())
+            .action_disabled_when(
+                !state.has_stash_items,
+                "Stash Apply",
+                StashApply.boxed_clone(),
+            )
             .action("View Stash", zed_actions::git::ViewStash.boxed_clone())
             .separator()
             .action("Open Diff", project_diff::Diff.boxed_clone())
@@ -1453,6 +1458,54 @@ impl GitPanel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let marked_entries = self
+            .marked_entries
+            .iter()
+            .filter_map(|ix| self.entries.get(*ix)?.status_entry().cloned())
+            .collect::<Vec<_>>();
+        if marked_entries.len() > 1 {
+            let mut details = marked_entries
+                .iter()
+                .filter_map(|entry| entry.repo_path.as_ref().file_name())
+                .map(|name| name.to_string())
+                .take(5)
+                .join("\n");
+            if marked_entries.len() > 5 {
+                details.push_str(&format!("\nand {} more...", marked_entries.len() - 5));
+            }
+
+            let prompt = window.prompt(
+                PromptLevel::Warning,
+                "Discard changes to the selected files?",
+                Some(&details),
+                &["Discard Changes", "Cancel"],
+                cx,
+            );
+            let this = cx.weak_entity();
+            window
+                .spawn(cx, async move |cx| {
+                    if prompt.await? != 0 {
+                        return anyhow::Ok(());
+                    }
+                    this.update_in(cx, |this, window, cx| {
+                        let (created, tracked): (Vec<_>, Vec<_>) = marked_entries
+                            .into_iter()
+                            .partition(|entry| entry.status.is_created());
+                        if !tracked.is_empty() {
+                            this.perform_checkout(tracked, window, cx);
+                        }
+                        for entry in created {
+                            this.revert_entry(&entry, window, cx);
+                        }
+                        this.marked_entries.clear();
+                        cx.notify();
+                    })?;
+                    Ok(())
+                })
+                .detach();
+            return;
+        }
+
         let path_style = self.project.read(cx).path_style(cx);
         maybe!({
             let list_entry = self.entries.get(self.selected_entry?)?.clone();
@@ -2109,6 +2162,47 @@ impl GitPanel {
                             this.show_error_toast("stash", e, cx);
                         })
                         .ok();
+                    cx.notify();
+                })
+            }
+        })
+        .detach();
+    }
+
+    pub fn stash_selected(
+        &mut self,
+        _: &StashSelected,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(active_repository) = self.active_repository.clone() else {
+            return;
+        };
+        let indices = if self.marked_entries.is_empty() {
+            self.selected_entry.into_iter().collect::<Vec<_>>()
+        } else {
+            self.marked_entries.clone()
+        };
+        let paths = indices
+            .into_iter()
+            .filter_map(|ix| self.entries.get(ix)?.status_entry())
+            .map(|entry| entry.repo_path.clone())
+            .collect::<Vec<_>>();
+        if paths.is_empty() {
+            return;
+        }
+
+        cx.spawn({
+            async move |this, cx| {
+                let stash_task = active_repository
+                    .update(cx, |repo, cx| repo.stash_entries(paths, cx))
+                    .await;
+                this.update(cx, |this, cx| {
+                    if let Err(error) = stash_task {
+                        this.show_error_toast("stash selected files", error, cx);
+                    } else {
+                        this.marked_entries.clear();
+                    }
                     cx.notify();
                 })
             }
@@ -2941,10 +3035,33 @@ impl GitPanel {
 
     pub(crate) fn git_clone(&mut self, repo: String, window: &mut Window, cx: &mut Context<Self>) {
         let workspace = self.workspace.clone();
+        let askpass = self.askpass_delegate("git clone", window, cx);
 
         crate::clone::clone_and_open(
             repo.into(),
             workspace,
+            askpass,
+            window,
+            cx,
+            Arc::new(|_workspace: &mut workspace::Workspace, _window, _cx| {}),
+        );
+    }
+
+    pub(crate) fn git_clone_at(
+        &mut self,
+        repo: String,
+        destination_dir: std::path::PathBuf,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let workspace = self.workspace.clone();
+        let askpass = self.askpass_delegate("git clone", window, cx);
+
+        crate::clone::clone_and_open_at(
+            repo.into(),
+            destination_dir,
+            workspace,
+            askpass,
             window,
             cx,
             Arc::new(|_workspace: &mut workspace::Workspace, _window, _cx| {}),
@@ -3286,6 +3403,49 @@ impl GitPanel {
         let operation = operation.into();
         let window = window.window_handle();
         AskPassDelegate::new(&mut cx.to_async(), move |prompt, tx, cx| {
+            let normalized_prompt = prompt.to_ascii_lowercase();
+            let is_github_https = normalized_prompt.contains("github.com")
+                && (normalized_prompt.contains("username")
+                    || normalized_prompt.contains("password"));
+
+            if is_github_https {
+                let credentials =
+                    cx.update(|cx| cx.read_credentials(crate::github_auth::GITHUB_CREDENTIALS_KEY));
+                let workspace = workspace.clone();
+                let operation = operation.clone();
+                let window = window.clone();
+                cx.spawn(async move |cx| {
+                    let credential = match credentials.await {
+                        Ok(Some((username, _))) if normalized_prompt.contains("username") => {
+                            EncryptedPassword::try_from(username.as_str()).ok()
+                        }
+                        Ok(Some((_, token))) if normalized_prompt.contains("password") => {
+                            String::from_utf8(token)
+                                .ok()
+                                .and_then(|token| EncryptedPassword::try_from(token.as_str()).ok())
+                        }
+                        _ => None,
+                    };
+
+                    if let Some(credential) = credential {
+                        tx.send(credential).ok();
+                        return;
+                    }
+
+                    window
+                        .update(cx, |_, window, cx| {
+                            workspace.update(cx, |workspace, cx| {
+                                workspace.toggle_modal(window, cx, |window, cx| {
+                                    AskPassModal::new(operation, prompt.into(), tx, window, cx)
+                                });
+                            })
+                        })
+                        .ok();
+                })
+                .detach();
+                return;
+            }
+
             window
                 .update(cx, |_, window, cx| {
                     workspace.update(cx, |workspace, cx| {
@@ -4691,6 +4851,10 @@ impl GitPanel {
                     })
                     .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
                         window.focus(&this.commit_editor.focus_handle(cx), cx);
+                        #[cfg(target_os = "android")]
+                        if !window.soft_keyboard_visible() {
+                            window.toggle_soft_keyboard();
+                        }
                     }))
                     .child(
                         h_flex()
@@ -5921,7 +6085,10 @@ impl GitPanel {
         } else {
             "Stage File"
         };
-        let restore_title = if entry.status.is_created() {
+        let selected_count = self.marked_entries.len().max(1);
+        let restore_title = if selected_count > 1 {
+            "Discard Selected Changes"
+        } else if entry.status.is_created() {
             "Trash File"
         } else {
             "Discard Changes"
@@ -5932,6 +6099,14 @@ impl GitPanel {
                 .context(self.focus_handle.clone())
                 .action(stage_title, ToggleStaged.boxed_clone())
                 .action(restore_title, git::RestoreFile::default().boxed_clone())
+                .action(
+                    if selected_count > 1 {
+                        "Stash Selected Files"
+                    } else {
+                        "Stash File"
+                    },
+                    StashSelected.boxed_clone(),
+                )
                 .action_disabled_when(
                     !is_created,
                     "Add to .gitignore",
@@ -6215,6 +6390,33 @@ impl GitPanel {
             )
             .on_click({
                 cx.listener(move |this, event: &ClickEvent, window, cx| {
+                    #[cfg(target_os = "android")]
+                    if event.modifiers().function && event.click_count() > 1 {
+                        this.selected_entry = Some(ix);
+                        if !this.marked_entries.contains(&ix) {
+                            this.marked_entries.push(ix);
+                        }
+                        this.deploy_entry_context_menu(event.position(), ix, window, cx);
+                        cx.stop_propagation();
+                        cx.notify();
+                        return;
+                    }
+
+                    #[cfg(target_os = "android")]
+                    if !this.marked_entries.is_empty() && event.standard_click() {
+                        this.selected_entry = Some(ix);
+                        if let Some(position) =
+                            this.marked_entries.iter().position(|entry| *entry == ix)
+                        {
+                            this.marked_entries.remove(position);
+                        } else {
+                            this.marked_entries.push(ix);
+                        }
+                        cx.stop_propagation();
+                        cx.notify();
+                        return;
+                    }
+
                     this.selected_entry = Some(ix);
                     cx.notify();
                     if event.click_count() > 1 || event.modifiers().secondary() {
@@ -6237,6 +6439,10 @@ impl GitPanel {
                         return;
                     };
                     this.update(cx, |this, cx| {
+                        if !this.marked_entries.contains(&ix) {
+                            this.marked_entries.clear();
+                            this.marked_entries.push(ix);
+                        }
                         this.deploy_entry_context_menu(event.position, ix, window, cx);
                     });
                     cx.stop_propagation();
@@ -6654,7 +6860,9 @@ impl Render for GitPanel {
                     .on_action(cx.listener(Self::clean_all))
                     .on_action(cx.listener(Self::generate_commit_message_action))
                     .on_action(cx.listener(Self::stash_all))
+                    .on_action(cx.listener(Self::stash_selected))
                     .on_action(cx.listener(Self::stash_pop))
+                    .on_action(cx.listener(Self::stash_apply))
             })
             .on_action(cx.listener(Self::collapse_selected_entry))
             .on_action(cx.listener(Self::expand_selected_entry))

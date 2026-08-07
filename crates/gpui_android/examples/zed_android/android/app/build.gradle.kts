@@ -1,9 +1,12 @@
-import java.util.Properties
+﻿import java.util.Properties
 
 plugins {
     id("com.android.application")
     kotlin("android")
 }
+
+val zdroidApplicationId = "com.zdroid"
+val forbiddenLegacyApplicationIds = listOf("com.zdroid.b")
 
 // Release signing config. `signing.properties` and `release.keystore` are
 // gitignored: contributors who clone the repo can still build the debug
@@ -17,6 +20,88 @@ val signingProps = Properties().apply {
     }
 }
 val hasReleaseSigning = signingPropsFile.exists()
+
+// Cargo build scripts (notably wasmtime-c-api-impl) invoke `cmake`
+// directly. Android Studio installs CMake inside the SDK but does not add it
+// to the Gradle daemon's PATH, so a truly clean build used to fail whenever a
+// previously cached native artifact was absent. Resolve the SDK the same ways
+// Android tooling does and publish its newest bundled CMake to every Cargo
+// task, keeping local and CI builds reproducible.
+val localProperties = Properties().apply {
+    val propertiesFile = rootProject.file("local.properties")
+    if (propertiesFile.exists()) {
+        propertiesFile.inputStream().use { load(it) }
+    }
+}
+val androidSdkDir = sequenceOf(
+    System.getenv("ANDROID_SDK_ROOT"),
+    System.getenv("ANDROID_HOME"),
+    localProperties.getProperty("sdk.dir"),
+)
+    .filterNotNull()
+    .map(::file)
+    .firstOrNull { it.isDirectory }
+val sdkCmakeBin = androidSdkDir
+    ?.resolve("cmake")
+    ?.listFiles()
+    ?.filter { it.isDirectory }
+    ?.maxByOrNull { it.name }
+    ?.resolve("bin")
+    ?.takeIf { it.resolve("cmake.exe").isFile || it.resolve("cmake").isFile }
+val cargoBuildPath = sdkCmakeBin?.let {
+    "${it.absolutePath}${File.pathSeparator}${System.getenv("PATH").orEmpty()}"
+}
+
+// Main Rust library bundling.
+//
+// Android Gradle only packages files already present under jniLibs; it does
+// not know that libzed_android.so is produced by Cargo. Always invoke Cargo
+// before preBuild (Cargo itself remains incremental), then stage the resulting
+// library. This prevents an APK from combining fresh Kotlin with a stale Rust
+// JNI contract.
+val zedAndroidDir = file("../..").canonicalFile
+val zedAndroidLib = file("${zedAndroidDir}/target/aarch64-linux-android/release/libzed_android.so")
+val stagedZedAndroidLib = file("src/main/jniLibs/arm64-v8a/libzed_android.so")
+
+tasks.register<Exec>("buildZedAndroidLib") {
+    description = "Build the main Zdroid Rust cdylib via cargo-ndk."
+    group = "build setup"
+
+    workingDir(zedAndroidDir)
+    commandLine(
+        "cargo",
+        "ndk",
+        "-t",
+        "arm64-v8a",
+        "-P",
+        "26",
+        "build",
+        "--release",
+    )
+    providers.environmentVariable("ANDROID_NDK_HOME").orNull?.let { ndk ->
+        environment("ANDROID_NDK_HOME", ndk)
+    }
+    cargoBuildPath?.let { environment("PATH", it) }
+
+    outputs.file(zedAndroidLib)
+    outputs.upToDateWhen { false }
+}
+
+tasks.register<Copy>("stageZedAndroidLib") {
+    description = "Stage the freshly-built Rust cdylib into Android jniLibs."
+    group = "build setup"
+
+    dependsOn("buildZedAndroidLib")
+    from(zedAndroidLib)
+    into(stagedZedAndroidLib.parentFile)
+    rename { stagedZedAndroidLib.name }
+    inputs.file(zedAndroidLib)
+    outputs.file(stagedZedAndroidLib)
+}
+
+tasks.matching { it.name == "preBuild" }.configureEach {
+    dependsOn("stageZedAndroidLib")
+}
 
 // Bootstrap-zip distribution.
 //
@@ -41,11 +126,11 @@ val hasReleaseSigning = signingPropsFile.exists()
 // mode, and as the symlink target for `$PREFIX/zd-runtime/<name>`
 // in chroot+other modes. It MUST be in the APK so fresh installs
 // have it. Without bundling, end users hit
-// `failed to spawn $PREFIX/bin/zd-exec — no such file or directory`
+// `failed to spawn $PREFIX/bin/zd-exec â€” no such file or directory`
 // the first time they open the integrated terminal in chroot mode.
 //
 // Build flow:
-//   1. `buildZdExec` runs `cargo ndk … build --release -p
+//   1. `buildZdExec` runs `cargo ndk â€¦ build --release -p
 //      zdroid_runtime --bin zd-exec` from the workspace root, with
 //      $ANDROID_NDK_HOME pointed at the same NDK the lib build uses.
 //   2. The resulting ELF at
@@ -89,6 +174,7 @@ tasks.register<Exec>("buildZdExec") {
     providers.environmentVariable("ANDROID_NDK_HOME").orNull?.let { ndk ->
         environment("ANDROID_NDK_HOME", ndk)
     }
+    cargoBuildPath?.let { environment("PATH", it) }
 
     inputs.files(zdExecSrc)
     inputs.file("${workspaceRoot}/crates/zdroid_runtime/Cargo.toml")
@@ -128,7 +214,7 @@ tasks.matching { it.name == "preBuild" }.configureEach {
 // `target-feature=+crt-static` for `aarch64-linux-android`. By running
 // `cargo ndk` with `workingDir` set to that crate's directory, gradle
 // guarantees the static-link config is in scope for every APK build
-// — no chance of a contributor accidentally shipping a dynamic
+// â€” no chance of a contributor accidentally shipping a dynamic
 // binary by building from the wrong cwd or hand-editing the asset.
 val askpassHelperDir = file("${workspaceRoot}/crates/gpui_android/examples/zed_android/askpass-helper")
 val askpassHelperBin = file("${askpassHelperDir}/target/aarch64-linux-android/release/zed-askpass-helper")
@@ -156,6 +242,7 @@ tasks.register<Exec>("buildAskpassHelper") {
     providers.environmentVariable("ANDROID_NDK_HOME").orNull?.let { ndk ->
         environment("ANDROID_NDK_HOME", ndk)
     }
+    cargoBuildPath?.let { environment("PATH", it) }
 
     inputs.files(askpassHelperSrc)
     inputs.file("${askpassHelperDir}/Cargo.toml")
@@ -179,20 +266,56 @@ tasks.matching { it.name == "preBuild" }.configureEach {
     dependsOn("stageAskpassHelperAsset")
 }
 
+val runtimeContractSources = fileTree("${workspaceRoot}/crates/gpui_android/native/zd-runtime") {
+    include("zd-exec", "zd-runtime-hook", "zd-runtime-sync", "zd-runtime.conf.example")
+}
+
+tasks.register("verifyZdroidRuntimeContract") {
+    description = "Reject stale package paths or JNI signatures before packaging the APK."
+    group = "verification"
+
+    dependsOn("stageZedAndroidLib", "stageZdExecAsset", "stageAskpassHelperAsset")
+    inputs.files(stagedZedAndroidLib, zdExecAsset, runtimeContractSources)
+
+    doLast {
+        val contractFiles = listOf(stagedZedAndroidLib, zdExecAsset) + runtimeContractSources.files
+        contractFiles.forEach { contractFile ->
+            val contents = contractFile.readBytes().toString(Charsets.ISO_8859_1)
+            forbiddenLegacyApplicationIds.forEach { forbidden ->
+                check(!contents.contains(forbidden)) {
+                    "Stale Android package '$forbidden' found in ${contractFile.path}"
+                }
+            }
+        }
+
+        val nativeContents = stagedZedAndroidLib.readBytes().toString(Charsets.ISO_8859_1)
+        check(nativeContents.contains("/data/data/$zdroidApplicationId/files/usr")) {
+            "Main Rust library does not contain the expected $zdroidApplicationId runtime prefix"
+        }
+        check(nativeContents.contains("launchOpenTree") && nativeContents.contains("(Z)V")) {
+            "Main Rust library does not contain the current launchOpenTree(boolean) JNI contract"
+        }
+    }
+}
+
+tasks.matching { it.name == "preBuild" }.configureEach {
+    dependsOn("verifyZdroidRuntimeContract")
+}
+
 android {
-    namespace = "com.zdroid"
+    namespace = zdroidApplicationId
     compileSdk = 35
 
     // Pin the NDK explicitly so reproducibility doesn't depend on whatever
     // `sdkmanager --list_installed` happens to surface. Bionic's
-    // `forkpty()` is in API 23+, so any NDK ≥ r21 is sufficient; we use r27
+    // `forkpty()` is in API 23+, so any NDK â‰¥ r21 is sufficient; we use r27
     // because that's the one we shipped L1 with and `+fp16` codegen
     // (gemm-f16) wants a recent toolchain.
     ndkVersion = "27.0.12077973"
 
     defaultConfig {
-        applicationId = "com.zdroid"
-        // minSdk = 26 enforces bionic ≥ Oreo. `forkpty()` is on the symbol
+        applicationId = zdroidApplicationId
+        // minSdk = 26 enforces bionic â‰¥ Oreo. `forkpty()` is on the symbol
         // table from API 23, but cpal/livekit transitive crates require
         // libaaudio which is API 26.
         minSdk = 26
@@ -201,11 +324,11 @@ android {
         // `execute_no_trans` on `app_data_file` is permitted, so we can
         // execve $PREFIX/bin/* directly. Pinning > 28 lands in
         // `untrusted_app_all` / numbered higher domains where exec is
-        // denied — the entire L2 plan stops working. Skipping Play Store
+        // denied â€” the entire L2 plan stops working. Skipping Play Store
         // eligibility is the explicit trade.
         targetSdk = 28
-        versionCode = 17
-        versionName = "0.3.2"
+        versionCode = 100
+        versionName = "1.0.0"
         ndk {
             abiFilters += listOf("arm64-v8a")
         }
@@ -217,7 +340,7 @@ android {
         }
     }
 
-    // Don't deflate bootstrap-aarch64.zip during APK packaging — it's
+    // Don't deflate bootstrap-aarch64.zip during APK packaging â€” it's
     // already a deflated zip, and re-deflating it (a) wastes APK size
     // (b) forces AAssetManager to decompress at runtime, which prevents
     // the bootstrap extractor from using the mmap-able buffer path.
@@ -238,7 +361,7 @@ android {
     // pins us in the SELinux `untrusted_app_27` domain so the bundled Termux
     // runtime can `execve` $PREFIX/bin/*. AGP's `lintVitalRelease` task
     // flags this as `ExpiredTargetSdkVersion` and refuses to assemble the
-    // release APK. We're not Play-Store eligible by design — disable that
+    // release APK. We're not Play-Store eligible by design â€” disable that
     // single rule rather than bumping the SDK and breaking exec.
     lint {
         disable += "ExpiredTargetSdkVersion"

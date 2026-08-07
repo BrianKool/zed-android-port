@@ -9,10 +9,9 @@
 //! library "/data/data/com.termux/..." not found` — an afternoon of
 //! head-scratching by the time it shows up in logcat.
 //!
-//! Make the mismatch un-compileable: read the gradle file, assert it
-//! contains `applicationId = "<our package>"`. Only checks the gradle file
-//! exists and contains the literal — does NOT pretend to be a kts parser.
-//! AGP and we agree on the substring or we both panic.
+//! Make the mismatch un-compileable: read the Gradle file and assert its
+//! single package constant matches the bootstrap package, then assert AGP
+//! assigns that constant as applicationId.
 
 const BOOTSTRAP_PACKAGE_NAME: &str = "com.zdroid";
 
@@ -35,10 +34,10 @@ fn main() {
         }
     };
 
-    let needle = format!("applicationId = \"{BOOTSTRAP_PACKAGE_NAME}\"");
+    let constant = format!("val zdroidApplicationId = \"{BOOTSTRAP_PACKAGE_NAME}\"");
     assert!(
-        gradle.contains(&needle),
-        "applicationId in {gradle_path} must match BOOTSTRAP_PACKAGE_NAME ({BOOTSTRAP_PACKAGE_NAME}). \
+        gradle.contains(&constant) && gradle.contains("applicationId = zdroidApplicationId"),
+        "zdroidApplicationId/applicationId in {gradle_path} must match BOOTSTRAP_PACKAGE_NAME ({BOOTSTRAP_PACKAGE_NAME}). \
          The bundled Termux bootstrap is rebuilt with this exact package name baked into every \
          binary's DT_RUNPATH and shebangs; a mismatch breaks every spawned process at runtime."
     );

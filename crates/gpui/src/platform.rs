@@ -167,6 +167,8 @@ pub trait Platform: 'static {
     }
 
     fn open_url(&self, url: &str);
+    fn start_background_task(&self, _task_id: &str, _description: &str) {}
+    fn finish_background_task(&self, _task_id: &str, _description: &str, _successful: bool) {}
     fn on_open_urls(&self, callback: Box<dyn FnMut(Vec<String>)>);
     fn register_url_scheme(&self, url: &str) -> Task<Result<()>>;
 
@@ -1316,6 +1318,19 @@ impl PlatformInputHandler {
             .update(|window, cx| self.handler.prefers_ime_for_printable_keys(window, cx))
             .unwrap_or(false)
     }
+
+    pub fn select_text_range(&mut self, range_utf16: Range<usize>) {
+        self.cx
+            .update(|window, cx| self.handler.select_text_range(range_utf16, window, cx))
+            .ok();
+    }
+
+    /// Returns whether focusing this handler should automatically show a soft keyboard.
+    pub fn query_should_auto_show_ime(&mut self) -> bool {
+        self.cx
+            .update(|window, cx| self.handler.should_auto_show_ime(window, cx))
+            .unwrap_or(false)
+    }
 }
 
 /// A struct representing a selection in a text buffer, in UTF16 characters.
@@ -1345,6 +1360,15 @@ pub trait InputHandler: 'static {
         window: &mut Window,
         cx: &mut App,
     ) -> Option<UTF16Selection>;
+
+    /// Replace the current selection with an absolute UTF-16 range.
+    fn select_text_range(
+        &mut self,
+        _range_utf16: Range<usize>,
+        _window: &mut Window,
+        _cx: &mut App,
+    ) {
+    }
 
     /// Get the range of the currently marked text, if any
     /// Corresponds to [markedRange()](https://developer.apple.com/documentation/appkit/nstextinputclient/1438250-markedrange)
@@ -1439,6 +1463,11 @@ pub trait InputHandler: 'static {
     /// character input (e.g. Vim insert mode returns `true`, normal mode returns `false`).
     /// The terminal keeps the default `false` so that raw keys reach the terminal process.
     fn prefers_ime_for_printable_keys(&mut self, _window: &mut Window, _cx: &mut App) -> bool {
+        false
+    }
+
+    /// Returns whether focusing this handler should automatically show a soft keyboard.
+    fn should_auto_show_ime(&mut self, _window: &mut Window, _cx: &mut App) -> bool {
         false
     }
 }

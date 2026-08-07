@@ -20,7 +20,11 @@ use std::sync::Mutex;
 use android_activity::AndroidApp;
 use anyhow::{Context as _, Result};
 use futures::channel::oneshot;
-use jni::{JavaVM, objects::JObject, objects::JString};
+use jni::{
+    JavaVM,
+    objects::{JObject, JString, JValue},
+    sys::jboolean,
+};
 
 type PendingPathsSender = oneshot::Sender<Result<Option<Vec<PathBuf>>>>;
 type PendingPathSender = oneshot::Sender<Result<Option<PathBuf>>>;
@@ -37,9 +41,19 @@ static PENDING: Mutex<Option<Pending>> = Mutex::new(None);
 pub(crate) fn pick_folder(
     android_app: &AndroidApp,
     sender: PendingPathsSender,
+    import_foreign_trees: bool,
 ) {
-    log::info!("saf: pick_folder requested");
-    set_pending(Pending::Paths(sender), android_app, "launchOpenTree");
+    log::info!(
+        "saf: pick_folder requested import_foreign_trees={}",
+        import_foreign_trees
+    );
+    set_pending(Pending::Paths(sender));
+    if let Err(err) = launch_open_tree(android_app, import_foreign_trees) {
+        log::warn!("saf: launchOpenTree failed: {err:#}");
+        if let Some(Pending::Paths(sender)) = PENDING.lock().unwrap().take() {
+            let _ = sender.send(Err(err));
+        }
+    }
 }
 
 /// Launch `ACTION_CREATE_DOCUMENT` so the user can pick where to save a
@@ -62,23 +76,11 @@ pub(crate) fn pick_new_path(
     }
 }
 
-fn set_pending(pending: Pending, android_app: &AndroidApp, method: &str) {
+fn set_pending(pending: Pending) {
     {
         let mut slot = PENDING.lock().unwrap();
         send_cancel(slot.take());
         *slot = Some(pending);
-    }
-    if let Err(err) = call_void_method(android_app, method) {
-        log::warn!("saf: {method} failed: {err:#}");
-        match PENDING.lock().unwrap().take() {
-            Some(Pending::Paths(s)) => {
-                let _ = s.send(Err(err));
-            }
-            Some(Pending::NewPath(s)) => {
-                let _ = s.send(Err(err));
-            }
-            None => {}
-        }
     }
 }
 
@@ -94,38 +96,62 @@ fn send_cancel(p: Option<Pending>) {
     }
 }
 
-fn call_void_method(android_app: &AndroidApp, method: &str) -> Result<()> {
-    log::info!("saf: calling MainActivity.{method}()");
+fn launch_open_tree(android_app: &AndroidApp, import_foreign_trees: bool) -> Result<()> {
+    log::info!(
+        "saf: calling MainActivity.launchOpenTree(import_foreign_trees={})",
+        import_foreign_trees
+    );
     let vm = unsafe { JavaVM::from_raw(android_app.vm_as_ptr().cast())? };
     let mut env = vm.attach_current_thread()?;
     let activity = unsafe { JObject::from_raw(android_app.activity_as_ptr() as _) };
-    env.call_method(&activity, method, "()V", &[])?;
-    log::info!("saf: MainActivity.{method}() returned");
+    let import_foreign_trees: jboolean = if import_foreign_trees { 1 } else { 0 };
+    let result = env.call_method(
+        &activity,
+        "launchOpenTree",
+        "(Z)V",
+        &[JValue::Bool(import_foreign_trees)],
+    );
+    clear_java_exception(&mut env, "MainActivity.launchOpenTree", result)?;
+    log::info!("saf: MainActivity.launchOpenTree() returned");
     Ok(())
 }
 
-fn launch_create_document(
-    android_app: &AndroidApp,
-    suggested_name: Option<&str>,
-) -> Result<()> {
+fn launch_create_document(android_app: &AndroidApp, suggested_name: Option<&str>) -> Result<()> {
     let vm = unsafe { JavaVM::from_raw(android_app.vm_as_ptr().cast())? };
     let mut env = vm.attach_current_thread()?;
     let activity = unsafe { JObject::from_raw(android_app.activity_as_ptr() as _) };
     let name = env.new_string(suggested_name.unwrap_or("untitled"))?;
-    env.call_method(
+    let result = env.call_method(
         &activity,
         "launchCreateDocument",
         "(Ljava/lang/String;)V",
         &[(&name).into()],
-    )?;
+    );
+    clear_java_exception(&mut env, "MainActivity.launchCreateDocument", result)?;
     Ok(())
+}
+
+fn clear_java_exception<T>(
+    env: &mut jni::JNIEnv<'_>,
+    operation: &str,
+    result: jni::errors::Result<T>,
+) -> Result<T> {
+    match result {
+        Ok(value) => Ok(value),
+        Err(err) => {
+            if env.exception_check().unwrap_or(false) {
+                let _ = env.exception_describe();
+                env.exception_clear()
+                    .with_context(|| format!("clear Java exception after {operation}"))?;
+            }
+            Err(anyhow::anyhow!("{operation} failed: {err}"))
+        }
+    }
 }
 
 /// Called from MainActivity's ActivityResultLauncher callback.
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_com_zdroid_MainActivity_onPickerResult<
-    'local,
->(
+pub extern "system" fn Java_com_zdroid_MainActivity_onPickerResult<'local>(
     mut env: jni::JNIEnv<'local>,
     _activity: JObject<'local>,
     uri_string: JString<'local>,
@@ -154,14 +180,13 @@ fn handle_tree_result(uri: &str) -> Result<Option<PathBuf>> {
     if uri.is_empty() {
         return Ok(None);
     }
-    if let Some(rest) =
-        uri.strip_prefix("content://com.android.externalstorage.documents/tree/")
-    {
+    if let Some(message) = uri.strip_prefix("zdroid-error:") {
+        anyhow::bail!("{}", percent_decode(message));
+    }
+    if let Some(rest) = uri.strip_prefix("content://com.android.externalstorage.documents/tree/") {
         return Ok(Some(decode_storage_segment(rest)?));
     }
-    if let Some(rest) =
-        uri.strip_prefix("content://com.zdroid.documents/tree/")
-    {
+    if let Some(rest) = uri.strip_prefix("content://com.zdroid.documents/tree/") {
         return Ok(Some(decode_zed_segment(rest)?));
     }
     Err(anyhow::anyhow!("unsupported tree URI authority: {uri}"))
@@ -176,9 +201,7 @@ fn handle_document_result(uri: &str) -> Result<Option<PathBuf>> {
     {
         return Ok(Some(decode_storage_segment(rest)?));
     }
-    if let Some(rest) =
-        uri.strip_prefix("content://com.zdroid.documents/document/")
-    {
+    if let Some(rest) = uri.strip_prefix("content://com.zdroid.documents/document/") {
         return Ok(Some(decode_zed_segment(rest)?));
     }
     Err(anyhow::anyhow!("unsupported document URI authority: {uri}"))
@@ -204,11 +227,7 @@ fn decode_storage_segment(segment: &str) -> Result<PathBuf> {
     } else {
         PathBuf::from(format!("/storage/{volume}"))
     };
-    Ok(if rel.is_empty() {
-        root
-    } else {
-        root.join(rel)
-    })
+    Ok(if rel.is_empty() { root } else { root.join(rel) })
 }
 
 fn percent_decode(s: &str) -> String {
@@ -217,10 +236,7 @@ fn percent_decode(s: &str) -> String {
     let mut i = 0;
     while i < bytes.len() {
         if bytes[i] == b'%' && i + 2 < bytes.len() {
-            if let (Some(hi), Some(lo)) = (
-                hex_value(bytes[i + 1]),
-                hex_value(bytes[i + 2]),
-            ) {
+            if let (Some(hi), Some(lo)) = (hex_value(bytes[i + 1]), hex_value(bytes[i + 2])) {
                 out.push((hi << 4) | lo);
                 i += 3;
                 continue;

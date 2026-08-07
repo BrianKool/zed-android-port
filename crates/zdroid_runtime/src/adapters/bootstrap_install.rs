@@ -16,6 +16,7 @@ use std::fs;
 use std::io::{Cursor, Read, Write as _};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 use anyhow::{Context, Result, anyhow};
 
@@ -51,6 +52,7 @@ const SYMLINKS_DELIM: &str = "←";
 /// currently extracted. Re-extracts only fire when this doesn't match
 /// the latest release tag at download time.
 const VERSION_FILE: &str = ".bootstrap-version";
+const DEPENDENCY_REPAIR_FILE: &str = ".dependencies-repaired-v2";
 
 /// Download the latest release zip + extract into `<prefix>` atomically.
 /// Idempotent against `<prefix>/.bootstrap-version` — if the on-disk
@@ -70,17 +72,16 @@ pub fn install_latest(
     if let Ok(existing) = fs::read_to_string(&version_file)
         && existing.trim() == tag_name
     {
-        log::info!(
-            "bootstrap_install: $PREFIX already at {tag_name}, skipping extract"
-        );
+        ensure_package_manager_launchers(prefix)?;
+        repair_bootstrap_dependencies(prefix, progress)?;
+        log::info!("bootstrap_install: $PREFIX already at {tag_name}, skipping extract");
         progress.step(&format!("Bootstrap {tag_name} already installed"));
         return Ok(());
     }
 
     progress.step(&format!("Downloading bootstrap {tag_name}"));
-    let zip_bytes = download_bootstrap_asset(release_repo, &tag_name).with_context(|| {
-        format!("download bootstrap asset for {release_repo} tag {tag_name}")
-    })?;
+    let zip_bytes = download_bootstrap_asset(release_repo, &tag_name, progress)
+        .with_context(|| format!("download bootstrap asset for {release_repo} tag {tag_name}"))?;
     log::info!(
         "bootstrap_install: downloaded {} bytes for tag {}",
         zip_bytes.len(),
@@ -95,6 +96,9 @@ pub fn install_latest(
     swap_staging_into_prefix(&staging, prefix)
         .with_context(|| format!("swap staging into {}", prefix.display()))?;
 
+    ensure_package_manager_launchers(prefix)?;
+    repair_bootstrap_dependencies(prefix, progress)?;
+
     if let Some(parent) = version_file.parent() {
         fs::create_dir_all(parent)?;
     }
@@ -108,6 +112,234 @@ pub fn install_latest(
         prefix.display()
     );
     progress.step(&format!("Bootstrap {tag_name} installed"));
+    Ok(())
+}
+
+/// Put package-manager shims ahead of `$PREFIX/bin` on Zdroid's PATH.
+/// A newly unpacked Termux executable can run during dpkg cleanup before the
+/// post-invoke RUNPATH hook patches it, so scope `$PREFIX/lib` to this process
+/// tree instead of setting `LD_LIBRARY_PATH` globally for the Android app.
+pub fn ensure_package_manager_launchers(prefix: &Path) -> Result<()> {
+    let launcher_dir = prefix.join(".zed/bin");
+    fs::create_dir_all(&launcher_dir)
+        .with_context(|| format!("create launcher directory at {}", launcher_dir.display()))?;
+
+    for tool in ["pkg", "apt", "apt-get"] {
+        let target = prefix.join("bin").join(tool);
+        if !target.is_file() {
+            continue;
+        }
+        let launcher = launcher_dir.join(tool);
+        let script = format!(
+            "#!/system/bin/sh\n\
+             export LD_LIBRARY_PATH=\"$PREFIX/lib${{LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}}\"\n\
+             export DEBIAN_FRONTEND=\"${{DEBIAN_FRONTEND:-noninteractive}}\"\n\
+             exec \"$PREFIX/bin/{tool}\" \"$@\"\n"
+        );
+        fs::write(&launcher, script)
+            .with_context(|| format!("write launcher at {}", launcher.display()))?;
+        let mut permissions = fs::metadata(&launcher)?.permissions();
+        permissions.set_mode(0o700);
+        fs::set_permissions(&launcher, permissions)
+            .with_context(|| format!("chmod launcher at {}", launcher.display()))?;
+    }
+
+    let dpkg_launcher = launcher_dir.join("zdroid-dpkg");
+    let dpkg_script = r#"#!/system/bin/sh
+PREFIX=${PREFIX:-/data/data/com.zdroid/files/usr}
+export PREFIX
+export TERMUX_APP__PACKAGE_NAME=com.zdroid
+export LD_LIBRARY_PATH="$PREFIX/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+
+rewrite_dpkg_metadata() {
+    info="$PREFIX/var/lib/dpkg/info"
+    if [ -d "$info" ]; then
+        find "$info" -type f -exec "$PREFIX/bin/sed" -i \
+            's|/data/data/com\.termux/|/data/data/com.zdroid/|g' {} + 2>/dev/null || true
+    fi
+    status="$PREFIX/var/lib/dpkg/status"
+    if [ -f "$status" ]; then
+        "$PREFIX/bin/sed" -i \
+            's|/data/data/com\.termux/|/data/data/com.zdroid/|g' "$status" 2>/dev/null || true
+    fi
+}
+
+# Rewrite incoming package archives before dpkg sees them. This covers direct
+# `dpkg -i` as well as apt's unpack calls, including transactions that unpack
+# and configure in one process where a post-invoke hook would be too late.
+preinstall="$PREFIX/etc/apt/zed-pre-install-rewrite.sh"
+has_debs=0
+for argument in "$@"; do
+    case "$argument" in
+        *.deb) has_debs=1 ;;
+    esac
+done
+if [ "$has_debs" -eq 1 ]; then
+    if [ ! -x "$preinstall" ]; then
+        echo "Zdroid-B: missing incoming package rewrite hook: $preinstall" >&2
+        exit 70
+    fi
+    for argument in "$@"; do
+        case "$argument" in
+            *.deb) printf '%s\n' "$argument" ;;
+        esac
+    done | "$preinstall"
+
+    # Refuse to start a transaction if control metadata still names the
+    # inaccessible Termux sandbox. Data binaries are handled by the ELF hook;
+    # this check targets maintainer scripts and conffiles that dpkg may execute
+    # or inspect immediately.
+    for argument in "$@"; do
+        case "$argument" in
+            *.deb)
+                verify_dir=$(mktemp -d) || exit 70
+                if ! "$PREFIX/bin/dpkg-deb" -e "$argument" "$verify_dir" >/dev/null 2>&1; then
+                    rm -rf "$verify_dir"
+                    echo "Zdroid-B: could not inspect package metadata: $argument" >&2
+                    exit 70
+                fi
+                if grep -rlI '/data/data/com\.termux/' "$verify_dir" >/dev/null 2>&1; then
+                    rm -rf "$verify_dir"
+                    echo "Zdroid-B: unsafe com.termux metadata remains in: $argument" >&2
+                    exit 70
+                fi
+                rm -rf "$verify_dir"
+                ;;
+        esac
+    done
+fi
+
+# Before fixes a transaction interrupted after unpack. After makes metadata
+# from incoming Termux packages safe before apt starts its configure pass.
+rewrite_dpkg_metadata
+"$PREFIX/bin/dpkg" "$@"
+result=$?
+rewrite_dpkg_metadata
+exit "$result"
+"#;
+    fs::write(&dpkg_launcher, dpkg_script)
+        .with_context(|| format!("write launcher at {}", dpkg_launcher.display()))?;
+    let mut permissions = fs::metadata(&dpkg_launcher)?.permissions();
+    permissions.set_mode(0o700);
+    fs::set_permissions(&dpkg_launcher, permissions)
+        .with_context(|| format!("chmod launcher at {}", dpkg_launcher.display()))?;
+
+    let user_dpkg_launcher = launcher_dir.join("dpkg");
+    fs::write(
+        &user_dpkg_launcher,
+        "#!/system/bin/sh\nexec \"$PREFIX/.zed/bin/zdroid-dpkg\" \"$@\"\n",
+    )
+    .with_context(|| format!("write launcher at {}", user_dpkg_launcher.display()))?;
+    let mut permissions = fs::metadata(&user_dpkg_launcher)?.permissions();
+    permissions.set_mode(0o700);
+    fs::set_permissions(&user_dpkg_launcher, permissions)
+        .with_context(|| format!("chmod launcher at {}", user_dpkg_launcher.display()))?;
+
+    let apt_config = prefix.join("etc/apt/apt.conf.d/96-zdroid-dpkg-wrapper");
+    if let Some(parent) = apt_config.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(
+        &apt_config,
+        format!(
+            "Dir::Bin::dpkg \"{}\";\n\
+             Dpkg::Options {{\n\
+               \"--force-confdef\";\n\
+               \"--force-confold\";\n\
+             }};\n",
+            dpkg_launcher.to_string_lossy()
+        ),
+    )
+    .with_context(|| format!("write apt config at {}", apt_config.display()))?;
+    Ok(())
+}
+
+fn bootstrap_env(prefix: &Path) -> Result<(PathBuf, PathBuf, String)> {
+    let home = prefix
+        .parent()
+        .map(|files| files.join("home"))
+        .unwrap_or_else(|| prefix.join("home"));
+    let tmp = prefix.join("tmp");
+    fs::create_dir_all(&home)?;
+    fs::create_dir_all(&tmp)?;
+    let path = format!(
+        "{}:{}",
+        prefix.join(".zed/bin").display(),
+        prefix.join("bin").display()
+    );
+    Ok((home, tmp, path))
+}
+
+fn run_bootstrap_command(prefix: &Path, label: &str, program: &Path, args: &[&str]) -> Result<()> {
+    let (home, tmp, path) = bootstrap_env(prefix)?;
+    let mut command = Command::new(program);
+    command
+        .args(args)
+        .env("PREFIX", prefix)
+        .env("HOME", &home)
+        .env("TMPDIR", &tmp)
+        .env("DEBIAN_FRONTEND", "noninteractive")
+        // Keep this scoped to bootstrap package-manager children. Setting it
+        // on Zdroid globally can make Android system binaries load Termux
+        // libraries, while omitting it makes dpkg cleanup fail when a freshly
+        // unpacked coreutils binary has not had its RUNPATH rewritten yet.
+        .env("LD_LIBRARY_PATH", prefix.join("lib"))
+        .env("PATH", path);
+
+    let termux_exec = prefix.join("lib/libtermux-exec.so");
+    if termux_exec.is_file() {
+        command.env("LD_PRELOAD", termux_exec);
+    }
+
+    let output = command
+        .output()
+        .with_context(|| format!("run {label} using {}", program.display()))?;
+
+    if output.status.success() {
+        return Ok(());
+    }
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    Err(anyhow!(
+        "{label} failed ({}): {}{}",
+        output.status,
+        stdout.trim(),
+        stderr.trim()
+    ))
+}
+
+/// Published bootstrap images currently contain a few preinstalled packages
+/// whose declared dependencies are not included in the archive (`clang` for
+/// golang/dpkg-perl and `rust-src` for rust-analyzer). Repair once immediately
+/// after extraction so the user's first `pkg upgrade` starts from a consistent
+/// dpkg state.
+fn repair_bootstrap_dependencies(prefix: &Path, progress: &mut dyn ProgressSink) -> Result<()> {
+    let marker = prefix.join(DEPENDENCY_REPAIR_FILE);
+    if marker.is_file() {
+        return Ok(());
+    }
+
+    let apt_get = prefix.join("bin/apt-get");
+    if !apt_get.is_file() {
+        return Err(anyhow!(
+            "{} is missing after bootstrap extraction",
+            apt_get.display()
+        ));
+    }
+
+    progress.step("Repairing bootstrap package dependencies");
+    run_bootstrap_command(
+        prefix,
+        "bootstrap dependency repair",
+        &apt_get,
+        &["--fix-broken", "install", "-y"],
+    )?;
+
+    fs::write(&marker, b"ok\n")
+        .with_context(|| format!("write dependency repair marker at {}", marker.display()))?;
+    progress.step("Bootstrap package dependencies repaired");
+    log::info!("bootstrap_install: package dependency repair completed");
     Ok(())
 }
 
@@ -130,19 +362,14 @@ fn resolve_latest_tag(release_repo: &str) -> Result<String> {
         Err(ureq::Error::Status(_, resp)) => resp,
         Err(e) => return Err(anyhow!("HTTP GET {url}: {e}")),
     };
-    let location = resp.header("Location").ok_or_else(|| {
-        anyhow!(
-            "no Location header on {url}; got status {}",
-            resp.status()
-        )
-    })?;
+    let location = resp
+        .header("Location")
+        .ok_or_else(|| anyhow!("no Location header on {url}; got status {}", resp.status()))?;
     let marker = "/releases/tag/";
     let after = location.find(marker).map(|i| &location[i + marker.len()..]);
     let tag = after
         .and_then(|s| s.split('/').next().filter(|t| !t.is_empty()))
-        .ok_or_else(|| {
-            anyhow!("expected `/releases/tag/<tag>` in Location {location}")
-        })?;
+        .ok_or_else(|| anyhow!("expected `/releases/tag/<tag>` in Location {location}"))?;
     Ok(tag.to_owned())
 }
 
@@ -157,15 +384,16 @@ fn resolve_latest_tag(release_repo: &str) -> Result<String> {
 /// first asset whose name matches `<ASSET_NAME_PREFIX>*<ASSET_NAME_SUFFIX>`.
 /// One API request, eats one quota slot from the 60-req/hour limit,
 /// but kicks in only when uploads landed under a non-canonical name.
-fn download_bootstrap_asset(release_repo: &str, tag: &str) -> Result<Vec<u8>> {
-    let canonical_url = format!(
-        "https://github.com/{release_repo}/releases/download/{tag}/{RELEASE_ASSET_NAME}"
-    );
-    match fetch_asset_bytes(&canonical_url) {
+fn download_bootstrap_asset(
+    release_repo: &str,
+    tag: &str,
+    progress: &mut dyn ProgressSink,
+) -> Result<Vec<u8>> {
+    let canonical_url =
+        format!("https://github.com/{release_repo}/releases/download/{tag}/{RELEASE_ASSET_NAME}");
+    match fetch_asset_bytes(&canonical_url, progress) {
         Ok(bytes) => {
-            log::info!(
-                "bootstrap_install: fetched canonical asset {RELEASE_ASSET_NAME}"
-            );
+            log::info!("bootstrap_install: fetched canonical asset {RELEASE_ASSET_NAME}");
             Ok(bytes)
         }
         Err(FetchError::NotFound) => {
@@ -174,11 +402,10 @@ fn download_bootstrap_asset(release_repo: &str, tag: &str) -> Result<Vec<u8>> {
                  falling back to API asset enumeration"
             );
             let alt_name = find_alt_asset_name(release_repo, tag)?;
-            let alt_url = format!(
-                "https://github.com/{release_repo}/releases/download/{tag}/{alt_name}"
-            );
+            let alt_url =
+                format!("https://github.com/{release_repo}/releases/download/{tag}/{alt_name}");
             log::info!("bootstrap_install: fetching alt asset {alt_name}");
-            match fetch_asset_bytes(&alt_url) {
+            match fetch_asset_bytes(&alt_url, progress) {
                 Ok(bytes) => Ok(bytes),
                 Err(FetchError::NotFound) => Err(anyhow!(
                     "asset {alt_name} present in API listing but returned 404 on download"
@@ -195,7 +422,10 @@ enum FetchError {
     Other(anyhow::Error),
 }
 
-fn fetch_asset_bytes(url: &str) -> std::result::Result<Vec<u8>, FetchError> {
+fn fetch_asset_bytes(
+    url: &str,
+    progress: &mut dyn ProgressSink,
+) -> std::result::Result<Vec<u8>, FetchError> {
     let resp = ureq::get(url)
         .set("User-Agent", "zdroid-bootstrap-installer")
         .call();
@@ -208,10 +438,20 @@ fn fetch_asset_bytes(url: &str) -> std::result::Result<Vec<u8>, FetchError> {
         .header("Content-Length")
         .and_then(|s| s.parse::<usize>().ok())
         .unwrap_or(0);
+    let total = cap as u64;
     let mut buf = Vec::with_capacity(cap);
-    resp.into_reader()
-        .read_to_end(&mut buf)
-        .map_err(|e| FetchError::Other(anyhow!("read body from {url}: {e}")))?;
+    let mut reader = resp.into_reader();
+    let mut chunk = [0u8; 128 * 1024];
+    loop {
+        let read = reader
+            .read(&mut chunk)
+            .map_err(|e| FetchError::Other(anyhow!("read body from {url}: {e}")))?;
+        if read == 0 {
+            break;
+        }
+        buf.extend_from_slice(&chunk[..read]);
+        progress.progress(buf.len() as u64, total);
+    }
     Ok(buf)
 }
 
@@ -230,13 +470,9 @@ fn find_alt_asset_name(release_repo: &str, tag: &str) -> Result<String> {
     let candidates = parse_asset_names(&body);
     candidates
         .into_iter()
-        .find(|name| {
-            name.starts_with(ASSET_NAME_PREFIX) && name.ends_with(ASSET_NAME_SUFFIX)
-        })
+        .find(|name| name.starts_with(ASSET_NAME_PREFIX) && name.ends_with(ASSET_NAME_SUFFIX))
         .ok_or_else(|| {
-            anyhow!(
-                "release {tag} has no asset matching {ASSET_NAME_PREFIX}*{ASSET_NAME_SUFFIX}"
-            )
+            anyhow!("release {tag} has no asset matching {ASSET_NAME_PREFIX}*{ASSET_NAME_SUFFIX}")
         })
 }
 
@@ -291,9 +527,8 @@ fn swap_staging_into_prefix(staging: &Path, prefix: &Path) -> Result<()> {
         fs::remove_dir_all(prefix)
             .with_context(|| format!("wipe old prefix at {}", prefix.display()))?;
     }
-    fs::rename(staging, prefix).with_context(|| {
-        format!("rename {} -> {}", staging.display(), prefix.display())
-    })?;
+    fs::rename(staging, prefix)
+        .with_context(|| format!("rename {} -> {}", staging.display(), prefix.display()))?;
     Ok(())
 }
 
@@ -352,8 +587,7 @@ fn extract_entries<R: Read + std::io::Seek>(
         std::io::copy(&mut entry, &mut out)?;
 
         if let Some(mode) = entry_mode {
-            let owner_only =
-                (mode & 0o700) | if mode & 0o100 != 0 { 0o700 } else { 0o600 };
+            let owner_only = (mode & 0o700) | if mode & 0o100 != 0 { 0o700 } else { 0o600 };
             let mut perms = fs::metadata(&dest)?.permissions();
             perms.set_mode(owner_only);
             fs::set_permissions(&dest, perms)?;

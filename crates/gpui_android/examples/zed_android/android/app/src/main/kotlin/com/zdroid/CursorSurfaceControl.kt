@@ -1,16 +1,17 @@
 package com.zdroid
 
+import android.annotation.TargetApi
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.PixelFormat
 import android.graphics.PorterDuff
+import android.graphics.Rect
 import android.os.Build
 import android.util.Log
 import android.view.Surface
 import android.view.SurfaceControl
 import android.view.SurfaceView
-import androidx.annotation.RequiresApi
 
 /// Hardware-composited cursor sprite. Lives as a child `SurfaceControl`
 /// of the main SurfaceView's SurfaceControl, so SurfaceFlinger composes
@@ -33,7 +34,7 @@ import androidx.annotation.RequiresApi
 /// devices fall back to no cursor sprite (the trackpad gestures still
 /// work, the user just doesn't see a pointer). Gate at the call site —
 /// don't instantiate this class below API Q.
-@RequiresApi(Build.VERSION_CODES.Q)
+@TargetApi(Build.VERSION_CODES.Q)
 internal class CursorSurfaceControl(
     context: Context,
     parentSurfaceView: SurfaceView,
@@ -65,8 +66,7 @@ internal class CursorSurfaceControl(
             .setName("zdroid_cursor_overlay")
             .setParent(parent)
             .setBufferSize(displaySizePx, displaySizePx)
-            .setFormat(PixelFormat.TRANSLUCENT)
-            .setHidden(true)
+            .setFormat(PixelFormat.RGBA_8888)
             .build()
     } catch (t: Throwable) {
         Log.e(TAG, "SurfaceControl.Builder failed", t)
@@ -115,10 +115,15 @@ internal class CursorSurfaceControl(
         // refresh drops the panel to 30Hz on idle and the cursor
         // (composed at the panel rate) inherits the drop.
         surfaceControl?.let { sc ->
-            transaction
-                .setLayer(sc, 1)
-                .setFrameRate(sc, 120f, Surface.FRAME_RATE_COMPATIBILITY_DEFAULT)
-                .apply()
+            transaction.setLayer(sc, 1)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                transaction.setFrameRate(
+                    sc,
+                    120f,
+                    Surface.FRAME_RATE_COMPATIBILITY_DEFAULT,
+                )
+            }
+            transaction.apply()
         }
         // Paint the initial arrow sprite so the buffer is non-empty
         // before first show.
@@ -136,9 +141,21 @@ internal class CursorSurfaceControl(
         lastX = x
         lastY = y
         val (hotX, hotY) = hotSpots[currentStyle] ?: (0 to 0)
-        transaction
-            .setPosition(sc, x - hotX, y - hotY)
-            .apply()
+        val left = x - hotX
+        val top = y - hotY
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            transaction.setPosition(sc, left, top)
+        } else {
+            val source = Rect(0, 0, displaySizePx, displaySizePx)
+            val destination = Rect(
+                left.toInt(),
+                top.toInt(),
+                left.toInt() + displaySizePx,
+                top.toInt() + displaySizePx,
+            )
+            transaction.setGeometry(sc, source, destination, Surface.ROTATION_0)
+        }
+        transaction.apply()
     }
 
     /// Pending Arrow application, scheduled via [arrowHandler]. Held

@@ -56,7 +56,7 @@ Native Linux chroot. Requires root via Magisk's su. The wrapper:
 2. Idempotently runs NetHunter's `bootkali_init` to ensure
    `/dev`, `/proc`, `/sys`, `/sdcard`, `/system` are mounted into
    the rootfs.
-3. Bind-mounts Zdroid's home (`/data/data/com.zdroid/files/home`) at
+3. Bind-mounts Zdroid-B's home (`/data/data/com.zdroid/files/home`) at
    `RUNTIME_HOME_BIND` (default `/zed`) inside the rootfs.
 4. Translates the host cwd to a path inside the rootfs.
 5. Chroots in via `busybox_nh chroot`.

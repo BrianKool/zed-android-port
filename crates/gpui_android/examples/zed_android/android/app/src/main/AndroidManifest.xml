@@ -16,6 +16,10 @@
          explicit after. -->
     <uses-permission android:name="android.permission.INTERNET"/>
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE"/>
+    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE"/>
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
+    <uses-permission android:name="android.permission.WAKE_LOCK"/>
     <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE"/>
     <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE"/>
     <!-- Required for the in-app updater to hand the downloaded APK to
@@ -26,8 +30,8 @@
     <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES"/>
 
     <application
-        android:name=".ZedApplication"
-        android:label="Zdroid"
+        android:name="com.zdroid.ZedApplication"
+        android:label="Zdroid-B"
         android:icon="@mipmap/ic_launcher"
         android:roundIcon="@mipmap/ic_launcher_round"
         android:theme="@style/Theme.Zdroid.Splash"
@@ -45,7 +49,7 @@
           layoutDirection handles RTL toggle. Verbose but cheap.
         -->
         <activity
-            android:name=".MainActivity"
+            android:name="com.zdroid.MainActivity"
             android:exported="true"
             android:theme="@style/Theme.Zdroid.Splash"
             android:windowLayoutInDisplayCutoutMode="always"
@@ -60,20 +64,28 @@
             </intent-filter>
         </activity>
 
-        <!--
-          Each cx.open_window beyond the primary spawns one of these.
-          documentLaunchMode="always" implies FLAG_ACTIVITY_NEW_DOCUMENT |
-          FLAG_ACTIVITY_MULTIPLE_TASK, so each open is a fresh task with its
-          own Recents card and (in freeform mode) its own OS-chromed window.
-          taskAffinity differentiates from MainActivity's task. exported=false
-          because only our own Rust code launches it (via JNI Intent).
-        -->
-        <activity
-            android:name=".ExtraWindowActivity"
+        <service
+            android:name="com.zdroid.AgentForegroundService"
             android:exported="false"
+            android:stopWithTask="false"/>
+
+        <!-- CLI/ACP subprocesses cannot call Activity APIs directly. Their
+             BROWSER helper sends an explicit same-app broadcast here, and this
+             receiver launches the URL with Android's default browser. -->
+        <receiver
+            android:name="com.zdroid.OpenUrlReceiver"
+            android:exported="false"/>
+
+        <!-- Secondary GPUI surfaces stay in MainActivity's task. On phones
+             they behave like in-app pages; under DeX they remain inside the
+             existing Zdroid-B window instead of creating separate freeform
+             windows or Recents entries. -->
+        <activity
+            android:name="com.zdroid.ExtraWindowActivity"
+            android:exported="false"
+            android:theme="@style/Theme.Zdroid.Secondary"
             android:resizeableActivity="true"
-            android:documentLaunchMode="always"
-            android:taskAffinity="com.zdroid.extra"
+            android:documentLaunchMode="never"
             android:windowLayoutInDisplayCutoutMode="always"
             android:configChanges="orientation|screenSize|smallestScreenSize|screenLayout|density|keyboard|keyboardHidden|navigation|uiMode|colorMode|fontScale|fontWeightAdjustment|layoutDirection|locale|mcc|mnc|touchscreen"
             android:windowSoftInputMode="adjustResize|stateAlwaysHidden"/>
@@ -89,7 +101,7 @@
           for.
         -->
         <provider
-            android:name=".ZedDocumentsProvider"
+            android:name="com.zdroid.ZedDocumentsProvider"
             android:authorities="com.zdroid.documents"
             android:exported="true"
             android:grantUriPermissions="true"

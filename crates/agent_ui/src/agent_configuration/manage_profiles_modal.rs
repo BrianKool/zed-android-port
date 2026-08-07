@@ -984,6 +984,7 @@ impl Render for ManageProfilesModal {
         div()
             .elevation_3(cx)
             .w(rems(34.))
+            .max_w_full()
             .key_context("ManageProfilesModal")
             .on_action(cx.listener(|this, _: &menu::Cancel, window, cx| this.cancel(window, cx)))
             .on_action(cx.listener(|this, _: &menu::Confirm, window, cx| this.confirm(window, cx)))
@@ -1042,7 +1043,12 @@ impl Render for ManageProfilesModal {
                             Some(IconName::ZedAgent),
                         ))
                         .child(ListSeparator)
-                        .child(v_flex().w(rems(34.)).child(model_picker.clone()))
+                        .child(
+                            v_flex()
+                                .w(rems(34.))
+                                .max_w_full()
+                                .child(model_picker.clone()),
+                        )
                         .child(ListSeparator)
                         .child(go_back_item)
                         .into_any_element()

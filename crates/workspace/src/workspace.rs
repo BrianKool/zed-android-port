@@ -4318,6 +4318,13 @@ impl Workspace {
         }
     }
 
+    /// Reveal and focus the active item in the center panes, dismissing any
+    /// zoomed dock panel that would otherwise obscure it.
+    pub fn reveal_center_pane(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.dismiss_zoomed_items_to_reveal(None, window, cx);
+        self.focus_center_pane(window, cx);
+    }
+
     pub fn activate_panel_for_proto_id(
         &mut self,
         panel_id: PanelId,
@@ -5351,8 +5358,12 @@ impl Workspace {
             };
             match dock.position() {
                 DockPosition::Left => self.resize_left_dock(panel_size + amount, false, window, cx),
-                DockPosition::Bottom => self.resize_bottom_dock(panel_size + amount, false, window, cx),
-                DockPosition::Right => self.resize_right_dock(panel_size + amount, false, window, cx),
+                DockPosition::Bottom => {
+                    self.resize_bottom_dock(panel_size + amount, false, window, cx)
+                }
+                DockPosition::Right => {
+                    self.resize_right_dock(panel_size + amount, false, window, cx)
+                }
             }
         } else {
             self.center
@@ -6096,20 +6107,26 @@ impl Workspace {
         self.update_window_edited(window, cx);
     }
 
-    fn render_notifications(&self, _window: &mut Window, _cx: &mut Context<Self>) -> Option<Div> {
+    fn render_notifications(&self, window: &mut Window, _cx: &mut Context<Self>) -> Option<Div> {
         if self.notifications.is_empty() {
             None
         } else {
+            let compact =
+                cfg!(target_os = "android") && window.viewport_size().width.as_f32() < 520.0;
             Some(
                 div()
                     .absolute()
                     .right_3()
-                    .bottom_3()
+                    .when(compact, |this| this.left_3().top_3())
+                    .when(!compact, |this| this.bottom_3())
                     .w_112()
+                    .when(compact, |this| this.w_auto())
                     .h_full()
+                    .when(compact, |this| this.h_auto())
                     .flex()
                     .flex_col()
                     .justify_end()
+                    .when(compact, |this| this.justify_start())
                     .gap_2()
                     .children(
                         self.notifications
@@ -7833,6 +7850,19 @@ impl Workspace {
                 let size = size_state
                     .and_then(|state| state.size)
                     .unwrap_or_else(|| panel.default_size(window, cx));
+                #[cfg(target_os = "android")]
+                let size = {
+                    // The IME reduces the GPUI SurfaceView height. A bottom dock
+                    // previously kept its pre-keyboard absolute height, allowing
+                    // a tall terminal's prompt to extend behind the keyboard.
+                    // Clamp only the rendered height so the user's preferred
+                    // expanded size returns when the keyboard closes.
+                    let minimum_center_height = px(96.);
+                    let available_height = window.viewport_size().height;
+                    let maximum_dock_height =
+                        (available_height - minimum_center_height).max(px(120.));
+                    size.min(maximum_dock_height)
+                };
                 container = container.h(size);
             }
         }
@@ -11139,6 +11169,11 @@ pub fn open_settings_file(
             .await?;
         let _ = worktree_creation_task.await?;
         let _ = settings_open_task.await?;
+        workspace.update_in(cx, |workspace, window, cx| {
+            window.activate_window();
+            workspace.reveal_center_pane(window, cx);
+            cx.notify();
+        })?;
         anyhow::Ok(())
     })
     .detach_and_log_err(cx);
@@ -11160,16 +11195,19 @@ pub fn init_settings_file_actions(cx: &mut App) {
             );
         });
     });
-    cx.on_action(|_: &zed_actions::OpenSettingsFile, cx| {
-        with_active_or_new_workspace(cx, |_, window, cx| {
-            open_settings_file(
-                paths::settings_file(),
-                || settings::initial_user_settings_content().as_ref().into(),
-                window,
-                cx,
-            );
+    #[cfg(not(target_os = "android"))]
+    {
+        cx.on_action(|_: &zed_actions::OpenSettingsFile, cx| {
+            with_active_or_new_workspace(cx, |_, window, cx| {
+                open_settings_file(
+                    paths::settings_file(),
+                    || settings::initial_user_settings_content().as_ref().into(),
+                    window,
+                    cx,
+                );
+            });
         });
-    });
+    }
 }
 
 #[cfg(test)]

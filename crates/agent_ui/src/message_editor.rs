@@ -476,6 +476,7 @@ impl MessageEditor {
             let buffer = cx.new(|cx| MultiBuffer::singleton(buffer, cx));
 
             let mut editor = Editor::new(mode, buffer, None, window, cx);
+            editor.set_auto_show_ime(true);
             editor.set_placeholder_text(placeholder, window, cx);
             editor.set_show_indent_guides(false, cx);
             editor.set_show_completions_on_input(Some(true));
@@ -2049,7 +2050,7 @@ impl Addon for MessageEditorAddon {
 
     fn extend_key_context(&self, key_context: &mut KeyContext, cx: &App) {
         let settings = agent_settings::AgentSettings::get_global(cx);
-        if settings.use_modifier_to_send {
+        if settings.use_modifier_to_send || cfg!(target_os = "android") {
             key_context.add("use_modifier_to_send");
         }
     }

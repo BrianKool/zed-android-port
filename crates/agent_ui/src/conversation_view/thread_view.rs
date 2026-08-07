@@ -16,8 +16,8 @@ use feature_flags::AcpBetaFeatureFlag;
 use crate::completion_provider::AvailableSkill;
 use crate::message_editor::SharedSessionCapabilities;
 
-use gpui::List;
 use gpui::TaskExt;
+use gpui::{List, MouseButton};
 use heapless::Vec as ArrayVec;
 use language_model::{LanguageModelEffortLevel, Speed};
 use settings::update_settings_file;
@@ -1421,6 +1421,12 @@ impl ThreadView {
                 this.clear_external_source_prompt_warning(cx);
                 let generation = this.start_turn(cx);
                 this.in_flight_prompt = Some(contents.clone());
+                if parent_session_id.is_none() {
+                    cx.start_background_task(
+                        &session_id.to_string(),
+                        &format!("{} is working", this.agent_id.0),
+                    );
+                }
                 generation
             })?;
 
@@ -3571,6 +3577,9 @@ impl ThreadView {
         let fills_container = !has_messages || editor_expanded;
 
         h_flex()
+            .w_full()
+            .max_w_full()
+            .min_w_0()
             .p_2()
             .bg(editor_bg_color)
             .justify_center()
@@ -3586,8 +3595,10 @@ impl ThreadView {
             })
             .child(
                 v_flex()
-                    .when_some(max_content_width, |this, max_w| this.flex_basis(max_w))
-                    .when(max_content_width.is_none(), |this| this.w_full())
+                    .w_full()
+                    .max_w_full()
+                    .min_w_0()
+                    .when_some(max_content_width, |this, max_w| this.max_w(max_w))
                     .when(fills_container, |this| this.h_full())
                     .flex_shrink()
                     .flex_grow_0()
@@ -3638,11 +3649,23 @@ impl ThreadView {
                     .child(
                         h_flex()
                             .w_full()
+                            .max_w_full()
+                            .min_w_0()
                             .flex_none()
                             .flex_wrap()
+                            .gap_y_1()
                             .justify_between()
+                            .when(cfg!(target_os = "android"), |this| {
+                                this.on_mouse_down(MouseButton::Left, |_, window, _cx| {
+                                    if window.soft_keyboard_visible() {
+                                        window.toggle_soft_keyboard();
+                                    }
+                                })
+                            })
                             .child(
                                 h_flex()
+                                    .min_w_0()
+                                    .flex_wrap()
                                     .gap_0p5()
                                     .child(self.render_add_context_button(cx))
                                     .child(self.render_follow_toggle(cx))
@@ -3651,6 +3674,8 @@ impl ThreadView {
                             )
                             .child(
                                 h_flex()
+                                    .min_w_0()
+                                    .max_w_full()
                                     .flex_wrap()
                                     .gap_1()
                                     .children(self.render_token_usage(cx))

@@ -361,7 +361,8 @@ impl Render for ThreadSwitcher {
             .key_context("ThreadSwitcher")
             .track_focus(&self.focus_handle)
             .p_1p5()
-            .w(rems_from_px(440.))
+            .w_full()
+            .max_w(rems_from_px(440.))
             .elevation_3(cx)
             .on_modifiers_changed(cx.listener(Self::handle_modifiers_changed))
             .on_action(cx.listener(Self::confirm))
@@ -374,6 +375,9 @@ impl Render for ThreadSwitcher {
                     .max_h_128()
                     .overflow_y_scroll()
                     .track_scroll(&self.scroll_handle)
+                    .when(self.entries.is_empty(), |this| {
+                        this.p_4().child("No conversation history yet")
+                    })
                     .children(self.entries.iter().enumerate().map(|(ix, entry)| {
                         let diff_stats = entry.diff_stats();
 

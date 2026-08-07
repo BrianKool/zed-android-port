@@ -7159,9 +7159,8 @@ impl EditorElement {
                     // and falls through to the touch SM's scroll
                     // synthesis, which is exactly the "whole column
                     // acts like one big drag" bug.
-                    let Some((scrollbar_layout, axis)) = scrollbars_layout
-                        .get_hovered_axis(window)
-                        .or_else(|| {
+                    let Some((scrollbar_layout, axis)) =
+                        scrollbars_layout.get_hovered_axis(window).or_else(|| {
                             scrollbars_layout
                                 .iter_scrollbars()
                                 .find(|(layout, _)| layout.hitbox.bounds.contains(&event.position))
@@ -7823,7 +7822,8 @@ impl EditorElement {
 
                     if event.modifiers.secondary()
                         && editor.read(cx).enable_mouse_wheel_zoom
-                        && EditorSettings::get_global(cx).mouse_wheel_zoom
+                        && (EditorSettings::get_global(cx).mouse_wheel_zoom
+                            || cfg!(target_os = "android"))
                     {
                         let delta_y = match event.delta {
                             ScrollDelta::Pixels(pixels) => pixels.y.into(),

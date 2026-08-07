@@ -109,6 +109,28 @@ const TOKEN_THRESHOLD: u64 = 250;
 
 pub(crate) const DRAFT_PROMPT_PERSIST_DEBOUNCE: Duration = Duration::from_millis(250);
 
+#[cfg(target_os = "android")]
+fn android_agent_account_note(agent_id: &AgentId) -> Option<&'static str> {
+    match agent_id.as_ref() {
+        "gemini" => Some(
+            "Account availability is controlled by Google. Individual accounts may not be accepted; Gemini Code Assist Enterprise or API-key access may be required.",
+        ),
+        "github-copilot-cli" => {
+            Some("Sign in with a GitHub account that has GitHub Copilot access.")
+        }
+        "grok-build" => Some("Sign in with an xAI account that has Grok Build access."),
+        "opencode" => Some(
+            "OpenCode requires at least one model provider configured in its own CLI. Provider terms and charges apply.",
+        ),
+        _ => None,
+    }
+}
+
+#[cfg(not(target_os = "android"))]
+fn android_agent_account_note(_agent_id: &AgentId) -> Option<&'static str> {
+    None
+}
+
 mod thread_view;
 pub use thread_view::*;
 
@@ -1523,9 +1545,19 @@ impl ConversationView {
                 self.load_subagent_session(subagent_session_id.clone(), session_id, window, cx)
             }
             AcpThreadEvent::ToolAuthorizationRequested(_) => {
+                if !is_subagent {
+                    cx.start_background_task(
+                        &session_id.to_string(),
+                        "Agent is waiting for tool confirmation",
+                    );
+                }
                 self.notify_with_sound("Waiting for tool confirmation", IconName::Info, window, cx);
             }
-            AcpThreadEvent::ToolAuthorizationReceived(_) => {}
+            AcpThreadEvent::ToolAuthorizationReceived(_) => {
+                if !is_subagent {
+                    cx.start_background_task(&session_id.to_string(), "Agent is working");
+                }
+            }
             AcpThreadEvent::Retry(retry) => {
                 if let Some(active) = self.thread_view(&session_id) {
                     active.update(cx, |active, _cx| {
@@ -1585,6 +1617,13 @@ impl ConversationView {
                 // is not actually idle and a notification here would fire just before the
                 // next turn starts.
                 if !should_send_queued {
+                    let successful = *stop_reason == acp::StopReason::EndTurn;
+                    let description = if successful {
+                        "Agent task completed"
+                    } else {
+                        "Agent task stopped"
+                    };
+                    cx.finish_background_task(&session_id.to_string(), description, successful);
                     let used_tools = thread.read(cx).used_tools_since_last_user_message();
                     self.notify_with_sound(
                         if used_tools {
@@ -1609,6 +1648,11 @@ impl ConversationView {
                     });
                 }
                 if !is_subagent {
+                    cx.finish_background_task(
+                        &session_id.to_string(),
+                        "Agent refused the request",
+                        false,
+                    );
                     let model_or_agent_name = self.current_model_name(cx);
                     let notification_message =
                         format!("{} refused to respond to this request", model_or_agent_name);
@@ -1630,6 +1674,11 @@ impl ConversationView {
                     });
                 }
                 if !is_subagent {
+                    cx.finish_background_task(
+                        &session_id.to_string(),
+                        "Agent stopped due to an error",
+                        false,
+                    );
                     self.notify_with_sound(
                         "Agent stopped due to an error",
                         IconName::Warning,
@@ -2125,6 +2174,7 @@ impl ConversationView {
             .read(cx)
             .agent_display_name(&self.agent.agent_id())
             .unwrap_or_else(|| self.agent.agent_id().0);
+        let android_account_note = android_agent_account_note(&self.agent.agent_id());
 
         let show_fallback_description = auth_methods.len() > 1
             && configuration_view.is_none()
@@ -2196,6 +2246,10 @@ impl ConversationView {
             .description_slot(
                 v_flex()
                     .text_ui(cx)
+                    .when_some(android_account_note, |this, note| {
+                        this.gap_1()
+                            .child(Label::new(note).size(LabelSize::Small).color(Color::Muted))
+                    })
                     .map(|this| {
                         if show_fallback_description {
                             this.child(
@@ -2618,6 +2672,11 @@ impl ConversationView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if cfg!(target_os = "android") {
+            let _ = (&caption, &icon, &*window, &*cx);
+            return;
+        }
+
         if !self.notifications.is_empty() {
             return;
         }

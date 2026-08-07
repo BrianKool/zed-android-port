@@ -1,18 +1,45 @@
-use gpui::{App, Context, DismissEvent, WeakEntity, Window};
+use askpass::{AskPassDelegate, AskPassSession};
+use gpui::{App, AppContext, Context, DismissEvent, WeakEntity, Window};
 use notifications::status_toast::StatusToast;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use ui::{Color, Icon, IconName, IconSize, SharedString};
 use util::ResultExt;
-use workspace::{self, Workspace};
+use workspace::{
+    self, Workspace,
+    notifications::{ErrorMessagePrompt, NotificationId},
+};
 
 /// Outcome of a single `git clone` invocation.
 enum CloneOutcome {
     Completed,
     Cancelled,
+}
+
+struct GitCloneErrorNotification;
+
+fn show_clone_error(workspace: &mut Workspace, message: String, cx: &mut Context<Workspace>) {
+    workspace.show_notification(
+        NotificationId::unique::<GitCloneErrorNotification>(),
+        cx,
+        |cx| cx.new(|cx| ErrorMessagePrompt::new(format!("Git Clone failed: {message}"), cx)),
+    );
+}
+
+fn redacted_repo_url(url: &str) -> String {
+    let without_suffix = url.split(['?', '#']).next().unwrap_or(url);
+    let Some((scheme, remainder)) = without_suffix.split_once("://") else {
+        return without_suffix.to_owned();
+    };
+    let authority_end = remainder.find('/').unwrap_or(remainder.len());
+    let (authority, path) = remainder.split_at(authority_end);
+    let host = authority
+        .rsplit_once('@')
+        .map_or(authority, |(_, host)| host);
+    format!("{scheme}://{host}{path}")
 }
 
 /// Spawns `git clone --progress <url>` in `cwd`, polls for exit or
@@ -25,23 +52,50 @@ fn run_git_clone(
     url: &str,
     cwd: &Path,
     cancel: &AtomicBool,
+    askpass_script: &std::ffi::OsStr,
 ) -> anyhow::Result<CloneOutcome> {
+    let safe_url = redacted_repo_url(url);
+    log::info!(
+        "git clone: starting url={safe_url} cwd={} PATH={}",
+        cwd.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
     let mut child = Command::new("git")
         .arg("clone")
         .arg("--progress")
         .arg(url)
         .current_dir(cwd)
+        .env("GIT_ASKPASS", askpass_script)
+        .env("SSH_ASKPASS", askpass_script)
+        .env("SSH_ASKPASS_REQUIRE", "force")
+        .env("GIT_TERMINAL_PROMPT", "0")
         .spawn()
-        .map_err(|err| anyhow::anyhow!("spawn git clone for {url}: {err}"))?;
+        .map_err(|err| {
+            anyhow::anyhow!(
+                "spawn git clone for {safe_url} in {} failed: {err} (PATH={})",
+                cwd.display(),
+                std::env::var("PATH").unwrap_or_default()
+            )
+        })?;
     loop {
         if cancel.load(Ordering::Relaxed) {
             let _ = child.kill();
             let _ = child.wait();
+            log::info!("git clone: cancelled url={safe_url} cwd={}", cwd.display());
             return Ok(CloneOutcome::Cancelled);
         }
         match child.try_wait()? {
-            Some(status) if status.success() => return Ok(CloneOutcome::Completed),
-            Some(status) => anyhow::bail!("git clone exited with {status}"),
+            Some(status) if status.success() => {
+                log::info!("git clone: completed url={safe_url} cwd={}", cwd.display());
+                return Ok(CloneOutcome::Completed);
+            }
+            Some(status) => {
+                log::error!(
+                    "git clone: failed url={safe_url} cwd={} status={status}",
+                    cwd.display()
+                );
+                anyhow::bail!("git clone exited with {status}")
+            }
             None => {
                 // Block one background-pool thread for ~200ms between
                 // polls. background_spawn pool is sized for blocking
@@ -57,23 +111,88 @@ fn run_git_clone(
 pub fn clone_and_open(
     repo_url: SharedString,
     workspace: WeakEntity<Workspace>,
+    askpass: AskPassDelegate,
     window: &mut Window,
     cx: &mut App,
     on_success: Arc<
         dyn Fn(&mut Workspace, &mut Window, &mut Context<Workspace>) + Send + Sync + 'static,
     >,
 ) {
-    let destination_prompt = cx.prompt_for_paths(gpui::PathPromptOptions {
-        files: false,
-        directories: true,
-        multiple: false,
-        prompt: Some("Select as Repository Destination".into()),
+    clone_and_open_with_destination(repo_url, None, workspace, askpass, window, cx, on_success);
+}
+
+pub fn clone_and_open_at(
+    repo_url: SharedString,
+    destination_dir: PathBuf,
+    workspace: WeakEntity<Workspace>,
+    askpass: AskPassDelegate,
+    window: &mut Window,
+    cx: &mut App,
+    on_success: Arc<
+        dyn Fn(&mut Workspace, &mut Window, &mut Context<Workspace>) + Send + Sync + 'static,
+    >,
+) {
+    clone_and_open_with_destination(
+        repo_url,
+        Some(destination_dir),
+        workspace,
+        askpass,
+        window,
+        cx,
+        on_success,
+    );
+}
+
+fn clone_and_open_with_destination(
+    repo_url: SharedString,
+    destination_dir: Option<PathBuf>,
+    workspace: WeakEntity<Workspace>,
+    askpass: AskPassDelegate,
+    window: &mut Window,
+    cx: &mut App,
+    on_success: Arc<
+        dyn Fn(&mut Workspace, &mut Window, &mut Context<Workspace>) + Send + Sync + 'static,
+    >,
+) {
+    let destination_prompt = destination_dir.is_none().then(|| {
+        cx.prompt_for_paths(gpui::PathPromptOptions {
+            files: false,
+            directories: true,
+            multiple: false,
+            prompt: Some("Select as Repository Destination".into()),
+        })
     });
 
     window
         .spawn(cx, async move |cx| {
-            let mut paths = destination_prompt.await.ok()?.ok()??;
-            let mut destination_dir = paths.pop()?;
+            let mut destination_dir = match destination_dir {
+                Some(destination_dir) => destination_dir,
+                None => {
+                    let mut paths = destination_prompt?.await.ok()?.ok()??;
+                    paths.pop()?
+                }
+            };
+            let safe_repo_url = redacted_repo_url(&repo_url);
+            log::info!(
+                "git clone: destination selected url={} destination={}",
+                safe_repo_url,
+                destination_dir.display()
+            );
+
+            let askpass_session =
+                match AskPassSession::new(cx.background_executor().clone(), askpass).await {
+                    Ok(session) => session,
+                    Err(error) => {
+                        log::error!("git clone: failed to start askpass session: {error:#}");
+                        workspace
+                            .update(cx, |workspace, cx| {
+                                show_clone_error(workspace, error.to_string(), cx);
+                            })
+                            .log_err();
+                        return None;
+                    }
+                };
+            let askpass_script = askpass_session.script_path().as_ref().to_owned();
 
             let repo_name = repo_url
                 .split('/')
@@ -123,10 +242,18 @@ pub fn clone_and_open(
                 let cancel_for_worker = cancel.clone();
                 cx.background_executor()
                     .spawn(async move {
-                        run_git_clone(&url_for_worker, &cwd_for_worker, &cancel_for_worker)
+                        run_git_clone(
+                            &url_for_worker,
+                            &cwd_for_worker,
+                            &cancel_for_worker,
+                            &askpass_script,
+                        )
                     })
                     .await
             };
+
+            // Keep the socket-backed AskPass proxy alive until git exits.
+            drop(askpass_session);
 
             // Always dismiss the progress toast — completion, cancel, or error.
             let _ = progress_toast.update(cx, |_, cx| cx.emit(DismissEvent));
@@ -146,6 +273,11 @@ pub fn clone_and_open(
                     return None;
                 }
                 Err(error) => {
+                    log::error!(
+                        "git clone: failed url={} destination={}: {error:#}",
+                        safe_repo_url,
+                        destination_dir.display()
+                    );
                     let cloned_dir = destination_dir.join(&repo_name);
                     if let Err(err) = std::fs::remove_dir_all(&cloned_dir) {
                         log::warn!(
@@ -155,15 +287,7 @@ pub fn clone_and_open(
                     }
                     workspace
                         .update(cx, |workspace, cx| {
-                            let toast = StatusToast::new(error.to_string(), cx, |this, _| {
-                                this.icon(
-                                    Icon::new(IconName::XCircle)
-                                        .size(IconSize::Small)
-                                        .color(Color::Error),
-                                )
-                                .dismiss_button(true)
-                            });
-                            workspace.toggle_status_toast(toast, cx);
+                            show_clone_error(workspace, error.to_string(), cx);
                         })
                         .log_err();
                     return None;
@@ -265,4 +389,21 @@ pub fn clone_and_open(
             Some(())
         })
         .detach();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::redacted_repo_url;
+
+    #[test]
+    fn redacts_credentials_and_url_suffixes_from_clone_logs() {
+        assert_eq!(
+            redacted_repo_url("https://user:secret@github.com/acme/repo.git?token=secret#main"),
+            "https://github.com/acme/repo.git"
+        );
+        assert_eq!(
+            redacted_repo_url("git@github.com:acme/repo.git"),
+            "git@github.com:acme/repo.git"
+        );
+    }
 }

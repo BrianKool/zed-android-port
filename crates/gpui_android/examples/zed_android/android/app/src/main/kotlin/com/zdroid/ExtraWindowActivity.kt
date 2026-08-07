@@ -1,15 +1,20 @@
 package com.zdroid
 
 import android.content.Context
+import android.graphics.Color
+import android.graphics.drawable.GradientDrawable
 import android.os.Build
 import android.os.Bundle
 import android.util.Log
 import android.view.InputDevice
+import android.view.Gravity
 import android.view.KeyEvent
 import android.view.MotionEvent
 import android.view.SurfaceHolder
 import android.view.SurfaceView
 import android.view.View
+import android.widget.FrameLayout
+import android.widget.ImageButton
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
@@ -64,6 +69,20 @@ class ExtraWindowActivity : AppCompatActivity(), ImeHost {
     /// calls to [showIme] / [hideIme] which requestFocus on this view
     /// and invoke `InputMethodManager`.
     private var imeHostView: ImeHostView? = null
+    private var selectionOverlay: SelectionOverlayController? = null
+
+    @Suppress("unused")
+    fun updateSelectionUi(
+        visible: Boolean,
+        startX: Float,
+        startY: Float,
+        endX: Float,
+        endY: Float,
+    ) {
+        runOnUiThread {
+            selectionOverlay?.update(visible, startX, startY, endX, endY)
+        }
+    }
 
     // No `ExtraKeysView` for extra windows: the row is editor-
     // focused (arrows, Esc, Tab, Ctrl, Alt) and renders only
@@ -79,6 +98,7 @@ class ExtraWindowActivity : AppCompatActivity(), ImeHost {
     /// `take_input_handler` fires per paint, so we filter repeats
     /// before touching `InputMethodManager`.
     private var imeShown: Boolean = false
+    private var textInputActive: Boolean = false
     private var programmaticHidePending: Boolean = false
     private var programmaticShowPending: Boolean = false
     private var lastImeInsetBottom: Int = 0
@@ -130,6 +150,8 @@ class ExtraWindowActivity : AppCompatActivity(), ImeHost {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        @Suppress("DEPRECATION")
+        overridePendingTransition(0, 0)
 
         // Edge-to-edge to match MainActivity. On phone (non-freeform) this
         // makes the secondary surface fill the screen end-to-end. On
@@ -166,6 +188,7 @@ class ExtraWindowActivity : AppCompatActivity(), ImeHost {
         }
 
         NativeBridge.nativeOnExtraActivityCreated(extraWindowId, this)
+        selectionOverlay = SelectionOverlayController(this, extraWindowId)
 
         val id = extraWindowId
         surfaceView = ScrollableSurfaceView(this).apply {
@@ -240,7 +263,35 @@ class ExtraWindowActivity : AppCompatActivity(), ImeHost {
             // builds bypass that listener path when DeX windowing
             // is active.
         }
-        setContentView(surfaceView)
+        val root = FrameLayout(this).apply {
+            addView(
+                surfaceView,
+                FrameLayout.LayoutParams(
+                    FrameLayout.LayoutParams.MATCH_PARENT,
+                    FrameLayout.LayoutParams.MATCH_PARENT,
+                ),
+            )
+            addView(
+                ImageButton(this@ExtraWindowActivity).apply {
+                    setImageResource(android.R.drawable.ic_menu_close_clear_cancel)
+                    imageTintList = android.content.res.ColorStateList.valueOf(Color.WHITE)
+                    contentDescription = "Close and return to Zdroid-B"
+                    background = GradientDrawable().apply {
+                        shape = GradientDrawable.OVAL
+                        setColor(Color.argb(210, 45, 47, 54))
+                        setStroke(dp(1), Color.argb(220, 125, 129, 140))
+                    }
+                    setPadding(dp(10), dp(10), dp(10), dp(10))
+                    elevation = dp(8).toFloat()
+                    setOnClickListener { closeAndReturn() }
+                },
+                FrameLayout.LayoutParams(dp(44), dp(44), Gravity.TOP or Gravity.END).apply {
+                    topMargin = dp(12)
+                    marginEnd = dp(12)
+                },
+            )
+        }
+        setContentView(root)
 
         // IME host. Invisible 1x1 view that owns the InputConnection
         // for this extra window's gpui surface. Without it, focusing
@@ -272,6 +323,8 @@ class ExtraWindowActivity : AppCompatActivity(), ImeHost {
                 if (programmaticHidePending) {
                     programmaticHidePending = false
                     Log.i(TAG_IME, "WindowInsets[w=$extraWindowId]: IME hidden (programmatic)")
+                } else if (!hasWindowFocus()) {
+                    Log.i(TAG_IME, "WindowInsets[w=$extraWindowId]: IME hidden while window inactive")
                 } else {
                     Log.i(
                         TAG_IME,
@@ -281,6 +334,7 @@ class ExtraWindowActivity : AppCompatActivity(), ImeHost {
                 }
                 setImeShown(false)
             }
+            applyImeViewportInset(imeBottom)
             lastImeInsetBottom = imeBottom
             insets
         }
@@ -321,24 +375,38 @@ class ExtraWindowActivity : AppCompatActivity(), ImeHost {
     @Suppress("unused")
     fun showIme() {
         runOnUiThread {
-            val host = imeHostView ?: run {
-                Log.w(TAG_IME, "showIme[w=$extraWindowId]: imeHostView is null, skipping")
-                return@runOnUiThread
-            }
-            if (imeManuallyDismissed) {
-                Log.i(TAG_IME, "showIme[w=$extraWindowId] suppressed (user dismissed)")
-                return@runOnUiThread
-            }
-            Log.i(
-                TAG_IME,
-                "showIme[w=$extraWindowId] imeShown=$imeShown hostFocused=${host.isFocused}"
-            )
-            if (imeShown) return@runOnUiThread
-            if (!host.isFocused) host.requestFocus()
-            programmaticShowPending = true
-            WindowInsetsControllerCompat(window, window.decorView)
-                .show(WindowInsetsCompat.Type.ime())
-            setImeShown(true)
+            textInputActive = true
+            requestImeShow(clearManualDismiss = false)
+        }
+    }
+
+    @Suppress("unused")
+    fun reassertIme() {
+        runOnUiThread {
+            textInputActive = true
+            requestImeShow(clearManualDismiss = true)
+        }
+    }
+
+    private fun requestImeShow(clearManualDismiss: Boolean, retry: Boolean = false) {
+        val host = imeHostView ?: return
+        if (clearManualDismiss) setImeManuallyDismissed(false)
+        if (imeManuallyDismissed || imeShown || !textInputActive || !hasWindowFocus()) return
+
+        if (!host.isFocused) host.requestFocus()
+        val imm = getSystemService(Context.INPUT_METHOD_SERVICE)
+            as android.view.inputmethod.InputMethodManager
+        programmaticShowPending = true
+        WindowInsetsControllerCompat(window, window.decorView)
+            .show(WindowInsetsCompat.Type.ime())
+        imm.showSoftInput(host, android.view.inputmethod.InputMethodManager.SHOW_IMPLICIT)
+
+        if (!retry) {
+            host.postDelayed({
+                if (!imeShown && textInputActive && hasWindowFocus() && !imeManuallyDismissed) {
+                    requestImeShow(clearManualDismiss = false, retry = true)
+                }
+            }, 180L)
         }
     }
 
@@ -346,6 +414,7 @@ class ExtraWindowActivity : AppCompatActivity(), ImeHost {
     @Suppress("unused")
     fun hideIme() {
         runOnUiThread {
+            textInputActive = false
             Log.i(TAG_IME, "hideIme[w=$extraWindowId] imeShown=$imeShown")
             if (!imeShown) return@runOnUiThread
             programmaticHidePending = true
@@ -359,10 +428,9 @@ class ExtraWindowActivity : AppCompatActivity(), ImeHost {
     @Suppress("unused")
     fun toggleIme() {
         runOnUiThread {
-            val host = imeHostView ?: return@runOnUiThread
-            val imm = getSystemService(Context.INPUT_METHOD_SERVICE)
-                as android.view.inputmethod.InputMethodManager
+            if (imeHostView == null) return@runOnUiThread
             if (imeShown) {
+                textInputActive = false
                 Log.i(TAG_IME, "toggleIme[w=$extraWindowId]: hiding (manual dismiss)")
                 programmaticHidePending = true
                 WindowInsetsControllerCompat(window, window.decorView)
@@ -371,10 +439,8 @@ class ExtraWindowActivity : AppCompatActivity(), ImeHost {
                 setImeManuallyDismissed(true)
             } else {
                 Log.i(TAG_IME, "toggleIme[w=$extraWindowId]: showing (clearing manual-dismiss)")
-                if (!host.isFocused) host.requestFocus()
-                imm.showSoftInput(host, 0)
-                setImeShown(true)
-                setImeManuallyDismissed(false)
+                textInputActive = true
+                requestImeShow(clearManualDismiss = true)
             }
         }
     }
@@ -435,6 +501,8 @@ class ExtraWindowActivity : AppCompatActivity(), ImeHost {
     }
 
     override fun onDestroy() {
+        selectionOverlay?.destroy()
+        selectionOverlay = null
         Log.i(TAG, "onDestroy windowId=$extraWindowId")
         cursorOverlay?.release()
         cursorOverlay = null
@@ -446,25 +514,18 @@ class ExtraWindowActivity : AppCompatActivity(), ImeHost {
 
     override fun onWindowFocusChanged(hasFocus: Boolean) {
         super.onWindowFocusChanged(hasFocus)
-        // Mirror MainActivity: request capture when this window gains
-        // focus and a trackpad/mouse is connected, release when focus
-        // is lost. Without this, spawned windows fall back to
-        // Samsung's gesture filter which mangles trackpad gestures
-        // into single-finger fake-mouse events.
-        if (hasFocus) {
-            if (hasIndirectPointer()) {
-                Log.i(TAG, "requestPointerCapture() windowId=$extraWindowId")
-                window.decorView.requestPointerCapture()
-            }
-        } else {
-            window.decorView.releasePointerCapture()
-        }
+        // Keep DeX's system cursor available for moving and resizing both
+        // the main app window and auxiliary Zdroid windows.
+        window.decorView.releasePointerCapture()
         // Maintain SurfaceControl lifecycle on focus change but let
         // visibility derive from the input modality. See
         // `MainActivity.onWindowFocusChanged` for the rationale.
         if (::surfaceView.isInitialized && trackpadModeActive && hasFocus) {
             ensureCursorOverlay()
             cursorOverlay?.move(cursorX, cursorY)
+        }
+        if (hasFocus && textInputActive && !imeManuallyDismissed) {
+            imeHostView?.postDelayed({ requestImeShow(clearManualDismiss = false) }, 120L)
         }
         applyCursorVisibility()
     }
@@ -728,6 +789,10 @@ class ExtraWindowActivity : AppCompatActivity(), ImeHost {
     }
 
     override fun dispatchKeyEvent(event: KeyEvent): Boolean {
+        if (event.keyCode == KeyEvent.KEYCODE_BACK) {
+            if (event.action == KeyEvent.ACTION_UP) closeAndReturn()
+            return true
+        }
         if (event.action == KeyEvent.ACTION_DOWN && InputModality.isPointer()) {
             InputModality.setNonPointer()
             applyCursorVisibility()
@@ -773,6 +838,20 @@ class ExtraWindowActivity : AppCompatActivity(), ImeHost {
         }
     }
 
+    /** Keep this GPUI surface above the soft keyboard in edge-to-edge mode. */
+    private fun applyImeViewportInset(imeBottom: Int) {
+        val params = surfaceView.layoutParams
+        if (params is android.view.ViewGroup.MarginLayoutParams) {
+            if (params.bottomMargin == imeBottom) return
+            params.bottomMargin = imeBottom
+            surfaceView.layoutParams = params
+            surfaceView.requestLayout()
+            Log.i(TAG_IME, "GPUI viewport[w=$extraWindowId] bottom inset=$imeBottom")
+        } else {
+            Log.w(TAG_IME, "SurfaceView has no margin layout params; IME resize skipped")
+        }
+    }
+
     private fun forwardTouchEvent(id: Long, event: MotionEvent) {
         val pointerCount = event.pointerCount
         if (pointerCount <= 0) return
@@ -804,6 +883,15 @@ class ExtraWindowActivity : AppCompatActivity(), ImeHost {
             ys,
             ids,
         )
+    }
+
+    private fun dp(value: Int): Int =
+        (value * resources.displayMetrics.density + 0.5f).toInt()
+
+    private fun closeAndReturn() {
+        finish()
+        @Suppress("DEPRECATION")
+        overridePendingTransition(0, 0)
     }
 
     companion object {

@@ -217,6 +217,13 @@ pub trait PickerDelegate: Sized + 'static {
                     .flex_none()
                     .h_9()
                     .px_2p5()
+                    .when(cfg!(target_os = "android"), |this| {
+                        this.on_mouse_down(MouseButton::Left, |_, window, _cx| {
+                            if !window.soft_keyboard_visible() {
+                                window.toggle_soft_keyboard();
+                            }
+                        })
+                    })
                     .child(editor.render(window, cx)),
             )
             .when(

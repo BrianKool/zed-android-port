@@ -27,11 +27,13 @@ use anyhow::{Context, Result};
 use jni::{JavaVM, objects::JObject};
 
 static REQUESTED: OnceLock<()> = OnceLock::new();
+static ANDROID_APP: OnceLock<AndroidApp> = OnceLock::new();
 
 /// Fire the `requestStoragePermissions()` JNI call once per process. Logs
 /// the result code (1 = already granted, 0 = dialog posted). Re-entry from
 /// activity recreation is a no-op via `OnceLock`.
 pub fn request_once(android_app: &AndroidApp) {
+    let _ = ANDROID_APP.set(android_app.clone());
     if REQUESTED.get().is_some() {
         return;
     }
@@ -40,7 +42,11 @@ pub fn request_once(android_app: &AndroidApp) {
             log::info!(
                 "storage: requestStoragePermissions returned {} ({})",
                 code,
-                if code == 1 { "already granted" } else { "dialog posted" }
+                if code == 1 {
+                    "already granted"
+                } else {
+                    "dialog posted"
+                }
             );
             let _ = REQUESTED.set(());
         }
@@ -51,6 +57,60 @@ pub fn request_once(android_app: &AndroidApp) {
             log::warn!("storage: requestStoragePermissions failed: {err:#}");
         }
     }
+}
+
+/// Returns true only after the initial storage and notification permission
+/// prompts have both produced a result. The runtime picker uses this to avoid
+/// opening a second Activity over Android's permission controller.
+pub fn initial_permissions_settled() -> bool {
+    let Some(android_app) = ANDROID_APP.get() else {
+        return false;
+    };
+    query_initial_permissions_settled(android_app).unwrap_or_else(|err| {
+        log::warn!("storage: initial permission state query failed: {err:#}");
+        false
+    })
+}
+
+/// Applies the user's background-execution setting to Android's foreground
+/// service. The activity persists the value, so it also controls process
+/// restarts and first-launch startup after permissions settle.
+pub fn set_background_execution_enabled(enabled: bool) {
+    let Some(android_app) = ANDROID_APP.get() else {
+        log::warn!("storage: AndroidApp unavailable for background execution setting");
+        return;
+    };
+    if let Err(err) = set_background_execution_enabled_inner(android_app, enabled) {
+        log::warn!("storage: background execution setting failed: {err:#}");
+    }
+}
+
+fn set_background_execution_enabled_inner(android_app: &AndroidApp, enabled: bool) -> Result<()> {
+    let vm = unsafe { JavaVM::from_raw(android_app.vm_as_ptr().cast())? };
+    let mut env = vm
+        .attach_current_thread()
+        .context("attach_current_thread for background execution setting")?;
+    let activity = unsafe { JObject::from_raw(android_app.activity_as_ptr() as _) };
+    env.call_method(
+        &activity,
+        "setBackgroundExecutionEnabled",
+        "(Z)V",
+        &[enabled.into()],
+    )
+    .context("MainActivity.setBackgroundExecutionEnabled")?;
+    Ok(())
+}
+
+fn query_initial_permissions_settled(android_app: &AndroidApp) -> Result<bool> {
+    let vm = unsafe { JavaVM::from_raw(android_app.vm_as_ptr().cast())? };
+    let mut env = vm
+        .attach_current_thread()
+        .context("attach_current_thread for initial permission state")?;
+    let activity = unsafe { JObject::from_raw(android_app.activity_as_ptr() as _) };
+    Ok(env
+        .call_method(&activity, "isInitialPermissionFlowSettled", "()Z", &[])
+        .context("MainActivity.isInitialPermissionFlowSettled")?
+        .z()?)
 }
 
 fn request_inner(android_app: &AndroidApp) -> Result<i32> {
@@ -81,10 +141,7 @@ fn request_inner(android_app: &AndroidApp) -> Result<i32> {
 pub fn setup_user_symlinks(termux_home: &Path) {
     let storage_dir = termux_home.join("storage");
     if let Err(err) = std::fs::create_dir_all(&storage_dir) {
-        log::warn!(
-            "storage: create {}: {err:#}",
-            storage_dir.display()
-        );
+        log::warn!("storage: create {}: {err:#}", storage_dir.display());
         return;
     }
 
@@ -272,8 +329,7 @@ pub fn copy_tree(
     if !src.is_dir() {
         anyhow::bail!("copy_tree: source {} is not a directory", src.display());
     }
-    std::fs::create_dir_all(dst)
-        .with_context(|| format!("create_dir_all {}", dst.display()))?;
+    std::fs::create_dir_all(dst).with_context(|| format!("create_dir_all {}", dst.display()))?;
     let mut progress = CopyProgress::default();
     let mut stack: Vec<(PathBuf, PathBuf)> = vec![(src.to_path_buf(), dst.to_path_buf())];
     while let Some((cur_src, cur_dst)) = stack.pop() {
@@ -310,9 +366,7 @@ pub fn copy_tree(
                 match std::fs::read_link(&entry_src) {
                     Ok(target) => {
                         let _ = std::fs::remove_file(&entry_dst);
-                        if let Err(err) =
-                            std::os::unix::fs::symlink(&target, &entry_dst)
-                        {
+                        if let Err(err) = std::os::unix::fs::symlink(&target, &entry_dst) {
                             log::warn!(
                                 "storage: symlink {} -> {}: {err:#}",
                                 entry_dst.display(),
@@ -320,17 +374,11 @@ pub fn copy_tree(
                             );
                         }
                     }
-                    Err(err) => log::warn!(
-                        "storage: read_link {}: {err:#}",
-                        entry_src.display()
-                    ),
+                    Err(err) => log::warn!("storage: read_link {}: {err:#}", entry_src.display()),
                 }
             } else if file_type.is_dir() {
                 if let Err(err) = std::fs::create_dir_all(&entry_dst) {
-                    log::warn!(
-                        "storage: mkdir {}: {err:#}",
-                        entry_dst.display()
-                    );
+                    log::warn!("storage: mkdir {}: {err:#}", entry_dst.display());
                     continue;
                 }
                 progress.dirs += 1;

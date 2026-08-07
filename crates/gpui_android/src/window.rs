@@ -13,7 +13,7 @@ use raw_window_handle as rwh;
 
 use gpui::{
     AnyWindowHandle, Bounds, Capslock, DevicePixels, DispatchEventResult, GpuSpecs, Modifiers,
-    PlatformAtlas, PlatformDisplay, PlatformInput, PlatformInputHandler, PlatformWindow, Pixels,
+    Pixels, PlatformAtlas, PlatformDisplay, PlatformInput, PlatformInputHandler, PlatformWindow,
     Point, PromptButton, PromptLevel, RequestFrameOptions, Scene, Size, WindowAppearance,
     WindowBackgroundAppearance, WindowBounds, WindowControlArea, WindowParams, point, px, size,
 };
@@ -171,6 +171,10 @@ pub(crate) struct AndroidWindowState {
     /// spawned window wouldn't trigger show_keyboard because the
     /// global was already true for MainActivity.
     pub(crate) ime_currently_visible: bool,
+    /// Set after a pointer-down leaves a text input focused. Unlike the
+    /// focus-edge mirror above, this lets a second tap re-open an IME that
+    /// Android dismissed while the gpui input handler remained installed.
+    pub(crate) ime_reassert_requested: bool,
     /// Per-window cache of the last classified IME target kind
     /// (terminal vs editor). On change we issue restartInput on this
     /// window's Activity so the IME's EditorInfo reflects the new
@@ -183,6 +187,8 @@ pub(crate) struct AndroidWindowState {
     /// diff we re-push so the IME observes touch-driven cursor moves
     /// in this specific window.
     pub(crate) last_pushed_selection: Option<(usize, usize)>,
+    /// Physical-pixel endpoints last sent to Android's selection overlay.
+    pub(crate) last_selection_overlay: Option<(i32, i32, i32, i32)>,
 }
 
 #[derive(Clone)]
@@ -440,10 +446,25 @@ impl AndroidWindowStatePtr {
     /// active `PlatformInputHandler` (gpui's text-input path) when the
     /// callback didn't claim them.
     pub(crate) fn handle_input(&self, input: PlatformInput) {
+        let pointer_down_position = match &input {
+            PlatformInput::MouseDown(event) => Some(event.position),
+            _ => None,
+        };
         let callback = self.callbacks.borrow_mut().input.take();
         if let Some(mut callback) = callback {
             let result = callback(input.clone());
             self.callbacks.borrow_mut().input = Some(callback);
+            if let Some(position) = pointer_down_position {
+                let mut state = self.state.borrow_mut();
+                let tapped_text_input = state
+                    .input_handler
+                    .as_mut()
+                    .and_then(|handler| handler.character_index_for_point(position))
+                    .is_some();
+                if tapped_text_input {
+                    state.ime_reassert_requested = true;
+                }
+            }
             if !result.propagate {
                 return;
             }
@@ -517,8 +538,10 @@ impl AndroidWindow {
             ime_composition_start: None,
             ime_composition_text: None,
             ime_currently_visible: false,
+            ime_reassert_requested: false,
             last_ime_target_kind: None,
             last_pushed_selection: None,
+            last_selection_overlay: None,
         };
 
         Self {
@@ -714,10 +737,7 @@ impl PlatformWindow for AndroidWindow {
         self.ptr.callbacks.borrow_mut().should_close = Some(callback);
     }
 
-    fn on_hit_test_window_control(
-        &self,
-        _callback: Box<dyn FnMut() -> Option<WindowControlArea>>,
-    ) {
+    fn on_hit_test_window_control(&self, _callback: Box<dyn FnMut() -> Option<WindowControlArea>>) {
     }
 
     fn on_close(&self, callback: Box<dyn FnOnce()>) {
@@ -760,8 +780,7 @@ impl PlatformWindow for AndroidWindow {
         // tapped again. Kotlin's WindowInsetsListener will correct
         // if the OS-side toggle fails for any reason.
         let new_visible = !crate::ime::soft_keyboard_visible();
-        crate::ime::SOFT_KEYBOARD_VISIBLE
-            .store(new_visible, std::sync::atomic::Ordering::Release);
+        crate::ime::SOFT_KEYBOARD_VISIBLE.store(new_visible, std::sync::atomic::Ordering::Release);
         crate::ime::toggle_keyboard(&android_app, extra_window_id);
     }
 

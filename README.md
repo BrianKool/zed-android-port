@@ -2,21 +2,33 @@
   <img src="crates/gpui_android/examples/zed_android/docs/screenshots/zdroid-logo.png" width="120" alt="Zdroid logo" />
 </p>
 
-<h1 align="center">Zdroid</h1>
+<h1 align="center">Zdroid-B</h1>
 
 <p align="center"><sub><em>Zed on Android.</em></sub></p>
 
 <p align="center">
-  Started as a joke. Rust on aarch64, sounded portable. Laughed about it. Kept going. Couldn't stop. There's an APK.
+  Zed on Android, shaped for phones, tablets, and Samsung DeX.
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/status-alpha-orange" alt="Alpha" />
+  <img src="https://img.shields.io/badge/release-1.0.0-2ea44f" alt="Release 1.0.0" />
   <img src="https://img.shields.io/badge/platform-Android-3DDC84?logo=android" alt="Android" />
-  <a href="https://github.com/Dylanmurzello/zed-android-port/releases/latest"><img src="https://img.shields.io/github/downloads/Dylanmurzello/zed-android-port/total?label=downloads" alt="Total downloads" /></a>
+  <a href="https://github.com/BrianKool/zed-android-port/releases/latest"><img src="https://img.shields.io/github/downloads/BrianKool/zed-android-port/total?label=downloads" alt="Total downloads" /></a>
 </p>
 
-Zdroid is an independent port of [Zed](https://zed.dev) for Android, not affiliated with Zed Industries. Upstream's `Editor`, `Workspace`, `Project`, `Search`, `GitGraph`, `Extensions`, and `Terminal` crates run unchanged on a custom `gpui_android` platform backend that composites every pixel via the Adreno Vulkan driver, targeting Android 9+ with a hardware keyboard. A bundled Linux userland (Termux-derived, repackaged under `com.zdroid`) lets apt, bash, git, ssh, node, go, and rust-analyzer all run in-process from the app's private data dir; alternative runtime adapters route through a Kali chroot or an existing Termux install.
+Zdroid-B is BrianKool's independent fork of the [Zed Android port](https://github.com/Dylanmurzello/zed-android-port), not affiliated with Zed Industries. It keeps Zed's native Rust editor and GPUI rendering while adding a responsive mobile interface, an integrated Linux-style terminal environment, subscription-based AI agents, GitHub workflows, and on-device GGUF models. It targets arm64 devices running Android 9 or newer; phone layouts down to 360 logical pixels and Samsung DeX are first-class use cases.
+
+## Zdroid-B 1.0 highlights
+
+- **Native Zed workspace:** editor, project tree, search, Git changes, terminal, extensions, keymaps, command palette, and persisted workspaces.
+- **AI agents without separate API billing:** install and sign in to Codex CLI or Claude Code in the Zdroid-B terminal, then use them through ACP in the Agent Panel. Conversations and unfinished drafts persist locally.
+- **Local LLM provider:** download, verify, start, stop, search, import, and delete GGUF models directly from Settings. The built-in mobile catalog includes Qwen Coder, DeepSeek, Gemma, and Llama models up to 7B.
+- **Accelerated local inference:** configurable CPU threads, context, batch size, and output limit, with Vulkan GPU offload and automatic CPU fallback through `llama.cpp`.
+- **GitHub integration:** device-flow sign-in, account-aware repository browser, searchable clone flow, shared Git credentials for the terminal and Git panel, commit identity setup, staging, rollback, stash, commit, push, and history.
+- **Mobile and DeX input:** Android text selection, soft-keyboard focus rules, Termux-style terminal keys, independent editor and terminal font sizes, mouse wheel support, corrected pointer coordinates, and pointer release outside the app.
+- **Responsive modal workflow:** Settings, runtime selection, clone, trust, GitHub account, and other blocking flows appear as dismissible in-app dialogs that fit phone and DeX layouts.
+- **Background execution:** one foreground session notification keeps terminal and agent tasks alive, supports wake lock control, reports running task count, and notifies when all tasks finish.
+- **Safer bootstrap setup:** first-run runtime selection, download progress, package repair, package snapshots, and command actions for installing or signing in to popular agent CLIs.
 
 ---
 
@@ -26,42 +38,41 @@ Zdroid is an independent port of [Zed](https://zed.dev) for Android, not affilia
 
 Vulkan via wgpu. AChoreographer-driven vsync, no JNI hop per frame. Opt-in 120Hz with Mailbox present mode. Glyph fallback into `/system/fonts` so Powerline arrows and CJK render without bundling fonts. The `Editor`, `Workspace`, `Project`, `MultiWorkspace`, `Search`, `GitPanel`, `GitGraph`, `Extensions`, and `Terminal` crates run unchanged. The Rust `.so` is the app process. gpui composites every pixel (yes, you read that right) straight into the Adreno Vulkan driver. Multi-Activity OS-chromed extra windows so DeX freeform renders Settings and secondary editors with real chrome.
 
-Termux userland rebuilt under `com.zdroid` (applicationId byte-length pinned to 10 because prebuilt RUNPATHs in the .debs don't stretch). Musl loader hex-patched at runtime so Bun-compiled binaries like claude-code and codex resolve `/etc/resolv.conf` to a JNI-populated `/sdcard/.zed/r`. Optional Magisk-flashable `zd-spawnd` daemon with SCM_RIGHTS stdio relay for the chroot runtime. SurfaceControl-composited hardware cursor sprite on a sibling overlay, separate from the wgpu frame. Pointer-capture trackpad that consumes historical motion samples so finger drags don't lose 80% of their travel to event batching. SAF DocumentsProvider exposing `~/` as a system volume. Native Android trust via `rustls-platform-verifier`. In-app updater pulling signed APKs from GitHub Releases. Everything else is upstream. Deep-dives for the platform layer live in [`crates/gpui_android/docs/workarounds/`](crates/gpui_android/docs/workarounds/).
+Termux userland rebuilt under `com.zdroid` (applicationId byte-length pinned to 12 because prebuilt RUNPATHs in the .debs don't stretch). Musl loader hex-patched at runtime so Bun-compiled binaries like claude-code and codex resolve `/etc/resolv.conf` to a JNI-populated `/sdcard/.zed/r`. Optional Magisk-flashable `zd-spawnd` daemon with SCM_RIGHTS stdio relay for the chroot runtime. SurfaceControl-composited hardware cursor sprite on a sibling overlay, separate from the wgpu frame. Pointer-capture trackpad that consumes historical motion samples so finger drags don't lose 80% of their travel to event batching. SAF DocumentsProvider exposing `~/` as a system volume. Native Android trust via `rustls-platform-verifier`. In-app updater pulling signed APKs from GitHub Releases. Everything else is upstream. Deep-dives for the platform layer live in [`crates/gpui_android/docs/workarounds/`](crates/gpui_android/docs/workarounds/).
 
 ---
 
 ## <img src="https://api.iconify.design/lucide:download.svg?color=%23999999&height=22" valign="middle" /> &nbsp;Install
 
-Grab the latest `Zdroid-X.Y.Z.apk` from the [releases page](https://github.com/Dylanmurzello/zed-android-port/releases/latest) and open it in your file manager. Android prompts for unknown-source installs the first time; grant it. Reinstalls upgrade in place because every release ships from the same signing cert.
+Download [`Zdroid-B-1.0.0.apk`](https://github.com/BrianKool/zed-android-port/releases/latest) from the latest release and open it in your file manager. Android prompts for permission to install unknown apps the first time. Later Zdroid-B releases can upgrade in place because they use the same release signing certificate.
 
 > [!NOTE]
 > Android may show a "built for an older version of Android" warning before you tap Install. Proceed anyway. `targetSdk` is pinned at 28 on purpose: the bundled Termux userland depends on the `untrusted_app_27` SELinux domain, which permits `execve` on app-private files. Bumping `targetSdk` to 29+ lands the process in a stricter domain that denies exec, and the entire runtime stops working. See [`docs/workarounds/targetsdk-28-execve.md`](crates/gpui_android/docs/workarounds/targetsdk-28-execve.md) for the receipts.
 
 ### First launch
 
-1. **Storage permissions.** The system prompts for read/write to `/sdcard` so the editor can reach anything outside its app-private dir. Grant it. Without it, "Open Project" can't see your files.
-2. **Runtime adapter.** A picker asks where every subprocess (shells, LSPs, terminal, git, ssh) should run. Nothing is pre-selected; you pick one of three. **Bootstrap** is the no-root option: a Termux-derived userland that runs entirely from the app's data dir, the right choice for most people. **Kali chroot** needs Magisk plus a Kali NetHunter rootfs but gives you real glibc and the fastest spawn. **External Termux** routes through your existing Termux app if you already daily-drive Termux.
-3. **Bootstrap download.** If you pick Bootstrap, the adapter pulls the userland zip from [`Dylanmurzello/zdroid-bootstrap`](https://github.com/Dylanmurzello/zdroid-bootstrap) and extracts it into the app's private data dir. About 30 seconds on a fast connection. Subsequent launches are instant.
+1. **Permissions.** Zdroid-B requests storage access first and notification permission second. Storage access is needed for projects outside the app sandbox; notifications are needed for the foreground background-execution session.
+2. **Runtime adapter.** The in-app runtime dialog then asks where terminal commands, language servers, Git, and agent CLIs should run. Choose **Zdroid Bootstrap (recommended, AI agents needed)** for the supported no-root setup.
+3. **Bootstrap setup.** The app downloads, verifies, extracts, and repairs its Termux-derived userland with visible progress. Keep Zdroid-B open for the initial setup; later launches reuse the installed runtime.
 
 ### Setting up your shell environment (Bootstrap)
 
-Open the integrated terminal. First, sync the package index:
+Open the integrated terminal. The Welcome page's Agent information panel can run each command in the existing terminal for you. To update manually, run the commands separately:
 
 ```sh
-pkg update && pkg upgrade
+pkg update -y
+pkg upgrade -y
 ```
 
-Pre-baked in the bootstrap: rust-analyzer (the LSP binary; `cargo` and `rustc` are not bundled, install with `pkg install rust` if you want them), nodejs, go, bash, openssh, busybox, the bionic-compat patchelf, the hex-patched musl loader. `npm` is a separate Termux package and needs an install before user-facing `npm` calls work. Claude Code, for example:
+Install Node.js, Git, and the agent CLIs you want:
 
 ```sh
-pkg install npm
+pkg install -y nodejs-lts git
+npm install -g @openai/codex
 npm install -g @anthropic-ai/claude-code
 ```
 
-Toolchains and LSPs for other languages have install recipes in the bootstrap repo: [`Dylanmurzello/zdroid-bootstrap`](https://github.com/Dylanmurzello/zdroid-bootstrap).
-
-> [!NOTE]
-> The first `pkg install` after extracting a fresh bootstrap will surface "broken dependencies" from apt and prompt you to run `apt --fix-broken install`. Run it. The pre-baked packages (`go`, `openssh`, busybox, etc.) declare dpkg dependencies that aren't formally registered in the database on a fresh extract, so apt flags the inconsistency the first time it has to resolve anything. fix-broken reconciles the state; `pkg` works normally afterward.
+Run `codex` or `claude` once in the terminal and complete the browser or interactive subscription login. Credentials stay on that device and are not included in the APK. Toolchains and additional package recipes live in [`Dylanmurzello/zdroid-bootstrap`](https://github.com/Dylanmurzello/zdroid-bootstrap).
 
 ### Setting up Kali chroot
 
@@ -90,7 +101,7 @@ After that, every subprocess routes into your existing Termux setup via `com.ter
 
 Two storage realms underneath, with different exec rules.
 
-`/data/data/com.zdroid/files/` (surfaced as `~/`) is **exec-mounted**. cargo, go, node, anything you build can `execve` and run. This is where projects should live. `~/projects/<name>` is the default workspace root; `ZedDocumentsProvider` exposes `~/` to other Android apps via the SAF sidebar (look for **Zdroid** in any system file picker).
+`/data/data/com.zdroid/files/` (surfaced as `~/`) is **exec-mounted**. cargo, go, node, anything you build can `execve` and run. This is where projects should live. `~/projects/<name>` is the default workspace root; `ZedDocumentsProvider` exposes `~/` to other Android apps via the SAF sidebar (look for **Zdroid-B** in any system file picker).
 
 `/storage/emulated/0/` (a.k.a. `/sdcard/`) is **FUSE-mounted with `noexec`**. Read, edit, and save all work; the kernel refuses to execute binaries written here. `cargo run` against a binary under `/sdcard/...` returns `EACCES` and there's no remount workaround (see [`docs/workarounds/android-noexec-mount.md`](crates/gpui_android/docs/workarounds/android-noexec-mount.md) for why).
 
@@ -127,15 +138,15 @@ Plug in or pair a mouse, trackpad, or Book Cover Keyboard and it just works.
 - **Right-click** anywhere for context menus
 - The cursor hides when you switch to touch or typing and comes back on the next pointer event
 
-> Working on Samsung tablets and most Android devices we've tested. If your mouse pairs but doesn't move the cursor (seen on some OnePlus / Oppo Pad ColorOS builds), [open an issue](https://github.com/Dylanmurzello/zed-android-port/issues/new) with `adb shell dumpsys input` output so we can triage.
+> Working on Samsung phones, tablets, and DeX in the configurations tested for Zdroid-B. If your mouse pairs but does not move the cursor, [open an issue](https://github.com/BrianKool/zed-android-port/issues/new) with `adb shell dumpsys input` output so the device-specific path can be diagnosed.
 
 ### Soft keyboard
 Auto-opens on tap into the editor or terminal. The pane tab bar has a keyboard toggle if you want it off.
 - **Programming keys row** above the keyboard with `Esc`, `Tab`, `Ctrl`, `Alt`, and arrows. `Ctrl` and `Alt` are sticky: tap once for the next key, double-tap to lock.
 - **`Ctrl` + letter** combos work in the terminal: `Ctrl+C` sends `^C`, just like a hardware keyboard.
 
-### Multi-window
-Settings, the runtime picker, and any other spawned window each open as their own Recents entries and get their own soft keyboard and input.
+### Dialogs and DeX
+Blocking workflows use centered in-app modal dialogs with a dimmed backdrop, explicit close/back controls, and independent scrolling. They remain modal on phones and become floating dialogs in DeX instead of creating stale Android Recents entries.
 
 ---
 
@@ -173,11 +184,14 @@ Switching is one tap (Settings → Android Runtime). Selection persists in `$PRE
 </p>
 
 - **Editor.** Vulkan rendering, multi-pane workspace, vim mode, syntax highlighting, project panel, fuzzy file finder, command palette, buffer + project search.
-- **Git.** Git panel with staging, full git-graph commit history, diff view.
+- **Git and GitHub.** Device-flow account login, repository browser and clone flow, credential sharing, staging, rollback, stash, commit, push, diff, and commit history.
+- **Agents.** Codex and Claude through ACP using each CLI's own subscription login, local conversation history, draft recovery, model controls, and agent task notifications.
+- **Local models.** Searchable and removable Qwen, DeepSeek, Gemma, and Llama GGUF catalog, custom HTTPS/file import, integrity checks, progress, Vulkan acceleration, and CPU fallback.
 - **LSPs.** rust-analyzer baked in. gopls, ts-server, pyright, jdtls install in one `pkg`/`npm`/`go install`.
 - **Extensions.** Browse, install, manage. Themes, language configs, grammars, slash commands.
 - **Remote SSH.** Server-picker pill in the title bar, persisted server list, native askpass.
-- **Multi-window.** Android freeform and DeX, each extra window is a real Activity with OS chrome.
+- **Responsive dialogs.** Modal workflows remain inside the workspace, fit narrow phone screens, and use centered floating surfaces in DeX.
+- **Background sessions.** A foreground service and optional wake lock keep terminal and agent work active while the app is backgrounded.
 - **Edge-to-edge** rendering with content under the display cutout.
 - **App menu bar** with nested submenus (Settings, Keymap, Themes, Extensions).
 - **Theme follow** for system light/dark.
@@ -204,7 +218,7 @@ ANDROID_NDK_HOME=/path/to/ndk/27.0.12077973 \
 cd android
 gradle assembleDebug
 adb install -r app/build/outputs/apk/debug/app-debug.apk
-adb shell am start -n com.zdroid/.MainActivity
+adb shell am start -n com.zdroid/com.zdroid.MainActivity
 
 adb logcat -d | grep -E "zed_android|RustPanic|FATAL"
 ```
@@ -215,9 +229,9 @@ First build is around 10 minutes. Incremental Rust rebuilds are 20 seconds, Grad
 
 ## <img src="https://api.iconify.design/lucide:tablet-smartphone.svg?color=%23999999&height=22" valign="middle" /> &nbsp;Tested on
 
-Samsung Galaxy Tab S9 Ultra (Snapdragon 8 Gen 2 / Adreno 740, Android 16, One UI 8) is the daily driver. Compiles for any aarch64 Android 9+ with Vulkan 1.1, but only Adreno is exercised. Mali / Xclipse will run but may want shader tweaks.
+Zdroid-B 1.0 has been exercised on a Samsung phone at 360 logical pixels and in Samsung DeX, including touch input, a hardware mouse and keyboard, GitHub login, Codex, Claude, and Vulkan-accelerated Qwen 2.5 Coder 7B inference. It compiles for arm64 Android 9+ with Vulkan 1.1. Other GPU families may require device-specific Vulkan tuning.
 
-A hardware keyboard is the supported config. Tablet plus Bluetooth keyboard, foldable in tablet mode, or DeX/desktop-mode with monitor and peripherals all work. Phones technically run but are de-prioritized; see [`docs/workarounds/deferred-phone-form-factor-polish.md`](crates/gpui_android/docs/workarounds/deferred-phone-form-factor-polish.md).
+Touch-only phone use, tablet keyboards, Bluetooth input, and DeX are supported. Local 7B inference needs several gigabytes of free RAM and can heat the device; smaller 1B-3B models are the practical default for longer mobile sessions.
 
 ---
 

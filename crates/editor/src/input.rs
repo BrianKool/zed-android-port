@@ -11,6 +11,14 @@ impl Editor {
         self.expects_character_input = expects_character_input;
     }
 
+    pub fn set_auto_show_ime(&mut self, auto_show_ime: bool) {
+        self.auto_show_ime = auto_show_ime;
+    }
+
+    pub fn set_suppress_auto_show_ime(&mut self, suppress: bool) {
+        self.suppress_auto_show_ime = suppress;
+    }
+
     pub fn set_autoindent(&mut self, autoindent: bool) {
         if autoindent {
             self.autoindent_mode = Some(AutoindentMode::EachLine);
@@ -2704,6 +2712,30 @@ fn list_delimiter_for_newline(
 }
 
 impl EntityInputHandler for Editor {
+    fn select_text_range(
+        &mut self,
+        range_utf16: Range<usize>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let (start, end) = {
+            let snapshot = self.buffer.read(cx).read(cx);
+            (
+                snapshot.clip_offset_utf16(
+                    MultiBufferOffsetUtf16(OffsetUtf16(range_utf16.start)),
+                    Bias::Left,
+                ),
+                snapshot.clip_offset_utf16(
+                    MultiBufferOffsetUtf16(OffsetUtf16(range_utf16.end)),
+                    Bias::Right,
+                ),
+            )
+        };
+        self.change_selections(SelectionEffects::no_scroll(), window, cx, |selections| {
+            selections.select_ranges([start..end]);
+        });
+    }
+
     fn text_for_range(
         &mut self,
         range_utf16: Range<usize>,
@@ -3047,5 +3079,9 @@ impl EntityInputHandler for Editor {
 
     fn accepts_text_input(&self, _window: &mut Window, _cx: &mut Context<Self>) -> bool {
         self.expects_character_input
+    }
+
+    fn should_auto_show_ime(&self, _window: &mut Window, _cx: &mut Context<Self>) -> bool {
+        !self.suppress_auto_show_ime && (self.mode.is_single_line() || self.auto_show_ime)
     }
 }

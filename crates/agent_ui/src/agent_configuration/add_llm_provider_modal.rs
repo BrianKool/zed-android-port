@@ -511,6 +511,7 @@ impl Render for AddLlmProviderModal {
             .id("add-llm-provider-modal")
             .key_context("AddLlmProviderModal")
             .w(rems(34.))
+            .max_w_full()
             .elevation_3(cx)
             .on_action(cx.listener(Self::cancel))
             .on_action(cx.listener(Self::on_tab))

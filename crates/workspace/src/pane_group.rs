@@ -1539,10 +1539,7 @@ mod element {
                             // the splitter without pixel precision.
                             let hit = handle_hitbox.is_hovered(window)
                                 || (window.last_input_was_touch()
-                                    && handle_hitbox
-                                        .bounds
-                                        .dilate(px(16.0))
-                                        .contains(&e.position));
+                                    && handle_hitbox.bounds.dilate(px(16.0)).contains(&e.position));
                             if hit {
                                 dragged_handle.replace(Some(ix));
                                 if e.click_count >= 2 {

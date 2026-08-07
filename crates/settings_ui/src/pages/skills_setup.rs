@@ -85,7 +85,7 @@ pub(crate) fn render_skills_setup_page(
                                             );
                                         })
                                         .log_err();
-                                    window.remove_window();
+                                    crate::close_settings_ui(window, cx);
                                 })),
                         ),
                 )
@@ -208,7 +208,7 @@ fn render_skill_row(skill: &Skill, cx: &mut Context<SettingsWindow>) -> AnyEleme
                                     });
                                 })
                                 .log_err();
-                            window.remove_window();
+                            crate::close_settings_ui(window, cx);
                         })),
                 ),
         )

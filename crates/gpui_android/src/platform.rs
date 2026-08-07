@@ -8,7 +8,6 @@ use std::{
 };
 
 use android_activity::AndroidApp;
-use ndk::configuration::UiModeNight;
 use anyhow::Result;
 use futures::channel::oneshot;
 use gpui::{
@@ -19,16 +18,17 @@ use gpui::{
     WindowParams,
 };
 use gpui_wgpu::GpuContext;
+use ndk::configuration::UiModeNight;
 
 use crate::dispatcher::AndroidDispatcher;
 use crate::display::AndroidDisplay;
 use crate::keyboard::AndroidKeyboardLayout;
 use crate::window::{AndroidWindow, AndroidWindowStatePtr};
 
-/// AChoreographer FFI — NDK API 24+. We avoid going through Java's
-/// android.view.Choreographer because we'd need a JNI hop on every
-/// vsync; the NDK exposes the same scheduler natively. Linked from
-/// libandroid.so which Android already keeps mapped.
+// AChoreographer FFI - NDK API 24+. We avoid going through Java's
+// android.view.Choreographer because we'd need a JNI hop on every
+// vsync; the NDK exposes the same scheduler natively. Linked from
+// libandroid.so which Android already keeps mapped.
 #[link(name = "android")]
 unsafe extern "C" {
     fn AChoreographer_getInstance() -> *mut c_void;
@@ -39,8 +39,7 @@ unsafe extern "C" {
     );
 }
 
-type ChoreographerFrameCallback =
-    unsafe extern "C" fn(frame_time_nanos: i64, data: *mut c_void);
+type ChoreographerFrameCallback = unsafe extern "C" fn(frame_time_nanos: i64, data: *mut c_void);
 
 /// `ANativeWindow_setFrameRate` is NDK API 30+. minSdk is 26, so we
 /// can't direct-link the symbol (it would `dlopen`-fail at app load on
@@ -88,7 +87,10 @@ pub(crate) fn set_native_window_frame_rate(window: *mut c_void) -> bool {
     // afresh. libandroid.so is always loaded on Android (Choreographer
     // FFI above depends on it) so this is effectively a handle fetch.
     let lib = unsafe {
-        libc::dlopen(c"libandroid.so".as_ptr(), libc::RTLD_NOLOAD | libc::RTLD_LAZY)
+        libc::dlopen(
+            c"libandroid.so".as_ptr(),
+            libc::RTLD_NOLOAD | libc::RTLD_LAZY,
+        )
     };
     if lib.is_null() {
         log::warn!("set_native_window_frame_rate: libandroid.so not loaded; skipping");
@@ -104,7 +106,11 @@ pub(crate) fn set_native_window_frame_rate(window: *mut c_void) -> bool {
     }
     let set_frame_rate: SetFrameRateFn = unsafe { std::mem::transmute(sym) };
     let result = unsafe {
-        set_frame_rate(window, TARGET_FRAME_RATE_HZ, FRAME_RATE_COMPATIBILITY_DEFAULT)
+        set_frame_rate(
+            window,
+            TARGET_FRAME_RATE_HZ,
+            FRAME_RATE_COMPATIBILITY_DEFAULT,
+        )
     };
     if result == 0 {
         log::info!(
@@ -133,11 +139,7 @@ unsafe extern "C" fn frame_callback(_frame_time_nanos: i64, _data: *mut c_void) 
     unsafe {
         let c = AChoreographer_getInstance();
         if !c.is_null() {
-            AChoreographer_postFrameCallback64(
-                c,
-                frame_callback,
-                std::ptr::null_mut(),
-            );
+            AChoreographer_postFrameCallback64(c, frame_callback, std::ptr::null_mut());
         }
     }
 }
@@ -194,7 +196,8 @@ pub(crate) struct AndroidCommon {
     /// Receiver side of the JNI → game-thread channel for extra-window
     /// events. Drained each iteration of the platform run loop. `Some`
     /// from `AndroidCommon::new` until the loop terminates.
-    pub(crate) extra_event_rx: Option<futures::channel::mpsc::UnboundedReceiver<crate::multi_window::ExtraWindowEvent>>,
+    pub(crate) extra_event_rx:
+        Option<futures::channel::mpsc::UnboundedReceiver<crate::multi_window::ExtraWindowEvent>>,
     /// Receiver side of the JNI → game-thread channel for captured
     /// pointer events. Populated when `MainActivity` activates pointer
     /// capture; each captured `MotionEvent` is marshaled across JNI
@@ -207,9 +210,8 @@ pub(crate) struct AndroidCommon {
     /// gpui assigned). Drained each iteration of the platform run
     /// loop; `crate::ime::drain_ime_events` routes per-id into the
     /// right window's `PlatformInputHandler`.
-    pub(crate) ime_event_rx: Option<
-        futures::channel::mpsc::UnboundedReceiver<(u64, crate::ime::ImeEvent)>,
-    >,
+    pub(crate) ime_event_rx:
+        Option<futures::channel::mpsc::UnboundedReceiver<(u64, crate::ime::ImeEvent)>>,
     /// Tracks whether the soft keyboard was visible last tick.
     /// When this disagrees with the atomic Kotlin pushes via
     /// `nativeSetSoftKeyboardVisible`, we force a `window.refresh()`
@@ -321,6 +323,65 @@ fn jni_open_url(android_app: &AndroidApp, url: &str) -> Result<()> {
     Ok(())
 }
 
+fn jni_start_background_task(
+    android_app: &AndroidApp,
+    task_id: &str,
+    description: &str,
+) -> Result<()> {
+    use anyhow::Context;
+    use jni::{JavaVM, objects::JObject};
+
+    let vm = unsafe { JavaVM::from_raw(android_app.vm_as_ptr().cast())? };
+    let mut env = vm
+        .attach_current_thread()
+        .context("attach_current_thread for background task")?;
+    let activity = unsafe { JObject::from_raw(android_app.activity_as_ptr() as _) };
+    let task_id = env
+        .new_string(task_id)
+        .context("alloc background task id")?;
+    let description = env
+        .new_string(description)
+        .context("alloc background task description")?;
+    env.call_method(
+        &activity,
+        "startAgentBackgroundTask",
+        "(Ljava/lang/String;Ljava/lang/String;)V",
+        &[(&task_id).into(), (&description).into()],
+    )
+    .context("MainActivity.startAgentBackgroundTask")?;
+    Ok(())
+}
+
+fn jni_finish_background_task(
+    android_app: &AndroidApp,
+    task_id: &str,
+    description: &str,
+    successful: bool,
+) -> Result<()> {
+    use anyhow::Context;
+    use jni::{JavaVM, objects::JObject};
+
+    let vm = unsafe { JavaVM::from_raw(android_app.vm_as_ptr().cast())? };
+    let mut env = vm
+        .attach_current_thread()
+        .context("attach_current_thread for background task completion")?;
+    let activity = unsafe { JObject::from_raw(android_app.activity_as_ptr() as _) };
+    let task_id = env
+        .new_string(task_id)
+        .context("alloc background task id")?;
+    let description = env
+        .new_string(description)
+        .context("alloc background task completion description")?;
+    env.call_method(
+        &activity,
+        "finishAgentBackgroundTask",
+        "(Ljava/lang/String;Ljava/lang/String;Z)V",
+        &[(&task_id).into(), (&description).into(), successful.into()],
+    )
+    .context("MainActivity.finishAgentBackgroundTask")?;
+    Ok(())
+}
+
 pub struct AndroidPlatform {
     pub(crate) common: RefCell<AndroidCommon>,
     pub(crate) android_app: AndroidApp,
@@ -345,9 +406,9 @@ impl AndroidPlatform {
         bounds: &Bounds<Pixels>,
         scale_factor: f32,
     ) -> Option<crate::multi_window::LaunchBounds> {
-        let width_px = (bounds.size.width.as_f32() * scale_factor).round() as i32;
-        let height_px = (bounds.size.height.as_f32() * scale_factor).round() as i32;
-        if width_px <= 0 || height_px <= 0 {
+        let requested_width_px = (bounds.size.width.as_f32() * scale_factor).round() as i32;
+        let requested_height_px = (bounds.size.height.as_f32() * scale_factor).round() as i32;
+        if requested_width_px <= 0 || requested_height_px <= 0 {
             return None;
         }
         let nw = self.android_app.native_window()?;
@@ -356,6 +417,15 @@ impl AndroidPlatform {
         if screen_w <= 0 || screen_h <= 0 {
             return None;
         }
+        // Desktop-sized GPUI defaults (typically 900 logical pixels wide)
+        // can exceed a phone display after density scaling. Samsung accepts
+        // those oversized freeform bounds and scales/clips the Activity into
+        // the physical screen, so GPUI still believes it has a wide desktop
+        // viewport and responsive layouts never activate. Clamp to the live
+        // host surface. In DeX this naturally clamps against the larger DeX
+        // display/window instead of any phone-specific constant.
+        let width_px = requested_width_px.min(screen_w);
+        let height_px = requested_height_px.min(screen_h);
         // Center the window on screen by default. Caller-supplied origin is
         // ignored for now — gpui's WindowParams.bounds.origin is meaningless
         // on Android (no window manager coordinate space prior to L7e).
@@ -424,17 +494,18 @@ impl AndroidPlatform {
 
         let appearance = self.common.borrow().appearance;
         let gpu_context = self.common.borrow().gpu_context.clone();
-        let mut window =
-            AndroidWindow::new(handle, options, gpu_context, appearance, self.android_app.clone());
+        let mut window = AndroidWindow::new(
+            handle,
+            options,
+            gpu_context,
+            appearance,
+            self.android_app.clone(),
+        );
         window.extra_window_id = Some(window_id);
         // Mirror to the state so the touch / trackpad dispatchers
         // (which receive `&mut AndroidWindowState`, not the wrapping
         // `AndroidWindow`) know which Activity owns this window.
-        window
-            .ptr()
-            .state
-            .borrow_mut()
-            .extra_window_id = Some(window_id);
+        window.ptr().state.borrow_mut().extra_window_id = Some(window_id);
         if let Err(err) = window.ptr().attach_surface(native_window, scale_factor) {
             crate::multi_window::unmark_window_registered(window_id);
             return Err(err);
@@ -518,7 +589,11 @@ impl AndroidPlatform {
                         crate::multi_window::unmark_window_registered(window_id);
                         continue;
                     };
-                    state.state.borrow().os_closed.store(true, std::sync::atomic::Ordering::SeqCst);
+                    state
+                        .state
+                        .borrow()
+                        .os_closed
+                        .store(true, std::sync::atomic::Ordering::SeqCst);
                     let close_cb = state.callbacks.borrow_mut().close.take();
                     if let Some(cb) = close_cb {
                         log::info!(
@@ -550,7 +625,6 @@ impl AndroidPlatform {
                     action_index,
                     meta_state,
                     button_state,
-                    event_time_millis: _,
                     vscroll,
                     hscroll,
                     positions,
@@ -648,11 +722,7 @@ impl AndroidPlatform {
                     .last_input_was_touch
                     .store(false, std::sync::atomic::Ordering::Relaxed);
                 let scale_factor = window_state.scale_factor;
-                crate::captured_pointer::translate(
-                    &mut window_state.captured,
-                    event,
-                    scale_factor,
-                )
+                crate::captured_pointer::translate(&mut window_state.captured, event, scale_factor)
             };
             for input in inputs {
                 window_ptr.handle_input(input);
@@ -711,12 +781,33 @@ impl AndroidPlatform {
         extra_window_id: Option<u64>,
         window_ptr: &crate::window::AndroidWindowStatePtr,
     ) {
-        let (currently_visible, app, was_visible) = {
-            let state = window_ptr.state.borrow();
+        let (
+            currently_visible,
+            target_kind,
+            should_auto_show,
+            app,
+            was_visible,
+            reassert_requested,
+        ) = {
+            let mut state = window_ptr.state.borrow_mut();
+            let reassert_requested = std::mem::take(&mut state.ime_reassert_requested);
+            let (target_kind, should_auto_show) = state
+                .input_handler
+                .as_mut()
+                .map(|handler| {
+                    (
+                        Some(crate::ime::probe_target_kind(handler)),
+                        handler.query_should_auto_show_ime(),
+                    )
+                })
+                .unwrap_or((None, false));
             (
                 state.input_handler.is_some(),
+                target_kind,
+                should_auto_show,
                 state.android_app.clone(),
                 state.ime_currently_visible,
+                reassert_requested,
             )
         };
         let visibility_changed = currently_visible != was_visible;
@@ -730,23 +821,46 @@ impl AndroidPlatform {
                 // mirror seeded so if they later flip the setting
                 // on and tap the keyboard button, the IME has
                 // current state.
-                if crate::ime::on_screen_keyboard_enabled() {
+                if crate::ime::on_screen_keyboard_enabled()
+                    && should_auto_show
+                    && target_kind != Some(crate::ime::ImeTargetKind::Terminal)
+                {
                     crate::ime::show_keyboard(&app, extra_window_id);
                 } else {
                     log::info!(
-                        "ime::reconcile auto-show suppressed by android_input.on_screen_keyboard=false"
+                        "ime::reconcile auto-show suppressed (target={target_kind:?}, enabled={})",
+                        crate::ime::on_screen_keyboard_enabled()
                     );
                 }
                 crate::ime::notify_text_state(window_ptr);
             } else {
                 // IME going hidden — clear cached selection on this
                 // window so the next show-transition re-seeds cleanly.
-                window_ptr.state.borrow_mut().last_pushed_selection = None;
+                {
+                    let mut state = window_ptr.state.borrow_mut();
+                    state.last_pushed_selection = None;
+                    state.last_selection_overlay = None;
+                }
+                crate::ime::update_selection_ui(&app, extra_window_id, None);
                 crate::ime::hide_keyboard(&app, extra_window_id);
             }
+        } else if currently_visible
+            && reassert_requested
+            && crate::ime::on_screen_keyboard_enabled()
+            && should_auto_show
+            && target_kind != Some(crate::ime::ImeTargetKind::Terminal)
+        {
+            crate::ime::reassert_keyboard(&app, extra_window_id);
         }
 
         if !currently_visible {
+            // A tap can move focus between a terminal and an editor while the
+            // keyboard is closed. Prime Android's EditorInfo immediately so
+            // the next explicit keyboard toggle opens with the focused
+            // surface's rules instead of the previously focused terminal's.
+            if reassert_requested {
+                self.tick_ime_target_and_selection(extra_window_id, window_ptr, &app);
+            }
             return;
         }
 
@@ -788,10 +902,14 @@ impl AndroidPlatform {
         let handler_has_stale_mark: bool;
         let last_kind: Option<crate::ime::ImeTargetKind>;
         let last_selection: Option<(usize, usize)>;
+        let selection_overlay: Option<(i32, i32, i32, i32)>;
+        let last_selection_overlay: Option<(i32, i32, i32, i32)>;
         {
             let mut state = window_ptr.state.borrow_mut();
             last_kind = state.last_ime_target_kind;
             last_selection = state.last_pushed_selection;
+            last_selection_overlay = state.last_selection_overlay;
+            let scale_factor = state.scale_factor;
             // Snapshot composition tracking before mut-borrowing
             // input_handler — once `handler` is alive, we can't
             // touch other fields of `state` immutably.
@@ -809,6 +927,21 @@ impl AndroidPlatform {
             current_selection = handler
                 .selected_text_range(false)
                 .map(|s| (s.range.start, s.range.end));
+            selection_overlay = current_selection.and_then(|(start, end)| {
+                if start == end || current_kind != Some(crate::ime::ImeTargetKind::CodeEditor) {
+                    return None;
+                }
+                let start_bounds = handler.bounds_for_range(start..start)?;
+                let end_bounds = handler.bounds_for_range(end..end)?;
+                Some((
+                    (f32::from(start_bounds.origin.x) * scale_factor).round() as i32,
+                    (f32::from(start_bounds.origin.y + start_bounds.size.height) * scale_factor)
+                        .round() as i32,
+                    (f32::from(end_bounds.origin.x) * scale_factor).round() as i32,
+                    (f32::from(end_bounds.origin.y + end_bounds.size.height) * scale_factor).round()
+                        as i32,
+                ))
+            });
             // If the editor still has a marked range from a prior
             // composition session (user typed in editor, switched
             // away without committing, came back), the editor's
@@ -817,13 +950,19 @@ impl AndroidPlatform {
             // accidentally replace those stale marks (editor.rs:
             // 23690 — "use marked_ranges if present"). Detect and
             // clean up while we have the handler at hand.
-            handler_has_stale_mark = !our_composition_active && handler.marked_text_range().is_some();
+            handler_has_stale_mark =
+                !our_composition_active && handler.marked_text_range().is_some();
             if handler_has_stale_mark {
                 handler.unmark_text();
             }
         }
         if handler_has_stale_mark {
             log::info!("ime::tick cleared stale editor marked range");
+        }
+
+        if selection_overlay != last_selection_overlay {
+            crate::ime::update_selection_ui(android_app, extra_window_id, selection_overlay);
+            window_ptr.state.borrow_mut().last_selection_overlay = selection_overlay;
         }
 
         let mut should_notify = false;
@@ -894,13 +1033,7 @@ impl AndroidPlatform {
         }
         self.common.borrow_mut().last_trackpad_mode_enabled = current;
         crate::cursor::set_trackpad_mode_active(&self.android_app, None, current);
-        let extra_ids: Vec<u64> = self
-            .common
-            .borrow()
-            .extra_windows
-            .keys()
-            .copied()
-            .collect();
+        let extra_ids: Vec<u64> = self.common.borrow().extra_windows.keys().copied().collect();
         for id in extra_ids {
             crate::cursor::set_trackpad_mode_active(&self.android_app, Some(id), current);
         }
@@ -921,17 +1054,9 @@ impl AndroidPlatform {
         if let Err(err) = call_activity_set_extras_row(&self.android_app, None, current) {
             log::warn!("set_extras_row_enabled(primary): {err:#}");
         }
-        let extra_ids: Vec<u64> = self
-            .common
-            .borrow()
-            .extra_windows
-            .keys()
-            .copied()
-            .collect();
+        let extra_ids: Vec<u64> = self.common.borrow().extra_windows.keys().copied().collect();
         for id in extra_ids {
-            if let Err(err) =
-                call_activity_set_extras_row(&self.android_app, Some(id), current)
-            {
+            if let Err(err) = call_activity_set_extras_row(&self.android_app, Some(id), current) {
                 log::warn!("set_extras_row_enabled(w={id}): {err:#}");
             }
         }
@@ -953,16 +1078,9 @@ impl AndroidPlatform {
         if let Err(err) = call_activity_set_soft_keyboard(&self.android_app, None, current) {
             log::warn!("set_soft_keyboard_enabled(primary): {err:#}");
         }
-        let extra_ids: Vec<u64> = self
-            .common
-            .borrow()
-            .extra_windows
-            .keys()
-            .copied()
-            .collect();
+        let extra_ids: Vec<u64> = self.common.borrow().extra_windows.keys().copied().collect();
         for id in extra_ids {
-            if let Err(err) =
-                call_activity_set_soft_keyboard(&self.android_app, Some(id), current)
+            if let Err(err) = call_activity_set_soft_keyboard(&self.android_app, Some(id), current)
             {
                 log::warn!("set_soft_keyboard_enabled(w={id}): {err:#}");
             }
@@ -977,10 +1095,7 @@ impl AndroidPlatform {
         }
         self.common.borrow_mut().last_soft_keyboard_visible = current;
         if let Some(window_ptr) = self.common.borrow().window.clone() {
-            window_ptr
-                .state
-                .borrow_mut()
-                .force_render_after_recovery = true;
+            window_ptr.state.borrow_mut().force_render_after_recovery = true;
             FRAME_PENDING.store(true, std::sync::atomic::Ordering::Release);
         }
     }
@@ -1063,7 +1178,9 @@ impl AndroidPlatform {
             MainEvent::WindowResized { .. } => {
                 let window_ptr = self.common.borrow().window.clone();
                 let Some(window_ptr) = window_ptr else { return };
-                let Some(native_window) = self.android_app.native_window() else { return };
+                let Some(native_window) = self.android_app.native_window() else {
+                    return;
+                };
                 window_ptr.resize_surface(
                     native_window.width() as u32,
                     native_window.height() as u32,
@@ -1075,7 +1192,9 @@ impl AndroidPlatform {
                 // scale_factor and re-emit a resize so layout picks it up.
                 let window_ptr = self.common.borrow().window.clone();
                 let Some(window_ptr) = window_ptr else { return };
-                let Some(native_window) = self.android_app.native_window() else { return };
+                let Some(native_window) = self.android_app.native_window() else {
+                    return;
+                };
                 window_ptr.resize_surface(
                     native_window.width() as u32,
                     native_window.height() as u32,
@@ -1133,18 +1252,19 @@ impl Platform for AndroidPlatform {
             // returns earlier. With the Choreographer driving us, this
             // loop ticks at the panel's refresh rate (60Hz / 90Hz /
             // 120Hz / etc.) when active and falls to ~10Hz idle.
-            self.android_app.poll_events(
-                Some(std::time::Duration::from_millis(100)),
-                |event| match event {
-                    android_activity::PollEvent::Wake => {}
-                    android_activity::PollEvent::Timeout => {}
-                    android_activity::PollEvent::Main(main_event) => {
-                        log::trace!("MainEvent: {main_event:?}");
-                        self.handle_main_event(main_event);
-                    }
-                    _ => {}
-                },
-            );
+            self.android_app
+                .poll_events(
+                    Some(std::time::Duration::from_millis(100)),
+                    |event| match event {
+                        android_activity::PollEvent::Wake => {}
+                        android_activity::PollEvent::Timeout => {}
+                        android_activity::PollEvent::Main(main_event) => {
+                            log::trace!("MainEvent: {main_event:?}");
+                            self.handle_main_event(main_event);
+                        }
+                        _ => {}
+                    },
+                );
 
             // Drain main-thread runnables enqueued from background threads. The
             // AndroidAppWaker wakes poll_events above when there's work; we drain
@@ -1283,15 +1403,13 @@ impl Platform for AndroidPlatform {
                     "open_window: app destroyed before surface attached"
                 ));
             }
-            self.android_app.poll_events(
-                Some(std::time::Duration::from_millis(100)),
-                |event| {
+            self.android_app
+                .poll_events(Some(std::time::Duration::from_millis(100)), |event| {
                     if let android_activity::PollEvent::Main(main_event) = event {
                         log::trace!("MainEvent during open_window block: {main_event:?}");
                         self.handle_main_event(main_event);
                     }
-                },
-            );
+                });
 
             // NOTE: do not drain main_receiver here. open_window runs inside
             // gpui's `cx.update` borrow guard; a runnable that calls
@@ -1302,8 +1420,13 @@ impl Platform for AndroidPlatform {
 
         let appearance = self.common.borrow().appearance;
         let gpu_context = self.common.borrow().gpu_context.clone();
-        let window =
-            AndroidWindow::new(handle, options, gpu_context, appearance, self.android_app.clone());
+        let window = AndroidWindow::new(
+            handle,
+            options,
+            gpu_context,
+            appearance,
+            self.android_app.clone(),
+        );
 
         let native_window = self.android_app.native_window().ok_or_else(|| {
             anyhow::anyhow!("open_window: native_window vanished between poll and attach")
@@ -1325,6 +1448,21 @@ impl Platform for AndroidPlatform {
             log::warn!("AndroidPlatform::open_url({url:?}) failed: {err:#}");
         }
     }
+
+    fn start_background_task(&self, task_id: &str, description: &str) {
+        if let Err(err) = jni_start_background_task(&self.android_app, task_id, description) {
+            log::warn!("Android foreground task start failed: {err:#}");
+        }
+    }
+
+    fn finish_background_task(&self, task_id: &str, description: &str, successful: bool) {
+        if let Err(err) =
+            jni_finish_background_task(&self.android_app, task_id, description, successful)
+        {
+            log::warn!("Android foreground task completion failed: {err:#}");
+        }
+    }
+
     fn on_open_urls(&self, callback: Box<dyn FnMut(Vec<String>)>) {
         self.common.borrow_mut().callbacks.open_urls = Some(callback);
     }
@@ -1334,13 +1472,18 @@ impl Platform for AndroidPlatform {
 
     fn prompt_for_paths(
         &self,
-        _options: PathPromptOptions,
+        options: PathPromptOptions,
     ) -> oneshot::Receiver<Result<Option<Vec<PathBuf>>>> {
         // Fire ACTION_OPEN_DOCUMENT_TREE via MainActivity. The result
         // arrives async through the JNI callback in `saf.rs`.
-        log::info!("AndroidPlatform::prompt_for_paths invoked");
+        let import_foreign_trees = options.files && options.directories;
+        log::info!(
+            "AndroidPlatform::prompt_for_paths invoked prompt={:?} import_foreign_trees={}",
+            options.prompt,
+            import_foreign_trees
+        );
         let (tx, rx) = oneshot::channel();
-        crate::saf::pick_folder(&self.android_app, tx);
+        crate::saf::pick_folder(&self.android_app, tx, import_foreign_trees);
         rx
     }
 
@@ -1394,7 +1537,9 @@ impl Platform for AndroidPlatform {
         "Android"
     }
     fn app_path(&self) -> Result<PathBuf> {
-        Err(anyhow::anyhow!("app_path is not yet implemented on Android"))
+        Err(anyhow::anyhow!(
+            "app_path is not yet implemented on Android"
+        ))
     }
     fn path_for_auxiliary_executable(&self, _name: &str) -> Result<PathBuf> {
         Err(anyhow::anyhow!(
@@ -1420,23 +1565,19 @@ impl Platform for AndroidPlatform {
         crate::clipboard::write(&self.android_app, item);
     }
 
-    fn write_credentials(
-        &self,
-        _url: &str,
-        _username: &str,
-        _password: &[u8],
-    ) -> Task<Result<()>> {
-        Task::ready(Err(anyhow::anyhow!(
-            "credential storage not yet wired on Android"
-        )))
+    fn write_credentials(&self, url: &str, username: &str, password: &[u8]) -> Task<Result<()>> {
+        Task::ready(crate::credentials::write(
+            &self.android_app,
+            url,
+            username,
+            password,
+        ))
     }
-    fn read_credentials(&self, _url: &str) -> Task<Result<Option<(String, Vec<u8>)>>> {
-        Task::ready(Ok(None))
+    fn read_credentials(&self, url: &str) -> Task<Result<Option<(String, Vec<u8>)>>> {
+        Task::ready(crate::credentials::read(&self.android_app, url))
     }
-    fn delete_credentials(&self, _url: &str) -> Task<Result<()>> {
-        Task::ready(Err(anyhow::anyhow!(
-            "credential storage not yet wired on Android"
-        )))
+    fn delete_credentials(&self, url: &str) -> Task<Result<()>> {
+        Task::ready(crate::credentials::delete(&self.android_app, url))
     }
 
     fn keyboard_layout(&self) -> Box<dyn PlatformKeyboardLayout> {
@@ -1469,7 +1610,9 @@ fn call_activity_set_extras_row(
         anyhow::bail!("AndroidApp vm/activity pointer is null");
     }
     let vm = unsafe { JavaVM::from_raw(vm_ptr as _) }.context("JavaVM::from_raw")?;
-    let mut env = vm.attach_current_thread().context("attach_current_thread")?;
+    let mut env = vm
+        .attach_current_thread()
+        .context("attach_current_thread")?;
     let args = [enabled.into()];
     match extra_window_id {
         Some(id) => {
@@ -1486,13 +1629,8 @@ fn call_activity_set_extras_row(
         }
         None => {
             let activity = unsafe { JObject::from_raw(activity_ptr as _) };
-            env.call_method(
-                &activity,
-                "setProgrammingExtrasRowEnabled",
-                "(Z)V",
-                &args,
-            )
-            .context("call MainActivity.setProgrammingExtrasRowEnabled")?;
+            env.call_method(&activity, "setProgrammingExtrasRowEnabled", "(Z)V", &args)
+                .context("call MainActivity.setProgrammingExtrasRowEnabled")?;
         }
     }
     Ok(())
@@ -1522,7 +1660,9 @@ fn call_activity_set_soft_keyboard(
         anyhow::bail!("AndroidApp vm/activity pointer is null");
     }
     let vm = unsafe { JavaVM::from_raw(vm_ptr as _) }.context("JavaVM::from_raw")?;
-    let mut env = vm.attach_current_thread().context("attach_current_thread")?;
+    let mut env = vm
+        .attach_current_thread()
+        .context("attach_current_thread")?;
     let args = [enabled.into()];
     match extra_window_id {
         Some(id) => {
@@ -1539,13 +1679,8 @@ fn call_activity_set_soft_keyboard(
         }
         None => {
             let activity = unsafe { JObject::from_raw(activity_ptr as _) };
-            env.call_method(
-                &activity,
-                "setSoftKeyboardEnabled",
-                "(Z)V",
-                &args,
-            )
-            .context("call MainActivity.setSoftKeyboardEnabled")?;
+            env.call_method(&activity, "setSoftKeyboardEnabled", "(Z)V", &args)
+                .context("call MainActivity.setSoftKeyboardEnabled")?;
         }
     }
     Ok(())

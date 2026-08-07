@@ -1656,8 +1656,52 @@ impl AgentPanel {
             return;
         }
 
-        self.selected_agent = action.agent.clone().into();
-        self.activate_new_thread(true, AgentThreadSource::AgentPanel, window, cx);
+        let agent = Agent::from(action.agent.clone());
+
+        // Selecting the active agent asks for a fresh thread. Switching
+        // agents restores that agent's most recent local thread and draft.
+        if self.selected_agent == agent {
+            self.activate_new_thread(true, AgentThreadSource::AgentPanel, window, cx);
+            return;
+        }
+
+        self.selected_agent = agent.clone();
+        let (worktree_paths, remote_connection) = {
+            let project = self.project.read(cx);
+            (
+                project.worktree_paths(cx),
+                project.remote_connection_options(cx),
+            )
+        };
+
+        let recent_thread = ThreadMetadataStore::try_global(cx).and_then(|store| {
+            store
+                .read(cx)
+                .entries()
+                .filter(|entry| {
+                    !entry.archived
+                        && entry.agent_id == action.agent
+                        && entry.worktree_paths == worktree_paths
+                        && entry.matches_remote_connection(remote_connection.as_ref())
+                })
+                .max_by_key(|entry| entry.updated_at)
+                .cloned()
+        });
+
+        if let Some(thread) = recent_thread {
+            self.load_agent_thread(
+                agent,
+                thread.thread_id,
+                Some(thread.folder_paths().clone()),
+                thread.title(),
+                true,
+                AgentThreadSource::AgentPanel,
+                window,
+                cx,
+            );
+        } else {
+            self.activate_new_thread(true, AgentThreadSource::AgentPanel, window, cx);
+        }
     }
 
     pub fn new_terminal(
@@ -3247,6 +3291,30 @@ impl AgentPanel {
             }
             cx.emit(PanelEvent::ZoomIn);
         }
+    }
+
+    fn open_thread_history(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(workspace) = self.workspace.upgrade() else {
+            log::warn!("Agent history could not open: workspace is gone");
+            return;
+        };
+        let Some(multi_workspace) = workspace
+            .read(cx)
+            .multi_workspace()
+            .and_then(|multi_workspace| multi_workspace.upgrade())
+        else {
+            log::warn!("Agent history could not open: multi-workspace is unavailable");
+            return;
+        };
+
+        multi_workspace.update(cx, |multi_workspace, cx| {
+            if let Some(sidebar) = multi_workspace.sidebar() {
+                log::info!("Agent history opening thread switcher");
+                sidebar.toggle_thread_switcher(false, window, cx);
+            } else {
+                log::warn!("Agent history could not open: sidebar is unavailable");
+            }
+        });
     }
 
     pub(crate) fn open_configuration(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -4967,6 +5035,11 @@ impl AgentPanel {
                         menu = menu
                             .action("Settings", Box::new(OpenSettings))
                             .separator()
+                            .action(
+                                "Open Conversation as Markdown",
+                                Box::new(OpenActiveThreadAsMarkdown),
+                            )
+                            .separator()
                             .action("Toggle Threads Sidebar", Box::new(ToggleWorkspaceSidebar));
 
                         if has_auth_methods || supports_logout {
@@ -5348,6 +5421,15 @@ impl AgentPanel {
                 this.toggle_zoom(&ToggleZoom, window, cx);
             }));
 
+        let history_button = |cx: &mut Context<Self>| {
+            IconButton::new("agent-thread-history", IconName::HistoryRerun)
+                .icon_size(IconSize::Small)
+                .tooltip(Tooltip::text("Conversation History"))
+                .on_click(cx.listener(|this, _, window, cx| {
+                    this.open_thread_history(window, cx);
+                }))
+        };
+
         let max_content_width = AgentSettings::get_global(cx).max_content_width;
 
         let base_container = h_flex()
@@ -5422,6 +5504,7 @@ impl AgentPanel {
                         .gap_1()
                         .pl_1()
                         .pr_1()
+                        .child(history_button(cx))
                         .child(full_screen_button)
                         .child(self.render_panel_options_menu(window, cx)),
                 )
@@ -5470,6 +5553,7 @@ impl AgentPanel {
                         .gap_1()
                         .pl_1()
                         .pr_1()
+                        .child(history_button(cx))
                         .when(can_create_entries, |this| this.child(new_thread_menu))
                         .child(full_screen_button)
                         .child(self.render_panel_options_menu(window, cx)),

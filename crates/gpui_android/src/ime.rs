@@ -112,8 +112,8 @@ pub(crate) fn invert_scroll_delta(delta: gpui::ScrollDelta) -> gpui::ScrollDelta
     }
 }
 
-use anyhow::Context as _;
 use android_activity::AndroidApp;
+use anyhow::Context as _;
 use futures::channel::mpsc;
 use jni::JNIEnv;
 use jni::JavaVM;
@@ -182,10 +182,11 @@ pub(crate) fn restart_input_for_kind(
     extra_window_id: Option<u64>,
     kind: ImeTargetKind,
 ) {
-    log::info!("ime::restart_input_for_kind w={extra_window_id:?} kind={:?}", kind);
-    if let Err(err) =
-        call_activity_restart_ime(android_app, extra_window_id, kind.to_jni_int())
-    {
+    log::info!(
+        "ime::restart_input_for_kind w={extra_window_id:?} kind={:?}",
+        kind
+    );
+    if let Err(err) = call_activity_restart_ime(android_app, extra_window_id, kind.to_jni_int()) {
         log::warn!("ime::restart_input_for_kind failed: {err:#}");
     }
 }
@@ -201,7 +202,9 @@ fn call_activity_restart_ime(
         anyhow::bail!("AndroidApp vm/activity pointer is null");
     }
     let vm = unsafe { JavaVM::from_raw(vm_ptr as _) }.context("JavaVM::from_raw")?;
-    let mut env = vm.attach_current_thread().context("attach_current_thread")?;
+    let mut env = vm
+        .attach_current_thread()
+        .context("attach_current_thread")?;
     let args = [mode_id.into()];
     match extra_window_id {
         Some(id) => {
@@ -226,16 +229,25 @@ fn call_activity_restart_ime(
 pub(crate) enum ImeEvent {
     /// `commitText(text, newCursorPosition)`. Final text the IME wants
     /// inserted at the cursor (or replacing any active composition).
-    CommitText { text: String, new_cursor_position: i32 },
+    CommitText {
+        text: String,
+        new_cursor_position: i32,
+    },
     /// `setComposingText(text, newCursorPosition)`. In-progress
     /// composition (CJK, gesture typing, prediction).
-    SetComposingText { text: String, new_cursor_position: i32 },
+    SetComposingText {
+        text: String,
+        new_cursor_position: i32,
+    },
     /// `finishComposingText()`. End of composition without further
     /// edits.
     FinishComposingText,
     /// `deleteSurroundingText(before, after)`. Backspace / delete span
     /// around the cursor.
-    DeleteSurroundingText { before_length: i32, after_length: i32 },
+    DeleteSurroundingText {
+        before_length: i32,
+        after_length: i32,
+    },
     /// `sendKeyEvent(KeyEvent)`. Hardware-style key delivery from the
     /// IME (Enter, arrows, etc.). Routed through the existing
     /// `events::keyboard::translate_extra_key_event` translator.
@@ -248,6 +260,8 @@ pub(crate) enum ImeEvent {
     /// `performEditorAction(actionId)` — Enter / Done / Next / Search.
     /// Not handled yet; logged for now.
     EditorAction { action_id: i32 },
+    SelectionAdjust { endpoint: i32, x: f32, y: f32 },
+    SelectionCommand { command: i32 },
 }
 
 /// Each IME event is paired with the `window_id` it was generated
@@ -281,20 +295,40 @@ fn dispatch_event(window_id: u64, event: ImeEvent) {
 
 fn debug_event(event: &ImeEvent) -> String {
     match event {
-        ImeEvent::CommitText { text, new_cursor_position } => {
+        ImeEvent::CommitText {
+            text,
+            new_cursor_position,
+        } => {
             format!("CommitText text={text:?} cursor={new_cursor_position}")
         }
-        ImeEvent::SetComposingText { text, new_cursor_position } => {
+        ImeEvent::SetComposingText {
+            text,
+            new_cursor_position,
+        } => {
             format!("SetComposingText text={text:?} cursor={new_cursor_position}")
         }
         ImeEvent::FinishComposingText => "FinishComposingText".to_string(),
-        ImeEvent::DeleteSurroundingText { before_length, after_length } => {
+        ImeEvent::DeleteSurroundingText {
+            before_length,
+            after_length,
+        } => {
             format!("DeleteSurroundingText before={before_length} after={after_length}")
         }
-        ImeEvent::KeyEvent { action, keycode, meta_state, repeat_count } => {
-            format!("KeyEvent action={action} keycode={keycode} meta={meta_state:#x} repeat={repeat_count}")
+        ImeEvent::KeyEvent {
+            action,
+            keycode,
+            meta_state,
+            repeat_count,
+        } => {
+            format!(
+                "KeyEvent action={action} keycode={keycode} meta={meta_state:#x} repeat={repeat_count}"
+            )
         }
         ImeEvent::EditorAction { action_id } => format!("EditorAction id={action_id}"),
+        ImeEvent::SelectionAdjust { endpoint, x, y } => {
+            format!("SelectionAdjust endpoint={endpoint} x={x} y={y}")
+        }
+        ImeEvent::SelectionCommand { command } => format!("SelectionCommand id={command}"),
     }
 }
 
@@ -555,7 +589,9 @@ fn call_activity_update_text_state(
         anyhow::bail!("AndroidApp vm/activity pointer is null");
     }
     let vm = unsafe { JavaVM::from_raw(vm_ptr as _) }.context("JavaVM::from_raw")?;
-    let mut env = vm.attach_current_thread().context("attach_current_thread")?;
+    let mut env = vm
+        .attach_current_thread()
+        .context("attach_current_thread")?;
     let text_jstring = env.new_string(text).context("new_string for IME text")?;
     let args = [
         (&text_jstring).into(),
@@ -592,6 +628,55 @@ fn call_activity_update_text_state(
     Ok(())
 }
 
+pub(crate) fn update_selection_ui(
+    android_app: &AndroidApp,
+    extra_window_id: Option<u64>,
+    endpoints: Option<(i32, i32, i32, i32)>,
+) {
+    if let Err(err) = call_activity_update_selection_ui(android_app, extra_window_id, endpoints) {
+        log::warn!("ime::update_selection_ui failed: {err:#}");
+    }
+}
+
+fn call_activity_update_selection_ui(
+    android_app: &AndroidApp,
+    extra_window_id: Option<u64>,
+    endpoints: Option<(i32, i32, i32, i32)>,
+) -> anyhow::Result<()> {
+    let vm_ptr = android_app.vm_as_ptr();
+    let activity_ptr = android_app.activity_as_ptr();
+    if vm_ptr.is_null() || activity_ptr.is_null() {
+        anyhow::bail!("AndroidApp vm/activity pointer is null");
+    }
+    let vm = unsafe { JavaVM::from_raw(vm_ptr as _) }.context("JavaVM::from_raw")?;
+    let mut env = vm.attach_current_thread().context("attach_current_thread")?;
+    let (visible, sx, sy, ex, ey) = endpoints
+        .map(|(sx, sy, ex, ey)| (true, sx as f32, sy as f32, ex as f32, ey as f32))
+        .unwrap_or((false, 0.0, 0.0, 0.0, 0.0));
+    let args = [
+        (visible as u8).into(),
+        sx.into(),
+        sy.into(),
+        ex.into(),
+        ey.into(),
+    ];
+    match extra_window_id {
+        Some(id) => {
+            let Some(activity_ref) = crate::multi_window::extra_activity_for(id) else {
+                return Ok(());
+            };
+            env.call_method(activity_ref.as_obj(), "updateSelectionUi", "(ZFFFF)V", &args)
+                .context("call ExtraWindowActivity.updateSelectionUi")?;
+        }
+        None => {
+            let activity = unsafe { JObject::from_raw(activity_ptr as _) };
+            env.call_method(&activity, "updateSelectionUi", "(ZFFFF)V", &args)
+                .context("call MainActivity.updateSelectionUi")?;
+        }
+    }
+    Ok(())
+}
+
 fn apply_event(window_ptr: &AndroidWindowStatePtr, event: ImeEvent) {
     log::info!("ime::apply_event {:?}", debug_event(&event));
     let needs_mirror_push = match event {
@@ -611,11 +696,7 @@ fn apply_event(window_ptr: &AndroidWindowStatePtr, event: ImeEvent) {
             // mirror-push echoes another updateSelection right back —
             // forming a feedback loop that floods the wire at ~16Hz
             // even when the user is idle.
-            let had_composition = window_ptr
-                .state
-                .borrow()
-                .ime_composition_text
-                .is_some();
+            let had_composition = window_ptr.state.borrow().ime_composition_text.is_some();
             commit_composition(window_ptr, None);
             had_composition
         }
@@ -679,6 +760,93 @@ fn apply_event(window_ptr: &AndroidWindowStatePtr, event: ImeEvent) {
             }
             true
         }
+        ImeEvent::SelectionAdjust { endpoint, x, y } => {
+            let mut state = window_ptr.state.borrow_mut();
+            let scale = state.scale_factor;
+            let Some(handler) = state.input_handler.as_mut() else {
+                return;
+            };
+            let Some(selection) = handler.selected_text_range(false) else {
+                return;
+            };
+            let Some(offset) = handler.character_index_for_point(gpui::point(
+                gpui::px(x / scale),
+                gpui::px(y / scale),
+            )) else {
+                return;
+            };
+            let anchor = if endpoint == 0 {
+                selection.range.end
+            } else {
+                selection.range.start
+            };
+            handler.select_text_range(offset.min(anchor)..offset.max(anchor));
+            true
+        }
+        ImeEvent::SelectionCommand { command } => {
+            const CUT: i32 = 1;
+            const COPY: i32 = 2;
+            const PASTE: i32 = 3;
+            const MORE: i32 = 4;
+            if command == MORE {
+                let (x, y, scale) = {
+                    let state = window_ptr.state.borrow();
+                    let Some((_, _, x, y)) = state.last_selection_overlay else {
+                        return;
+                    };
+                    (x as f32, y as f32, state.scale_factor)
+                };
+                let position = gpui::point(gpui::px(x / scale), gpui::px(y / scale));
+                window_ptr.handle_input(gpui::PlatformInput::MouseDown(gpui::MouseDownEvent {
+                    button: gpui::MouseButton::Right,
+                    position,
+                    modifiers: gpui::Modifiers::default(),
+                    click_count: 1,
+                    first_mouse: false,
+                }));
+                window_ptr.handle_input(gpui::PlatformInput::MouseUp(gpui::MouseUpEvent {
+                    button: gpui::MouseButton::Right,
+                    position,
+                    modifiers: gpui::Modifiers::default(),
+                    click_count: 1,
+                }));
+                false
+            } else {
+                let mut state = window_ptr.state.borrow_mut();
+                let app = state.android_app.clone();
+                let Some(handler) = state.input_handler.as_mut() else {
+                    return;
+                };
+                match command {
+                    CUT | COPY => {
+                        let Some(selection) = handler.selected_text_range(false) else {
+                            return;
+                        };
+                        if selection.range.is_empty() {
+                            return;
+                        }
+                        let mut adjusted = None;
+                        if let Some(text) =
+                            handler.text_for_range(selection.range.clone(), &mut adjusted)
+                        {
+                            crate::clipboard::write(&app, gpui::ClipboardItem::new_string(text));
+                            if command == CUT {
+                                handler.replace_text_in_range(Some(selection.range), "");
+                            }
+                        }
+                    }
+                    PASTE => {
+                        if let Some(text) =
+                            crate::clipboard::read(&app).and_then(|item| item.text())
+                        {
+                            handler.replace_text_in_range(None, &text);
+                        }
+                    }
+                    _ => {}
+                }
+                true
+            }
+        }
     };
 
     if needs_mirror_push {
@@ -696,6 +864,14 @@ pub(crate) fn show_keyboard(android_app: &AndroidApp, extra_window_id: Option<u6
     log::info!("ime::show_keyboard w={extra_window_id:?}");
     if let Err(err) = call_activity_void(android_app, extra_window_id, "showIme") {
         log::warn!("ime::show_keyboard failed: {err:#}");
+    }
+}
+
+/// Re-open the IME after a fresh tap in an already-focused text input.
+pub(crate) fn reassert_keyboard(android_app: &AndroidApp, extra_window_id: Option<u64>) {
+    log::info!("ime::reassert_keyboard w={extra_window_id:?}");
+    if let Err(err) = call_activity_void(android_app, extra_window_id, "reassertIme") {
+        log::warn!("ime::reassert_keyboard failed: {err:#}");
     }
 }
 
@@ -734,7 +910,9 @@ fn call_activity_void(
         anyhow::bail!("AndroidApp vm/activity pointer is null");
     }
     let vm = unsafe { JavaVM::from_raw(vm_ptr as _) }.context("JavaVM::from_raw")?;
-    let mut env = vm.attach_current_thread().context("attach_current_thread")?;
+    let mut env = vm
+        .attach_current_thread()
+        .context("attach_current_thread")?;
     match extra_window_id {
         Some(id) => {
             let Some(activity_ref) = crate::multi_window::extra_activity_for(id) else {
@@ -865,6 +1043,28 @@ pub extern "system" fn Java_com_zdroid_NativeBridge_nativeImePerformEditorAction
     action_id: i32,
 ) {
     dispatch_event(window_id as u64, ImeEvent::EditorAction { action_id });
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_com_zdroid_NativeBridge_nativeSelectionAdjust<'local>(
+    _env: JNIEnv<'local>,
+    _bridge: JObject<'local>,
+    window_id: i64,
+    endpoint: i32,
+    x: f32,
+    y: f32,
+) {
+    dispatch_event(window_id as u64, ImeEvent::SelectionAdjust { endpoint, x, y });
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_com_zdroid_NativeBridge_nativeSelectionCommand<'local>(
+    _env: JNIEnv<'local>,
+    _bridge: JObject<'local>,
+    window_id: i64,
+    command: i32,
+) {
+    dispatch_event(window_id as u64, ImeEvent::SelectionCommand { command });
 }
 
 /// Kotlin pushes its `imeShown` state here whenever it changes

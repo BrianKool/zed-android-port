@@ -226,6 +226,18 @@ fn register_language_model_providers(
     credentials_provider: Arc<dyn CredentialsProvider>,
     cx: &mut Context<LanguageModelRegistry>,
 ) {
+    #[cfg(target_os = "android")]
+    registry.register_provider(
+        Arc::new(OpenAiCompatibleLanguageModelProvider::new_local(
+            "zdroid-local".into(),
+            "Local LLM".into(),
+            crate::provider::open_ai_compatible::zdroid_local_settings(),
+            client.http_client(),
+            credentials_provider.clone(),
+            cx,
+        )),
+        cx,
+    );
     registry.register_provider(
         Arc::new(CloudLanguageModelProvider::new(
             user_store,

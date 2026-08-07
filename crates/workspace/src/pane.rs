@@ -3000,12 +3000,18 @@ impl Pane {
                         close_pinned: false,
                     };
                     end_slot_tooltip_text = "Close Tab";
-                    match show_close_button {
-                        ShowCloseButton::Always => IconButton::new("close tab", IconName::Close),
-                        ShowCloseButton::Hover => {
-                            IconButton::new("close tab", IconName::Close).visible_on_hover("")
+                    if cfg!(target_os = "android") && is_active {
+                        IconButton::new("close tab", IconName::Close)
+                    } else {
+                        match show_close_button {
+                            ShowCloseButton::Always => {
+                                IconButton::new("close tab", IconName::Close)
+                            }
+                            ShowCloseButton::Hover => {
+                                IconButton::new("close tab", IconName::Close).visible_on_hover("")
+                            }
+                            ShowCloseButton::Hidden => return this,
                         }
-                        ShowCloseButton::Hidden => return this,
                     }
                     .shape(IconButtonShape::Square)
                     .icon_color(Color::Muted)
@@ -4339,11 +4345,15 @@ fn default_render_tab_bar_buttons(
                     .icon_size(IconSize::Small)
                     .toggle_state(trackpad_active)
                     .on_click(cx.listener(|_pane, _, _window, cx| {
-                        settings::update_settings_file(<dyn fs::Fs>::global(cx), cx, |content, _| {
-                            let android_input = content.android_input.get_or_insert_default();
-                            let current = android_input.trackpad_mode_active.unwrap_or(false);
-                            android_input.trackpad_mode_active = Some(!current);
-                        });
+                        settings::update_settings_file(
+                            <dyn fs::Fs>::global(cx),
+                            cx,
+                            |content, _| {
+                                let android_input = content.android_input.get_or_insert_default();
+                                let current = android_input.trackpad_mode_active.unwrap_or(false);
+                                android_input.trackpad_mode_active = Some(!current);
+                            },
+                        );
                     }))
                     .tooltip(Tooltip::text(if trackpad_active {
                         "Disable Trackpad Mode"

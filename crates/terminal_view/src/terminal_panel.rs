@@ -243,8 +243,7 @@ impl TerminalPanel {
                     let android_input = workspace::AndroidInputSettings::get_global(cx);
                     let on_screen_keyboard_enabled = android_input.on_screen_keyboard;
                     let trackpad_master = android_input.trackpad_mode;
-                    let trackpad_active =
-                        trackpad_master && android_input.trackpad_mode_active;
+                    let trackpad_active = trackpad_master && android_input.trackpad_mode_active;
 
                     let right_children = if on_screen_keyboard_enabled {
                         let keyboard_visible = window.soft_keyboard_visible();
@@ -283,11 +282,9 @@ impl TerminalPanel {
                                         |content, _| {
                                             let android_input =
                                                 content.android_input.get_or_insert_default();
-                                            let current = android_input
-                                                .trackpad_mode_active
-                                                .unwrap_or(false);
-                                            android_input.trackpad_mode_active =
-                                                Some(!current);
+                                            let current =
+                                                android_input.trackpad_mode_active.unwrap_or(false);
+                                            android_input.trackpad_mode_active = Some(!current);
                                         },
                                     );
                                 }))
@@ -1666,11 +1663,12 @@ impl Panel for TerminalPanel {
         let terminal_settings = TerminalSettings::get_global(cx);
         let _ = window; // rem_size not needed because the font helpers already return Pixels
         let buffer_font_size = theme_settings.buffer_font_size(cx);
-        let font_size = terminal_settings
-            .font_size
-            .map_or(buffer_font_size, |s| {
-                theme_settings::adjusted_font_size(s, cx)
-            });
+        #[cfg(target_os = "android")]
+        let font_size = terminal_settings.font_size.unwrap_or(buffer_font_size);
+        #[cfg(not(target_os = "android"))]
+        let font_size = terminal_settings.font_size.map_or(buffer_font_size, |s| {
+            theme_settings::adjusted_font_size(s, cx)
+        });
         let line_height_logical = f32::from(font_size) * terminal_settings.line_height.value();
         if line_height_logical <= 0.0 {
             return size;

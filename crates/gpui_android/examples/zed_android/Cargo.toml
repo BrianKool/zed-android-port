@@ -15,6 +15,11 @@ android-activity = { version = "0.6", features = ["game-activity"] }
 android_logger = "0.13"
 anyhow = "1"
 jni = "0.21"
+acp_tools = { path = "../../../acp_tools" }
+agent = { path = "../../../agent" }
+agent_servers = { path = "../../../agent_servers" }
+agent_settings = { path = "../../../agent_settings" }
+agent_ui = { path = "../../../agent_ui" }
 askpass = { path = "../../../askpass" }
 assets = { path = "../../../assets" }
 client = { path = "../../../client" }
@@ -42,9 +47,11 @@ gpui_tokio = { path = "../../../gpui_tokio" }
 image_viewer = { path = "../../../image_viewer" }
 inspector_ui = { path = "../../../inspector_ui" }
 json_schema_store = { path = "../../../json_schema_store" }
+serde_json = "1.0"
 keymap_editor = { path = "../../../keymap_editor" }
 language = { path = "../../../language" }
 language_model = { path = "../../../language_model" }
+language_models = { path = "../../../language_models" }
 language_selector = { path = "../../../language_selector" }
 language_tools = { path = "../../../language_tools" }
 languages = { path = "../../../languages", features = ["load-grammars"] }
@@ -61,6 +68,7 @@ paths = { path = "../../../paths" }
 project = { path = "../../../project" }
 project_panel = { path = "../../../project_panel" }
 project_symbols = { path = "../../../project_symbols" }
+prompt_store = { path = "../../../prompt_store" }
 recent_projects = { path = "../../../recent_projects" }
 remote = { path = "../../../remote" }
 settings_profile_selector = { path = "../../../settings_profile_selector" }
@@ -78,14 +86,18 @@ which_key = { path = "../../../which_key" }
 shellexpand = "3.1"
 util = { path = "../../../util" }
 watch = { path = "../../../watch" }
+web_search = { path = "../../../web_search" }
+web_search_providers = { path = "../../../web_search_providers" }
 workspace = { path = "../../../workspace" }
 zdroid_runtime = { path = "../../../zdroid_runtime" }
 platform_title_bar = { path = "../../../platform_title_bar" }
 release_channel = { path = "../../../release_channel" }
 reqwest_client = { path = "../../../reqwest_client" }
+reqwest = { git = "https://github.com/zed-industries/reqwest.git", rev = "c15662463bda39148ba154100dd44d3fba5873a4", default-features = false, features = ["rustls-tls-native-roots"], package = "zed-reqwest", version = "0.12.15-zed" }
 search = { path = "../../../search" }
 semver = "1"
 session = { path = "../../../session" }
+sidebar = { path = "../../../sidebar" }
 uuid = { version = "1.10", features = ["v4"] }
 vim = { path = "../../../vim" }
 vim_mode_setting = { path = "../../../vim_mode_setting" }

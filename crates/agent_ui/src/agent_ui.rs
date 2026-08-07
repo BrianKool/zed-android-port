@@ -553,10 +553,13 @@ pub fn init(
         // we're not running inside of the eval.
         init_language_model_settings(cx);
     }
-    agent_panel::init(cx);
-    context_server_configuration::init(language_registry.clone(), fs.clone(), cx);
+    // Register metadata observers before AgentPanel can restore or create a
+    // ConversationView. Android restores its workspace eagerly and reuses that
+    // view for subsequent ACP threads, so observing it later loses all history.
     thread_metadata_store::init(cx);
     terminal_thread_metadata_store::init(cx);
+    agent_panel::init(cx);
+    context_server_configuration::init(language_registry.clone(), fs.clone(), cx);
 
     inline_assistant::init(fs.clone(), prompt_builder.clone(), cx);
     terminal_inline_assistant::init(fs.clone(), prompt_builder, cx);

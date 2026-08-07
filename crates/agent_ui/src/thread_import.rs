@@ -375,6 +375,7 @@ impl Render for ThreadImportModal {
             .id("thread-import-modal")
             .key_context("ThreadImportModal")
             .w(rems(34.))
+            .max_w_full()
             .elevation_3(cx)
             .overflow_hidden()
             .track_focus(&self.focus_handle)

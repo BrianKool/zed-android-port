@@ -200,13 +200,13 @@ run_chroot_root() {
     # PATH wrappers without the host having to re-walk the rootfs.
     #
     # Symlink targets stored inside the chroot are byte strings like
-    # /data/data/com.zdroid/files/usr/bin/zd-exec — that path doesn't
+    # /data/data/com.zdroid/files/bin/zd-exec — that path doesn't
     # resolve inside the chroot but doesn't need to. It only needs to
     # resolve outside, where Zed does its PATH lookup.
     local zdr_bind="$RUNTIME_ROOT/zed-runtime"
     [ -d "$zdr_bind" ] || mkdir -p "$zdr_bind"
     if ! "$BUSYBOX" mountpoint -q "$zdr_bind" 2>/dev/null; then
-        "$BUSYBOX" mount -o bind /data/data/com.zdroid/files/usr/zd-runtime "$zdr_bind" 2>/dev/null || true
+        "$BUSYBOX" mount -o bind /data/data/com.zdroid/files/zd-runtime "$zdr_bind" 2>/dev/null || true
     fi
 
     # Standard Linux PATH inside the rootfs (matches bootkali_env).

@@ -996,6 +996,8 @@ pub struct Editor {
     workspace: Option<(WeakEntity<Workspace>, Option<WorkspaceId>)>,
     input_enabled: bool,
     expects_character_input: bool,
+    auto_show_ime: bool,
+    suppress_auto_show_ime: bool,
     use_modal_editing: bool,
     read_only: bool,
     leader_id: Option<CollaboratorId>,
@@ -2189,6 +2191,8 @@ impl Editor {
             workspace: None,
             input_enabled: !is_minimap,
             expects_character_input: !is_minimap,
+            auto_show_ime: false,
+            suppress_auto_show_ime: false,
             use_modal_editing: full_mode,
             read_only: is_minimap,
             use_autoclose: true,
@@ -11671,6 +11675,12 @@ impl ui_input::ErasedEditor for ErasedEditorImpl {
     fn set_masked(&self, masked: bool, _window: &mut Window, cx: &mut App) {
         self.0.update(cx, |editor, cx| {
             editor.set_masked(masked, cx);
+        });
+    }
+
+    fn set_suppress_auto_show_ime(&self, suppress: bool, cx: &mut App) {
+        self.0.update(cx, |editor, _cx| {
+            editor.set_suppress_auto_show_ime(suppress);
         });
     }
 }

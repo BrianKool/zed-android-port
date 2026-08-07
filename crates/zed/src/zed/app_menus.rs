@@ -60,10 +60,10 @@ pub fn app_menus(cx: &mut App) -> Vec<Menu> {
 
     vec![
         Menu {
-            name: "Zdroid".into(),
+            name: "Zdroid-B".into(),
             disabled: false,
             items: vec![
-                MenuItem::action("About Zdroid", zed_actions::About),
+                MenuItem::action("About Zdroid-B", zed_actions::About),
                 #[cfg(not(target_os = "android"))]
                 MenuItem::action("Check for Updates", auto_update::Check),
                 MenuItem::separator(),
@@ -96,13 +96,13 @@ pub fn app_menus(cx: &mut App) -> Vec<Menu> {
                 MenuItem::action("Install CLI", install_cli::InstallCliBinary),
                 MenuItem::separator(),
                 #[cfg(target_os = "macos")]
-                MenuItem::action("Hide Zdroid", super::Hide),
+                MenuItem::action("Hide Zdroid-B", super::Hide),
                 #[cfg(target_os = "macos")]
                 MenuItem::action("Hide Others", super::HideOthers),
                 #[cfg(target_os = "macos")]
                 MenuItem::action("Show All", super::ShowAll),
                 MenuItem::separator(),
-                MenuItem::action("Quit Zdroid", Quit),
+                MenuItem::action("Quit Zdroid-B", Quit),
             ],
         },
         Menu {

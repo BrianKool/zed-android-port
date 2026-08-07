@@ -7,8 +7,8 @@ use crate::{
 use agent_settings::AgentSettings;
 use git::Clone as GitClone;
 use gpui::{
-    Action, App, Context, Entity, EventEmitter, FocusHandle, Focusable, InteractiveElement,
-    ParentElement, Render, Styled, Task, TaskExt, Window, actions,
+    Action, App, ClipboardItem, Context, Entity, EventEmitter, FocusHandle, Focusable,
+    InteractiveElement, ParentElement, Render, Styled, Task, TaskExt, Window, actions,
 };
 use gpui::{WeakEntity, linear_color_stop, linear_gradient};
 use menu::{SelectNext, SelectPrevious};
@@ -16,11 +16,12 @@ use menu::{SelectNext, SelectPrevious};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use settings::Settings;
-use ui::{ButtonLike, Divider, DividerColor, KeyBinding, Vector, VectorName, prelude::*};
-use util::ResultExt;
-use zed_actions::{
-    Extensions, OpenKeymap, OpenOnboarding, OpenSettings, assistant::ToggleFocus, command_palette,
+use ui::{
+    ButtonLike, CopyButton, Divider, DividerColor, IconButton, KeyBinding, Tooltip, Vector,
+    VectorName, prelude::*,
 };
+use util::ResultExt;
+use zed_actions::{OpenOnboarding, assistant::ToggleFocus, command_palette};
 
 #[derive(PartialEq, Clone, Debug, Deserialize, Serialize, JsonSchema, Action)]
 #[action(namespace = welcome)]
@@ -160,63 +161,35 @@ impl SectionEntry {
     }
 }
 
-const CONTENT: (Section<4>, Section<3>) = (
-    Section {
-        title: "Get Started",
-        entries: [
-            SectionEntry {
-                icon: IconName::Plus,
-                title: "New File",
-                action: &NewFile,
-                visibility_guard: SectionVisibility::Always,
-            },
-            SectionEntry {
-                icon: IconName::FolderOpen,
-                title: "Open Project",
-                action: &Open::DEFAULT,
-                visibility_guard: SectionVisibility::Always,
-            },
-            SectionEntry {
-                icon: IconName::CloudDownload,
-                title: "Clone Repository",
-                action: &GitClone,
-                visibility_guard: SectionVisibility::Always,
-            },
-            SectionEntry {
-                icon: IconName::ListCollapse,
-                title: "Open Command Palette",
-                action: &command_palette::Toggle,
-                visibility_guard: SectionVisibility::Always,
-            },
-        ],
-    },
-    Section {
-        title: "Configure",
-        entries: [
-            SectionEntry {
-                icon: IconName::Settings,
-                title: "Open Settings",
-                action: &OpenSettings,
-                visibility_guard: SectionVisibility::Always,
-            },
-            SectionEntry {
-                icon: IconName::Keyboard,
-                title: "Customize Keymaps",
-                action: &OpenKeymap,
-                visibility_guard: SectionVisibility::Always,
-            },
-            SectionEntry {
-                icon: IconName::Blocks,
-                title: "Explore Extensions",
-                action: &Extensions {
-                    category_filter: None,
-                    id: None,
-                },
-                visibility_guard: SectionVisibility::Always,
-            },
-        ],
-    },
-);
+const CONTENT: Section<4> = Section {
+    title: "Get Started",
+    entries: [
+        SectionEntry {
+            icon: IconName::Plus,
+            title: "New File",
+            action: &NewFile,
+            visibility_guard: SectionVisibility::Always,
+        },
+        SectionEntry {
+            icon: IconName::FolderOpen,
+            title: "Open Project",
+            action: &Open::DEFAULT,
+            visibility_guard: SectionVisibility::Always,
+        },
+        SectionEntry {
+            icon: IconName::CloudDownload,
+            title: "Clone Repository",
+            action: &GitClone,
+            visibility_guard: SectionVisibility::Always,
+        },
+        SectionEntry {
+            icon: IconName::ListCollapse,
+            title: "Open Command Palette",
+            action: &command_palette::Toggle,
+            visibility_guard: SectionVisibility::Always,
+        },
+    ],
+};
 
 struct Section<const COLS: usize> {
     title: &'static str,
@@ -242,6 +215,8 @@ pub struct WelcomePage {
     focus_handle: FocusHandle,
     fallback_to_recent_projects: bool,
     recent_workspaces: Option<Vec<RecentWorkspace>>,
+    agent_setup_info_open: bool,
+    agent_setup_info_compact: bool,
 }
 
 impl WelcomePage {
@@ -282,6 +257,8 @@ impl WelcomePage {
             focus_handle,
             fallback_to_recent_projects,
             recent_workspaces: None,
+            agent_setup_info_open: false,
+            agent_setup_info_compact: false,
         }
     }
 
@@ -322,7 +299,12 @@ impl WelcomePage {
         }
     }
 
-    fn render_agent_card(&self, tab_index: usize, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_agent_card(
+        &self,
+        tab_index: usize,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         let focus = self.focus_handle.clone();
         let color = cx.theme().colors();
 
@@ -341,13 +323,29 @@ impl WelcomePage {
             ))
             .child(
                 h_flex()
+                    .w_full()
+                    .justify_between()
                     .gap_1p5()
                     .child(
-                        Icon::new(IconName::ZedAssistant)
-                            .color(Color::Muted)
-                            .size(IconSize::Small),
+                        h_flex()
+                            .gap_1p5()
+                            .child(
+                                Icon::new(IconName::ZedAssistant)
+                                    .color(Color::Muted)
+                                    .size(IconSize::Small),
+                            )
+                            .child(Label::new("Collaborate with Agents")),
                     )
-                    .child(Label::new("Collaborate with Agents")),
+                    .child(
+                        IconButton::new("agent-setup-info", IconName::Info)
+                            .icon_size(IconSize::Small)
+                            .toggle_state(self.agent_setup_info_open)
+                            .tooltip(Tooltip::text("Agent CLI setup"))
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.agent_setup_info_open = !this.agent_setup_info_open;
+                                cx.notify();
+                            })),
+                    ),
             )
             .child(
                 Label::new(description)
@@ -355,6 +353,9 @@ impl WelcomePage {
                     .color(Color::Muted)
                     .mb_2(),
             )
+            .when(self.agent_setup_info_open, |this| {
+                this.child(self.render_agent_setup_info(window, cx))
+            })
             .child(
                 Button::new("open-agent", "Open Agent Panel")
                     .full_width()
@@ -368,6 +369,246 @@ impl WelcomePage {
                         focus.dispatch_action(&ToggleWorkspaceSidebar, window, cx);
                         focus.dispatch_action(&ToggleFocus, window, cx);
                     }),
+            )
+    }
+
+    fn run_agent_setup_command(
+        &mut self,
+        id: &'static str,
+        label: &'static str,
+        command: &'static str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        cx.write_to_clipboard(ClipboardItem::new_string(command.to_string()));
+        self.agent_setup_info_compact = true;
+        cx.notify();
+
+        let terminal_task = task::SpawnInTerminal {
+            id: task::TaskId("zdroid-agent-setup".into()),
+            full_label: "Zdroid-B Agent Setup".to_string(),
+            label: label.to_string(),
+            command: Some(command.to_string()),
+            command_label: command.to_string(),
+            use_new_terminal: false,
+            allow_concurrent_runs: false,
+            reveal: task::RevealStrategy::Always,
+            reveal_target: zed_actions::RevealTarget::Dock,
+            hide: task::HideStrategy::Never,
+            shell: task::Shell::System,
+            show_summary: true,
+            show_command: true,
+            ..Default::default()
+        };
+
+        let Ok(task) = self.workspace.update(cx, |workspace, cx| {
+            workspace.spawn_in_terminal(terminal_task, window, cx)
+        }) else {
+            return;
+        };
+
+        let background_id = format!("zdroid-agent-setup-{id}");
+        cx.start_background_task(&background_id, label);
+        cx.spawn(async move |_, cx| {
+            let result = task.await;
+            let successful = matches!(result, Some(Ok(status)) if status.success());
+            cx.update(|cx| {
+                cx.finish_background_task(&background_id, label, successful);
+            });
+        })
+        .detach();
+    }
+
+    fn render_agent_setup_info(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let colors = cx.theme().colors();
+        let show_install_label = window.viewport_size().width >= px(600.0);
+        let max_height = if self.agent_setup_info_compact {
+            if show_install_label {
+                px(320.0)
+            } else {
+                px(210.0)
+            }
+        } else {
+            (window.viewport_size().height - px(220.0))
+                .max(px(180.0))
+                .min(px(520.0))
+        };
+        let command = |id: &'static str,
+                       label: &'static str,
+                       text: &'static str,
+                       install_command: Option<&'static str>| {
+            let install_action = if show_install_label {
+                Button::new(format!("install-{id}"), "Run")
+                    .start_icon(Icon::new(IconName::PlayFilled).size(IconSize::Small))
+                    .style(ButtonStyle::Outlined)
+                    .disabled(install_command.is_none())
+                    .tooltip(move |window, cx| {
+                        Tooltip::text(if install_command.is_some() {
+                            "Run in terminal"
+                        } else {
+                            "No verified Android installer is available"
+                        })(window, cx)
+                    })
+                    .when_some(install_command, |button, install_command| {
+                        button.on_click(cx.listener(move |this, _, window, cx| {
+                            this.run_agent_setup_command(id, label, install_command, window, cx);
+                        }))
+                    })
+                    .into_any_element()
+            } else {
+                IconButton::new(format!("install-{id}"), IconName::PlayFilled)
+                    .icon_size(IconSize::Small)
+                    .disabled(install_command.is_none())
+                    .tooltip(move |window, cx| {
+                        Tooltip::text(if install_command.is_some() {
+                            "Run in terminal"
+                        } else {
+                            "No verified Android installer is available"
+                        })(window, cx)
+                    })
+                    .when_some(install_command, |button, install_command| {
+                        button.on_click(cx.listener(move |this, _, window, cx| {
+                            this.run_agent_setup_command(id, label, install_command, window, cx);
+                        }))
+                    })
+                    .into_any_element()
+            };
+
+            h_flex()
+                .id(id)
+                .w_full()
+                .min_w_0()
+                .items_start()
+                .justify_between()
+                .gap_2()
+                .p_2()
+                .rounded_sm()
+                .bg(colors.editor_background)
+                .border_1()
+                .border_color(colors.border_variant)
+                .child(
+                    v_flex()
+                        .min_w_0()
+                        .flex_1()
+                        .gap_1()
+                        .child(
+                            Label::new(label)
+                                .size(LabelSize::XSmall)
+                                .color(Color::Default),
+                        )
+                        .child(Label::new(text).buffer_font(cx).size(LabelSize::XSmall)),
+                )
+                .child(
+                    h_flex()
+                        .flex_none()
+                        .gap_1()
+                        .child(
+                            CopyButton::new(format!("copy-{id}"), text)
+                                .icon_size(IconSize::Small)
+                                .tooltip_label("Copy command"),
+                        )
+                        .child(install_action),
+                )
+        };
+
+        v_flex()
+            .id("agent-setup-info-content")
+            .w_full()
+            .min_w_0()
+            .max_h(max_height)
+            .overflow_y_scroll()
+            .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
+            .mb_3()
+            .p_3()
+            .gap_3()
+            .rounded_sm()
+            .border_1()
+            .border_color(colors.border_variant)
+            .bg(colors.panel_background)
+            .child(
+                Label::new(
+                    "Run these commands in the Zdroid-B terminal. Sign-in credentials stay on this device; API keys are not required for subscription login.",
+                )
+                .size(LabelSize::Small)
+                .color(Color::Muted),
+            )
+            .child(Label::new("Base packages").size(LabelSize::Small))
+            .child(command(
+                "agent-command-repair",
+                "Repair package state",
+                "env LD_LIBRARY_PATH=\"$PREFIX/lib\" \"$PREFIX/.zed/bin/apt\" --fix-broken install -y",
+                Some("env LD_LIBRARY_PATH=\"$PREFIX/lib\" \"$PREFIX/.zed/bin/apt\" --fix-broken install -y"),
+            ))
+            .child(command(
+                "agent-command-update",
+                "Update packages",
+                "env LD_LIBRARY_PATH=\"$PREFIX/lib\" \"$PREFIX/.zed/bin/pkg\" update -y",
+                Some("env LD_LIBRARY_PATH=\"$PREFIX/lib\" \"$PREFIX/.zed/bin/pkg\" update -y"),
+            ))
+            .child(command(
+                "agent-command-upgrade",
+                "Upgrade packages",
+                "env LD_LIBRARY_PATH=\"$PREFIX/lib\" DEBIAN_FRONTEND=noninteractive \"$PREFIX/.zed/bin/pkg\" upgrade -y -o Dpkg::Options::=\"--force-confdef\" -o Dpkg::Options::=\"--force-confold\"",
+                Some("env LD_LIBRARY_PATH=\"$PREFIX/lib\" DEBIAN_FRONTEND=noninteractive \"$PREFIX/.zed/bin/pkg\" upgrade -y -o Dpkg::Options::=\"--force-confdef\" -o Dpkg::Options::=\"--force-confold\""),
+            ))
+            .child(command(
+                "agent-command-base-install",
+                "Install base packages",
+                "env LD_LIBRARY_PATH=\"$PREFIX/lib\" \"$PREFIX/.zed/bin/pkg\" install -y nodejs-lts git",
+                Some("env LD_LIBRARY_PATH=\"$PREFIX/lib\" \"$PREFIX/.zed/bin/pkg\" install -y nodejs-lts git"),
+            ))
+            .child(Label::new("Codex").size(LabelSize::Small))
+            .child(command(
+                "agent-command-codex-install",
+                "Install Codex",
+                "\"$PREFIX/.zed/bin/codex\" --version",
+                Some("\"$PREFIX/.zed/bin/codex\" --version"),
+            ))
+            .child(command(
+                "agent-command-codex-login",
+                "Login to Codex",
+                "\"$PREFIX/.zed/bin/codex\" login",
+                Some("\"$PREFIX/.zed/bin/codex\" login"),
+            ))
+            .child(Label::new("Claude Code").size(LabelSize::Small))
+            .child(command(
+                "agent-command-claude-install",
+                "Install Claude",
+                "\"$PREFIX/bin/npm\" install --prefix \"$HOME/.local/share/zdroid/claude-code\" --no-save --force @anthropic-ai/claude-code@2.1.112 @agentclientprotocol/claude-agent-acp@0.64.2 && test -f \"$HOME/.local/share/zdroid/claude-code/node_modules/@anthropic-ai/claude-code/cli.js\" && ln -sf \"$PREFIX/.zed/bin/claude\" \"$PREFIX/bin/claude\" && \"$PREFIX/.zed/bin/claude\" --version",
+                Some("\"$PREFIX/bin/npm\" install --prefix \"$HOME/.local/share/zdroid/claude-code\" --no-save --force @anthropic-ai/claude-code@2.1.112 @agentclientprotocol/claude-agent-acp@0.64.2 && test -f \"$HOME/.local/share/zdroid/claude-code/node_modules/@anthropic-ai/claude-code/cli.js\" && ln -sf \"$PREFIX/.zed/bin/claude\" \"$PREFIX/bin/claude\" && \"$PREFIX/.zed/bin/claude\" --version"),
+            ))
+            .child(command(
+                "agent-command-claude-login",
+                "Login to Claude",
+                "\"$PREFIX/.zed/bin/claude\"",
+                Some("\"$PREFIX/.zed/bin/claude\""),
+            ))
+            .child(Label::new("Gemini CLI").size(LabelSize::Small))
+            .child(command(
+                "agent-command-gemini-install",
+                "Install Gemini",
+                "\"$PREFIX/bin/npm\" install -g @google/gemini-cli",
+                Some("\"$PREFIX/bin/npm\" install -g @google/gemini-cli"),
+            ))
+            .child(command(
+                "agent-command-gemini-login",
+                "Login to Gemini",
+                "\"$PREFIX/bin/gemini\"",
+                Some("\"$PREFIX/bin/gemini\""),
+            ))
+            .child(Label::new("Grok Build").size(LabelSize::Small))
+            .child(command(
+                "agent-command-grok",
+                "Install Grok",
+                "Install the official Linux ARM64 build, then run:\ngrok\nACP: grok agent stdio",
+                None,
+            ))
+            .child(
+                Label::new(
+                    "Also detected when installed: GitHub Copilot CLI (`copilot --acp --stdio`) and OpenCode (`opencode acp`). Only agents that launch successfully appear as connected.",
+                )
+                .size(LabelSize::Small)
+                .color(Color::Muted),
             )
     }
 
@@ -408,10 +649,9 @@ impl WelcomePage {
 }
 
 impl Render for WelcomePage {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let (first_section, second_section) = CONTENT;
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let first_section = CONTENT;
         let first_section_entries = first_section.entries.len();
-        let mut next_tab_index = first_section_entries + second_section.entries.len();
 
         let ai_enabled = AgentSettings::get_global(cx).enabled(cx);
 
@@ -425,16 +665,21 @@ impl Render for WelcomePage {
 
         let showing_recent_projects =
             self.fallback_to_recent_projects && !recent_projects_data.is_empty();
+        let mut next_tab_index = first_section_entries
+            + if showing_recent_projects {
+                recent_projects_data.len()
+            } else {
+                0
+            };
         let second_section = if showing_recent_projects {
             #[cfg(target_os = "android")]
             {
                 // Android-only split: ~/projects/* projects (built locally,
                 // exec-mounted) vs anything else (typically /storage/emulated/0/*
-                // SAF-picked, FUSE noexec). The two `rust` problem — same name
+                // SAF-picked, FUSE noexec). The two `rust` problem â€” same name
                 // appearing twice in Recent Projects from different storage
-                // tiers — is otherwise indistinguishable to the user.
-                let workspace_root = util::env::workspace_root()
-                    .map(|h| h.join("projects"));
+                // tiers â€” is otherwise indistinguishable to the user.
+                let workspace_root = util::env::workspace_root().map(|h| h.join("projects"));
                 let mut workspace_entries: Vec<gpui::AnyElement> = Vec::new();
                 let mut external_entries: Vec<gpui::AnyElement> = Vec::new();
                 for (index, workspace) in recent_projects_data.iter().enumerate() {
@@ -495,16 +740,15 @@ impl Render for WelcomePage {
                     .into_any_element()
             }
         } else {
-            second_section
-                .render(first_section_entries, &self.focus_handle)
-                .into_any_element()
+            div().into_any_element()
         };
 
         let welcome_label = if self.fallback_to_recent_projects {
-            "Welcome back to Zdroid"
+            "Welcome back to Zdroid-B"
         } else {
-            "Welcome to Zdroid"
+            "Welcome to Zdroid-B"
         };
+        let compact = cfg!(target_os = "android") && window.viewport_size().width.as_f32() < 520.0;
 
         h_flex()
             .key_context("Welcome")
@@ -519,47 +763,69 @@ impl Render for WelcomePage {
                 v_flex()
                     .id("welcome-content")
                     .p_8()
+                    .when(compact, |this| this.p_4())
                     .max_w_128()
                     .size_full()
+                    .min_h_0()
                     .gap_6()
-                    .justify_center()
-                    .overflow_y_scroll()
-                    .child(
+                    .when(compact, |this| this.gap_4())
+                    .when(!compact, |this| this.justify_center())
+                    .when(!self.agent_setup_info_open, |this| this.overflow_y_scroll())
+                    .when(self.agent_setup_info_open, |this| this.overflow_y_hidden())
+                    .when(!self.agent_setup_info_open, |this| this.child(
                         h_flex()
                             .w_full()
                             .justify_center()
                             .mb_4()
                             .gap_4()
+                            .when(compact, |this| this.flex_col().items_center().text_center())
                             .child(Vector::square(VectorName::ZedLogo, rems_from_px(45.)))
                             .child(
-                                v_flex().child(Headline::new(welcome_label)).child(
-                                    Label::new("The editor for what's next")
-                                        .size(LabelSize::Small)
-                                        .color(Color::Muted)
-                                        .italic(),
+                                v_flex().min_w_0().child(Headline::new(welcome_label)).child(
+                                    v_flex()
+                                        .gap_1()
+                                        .child(
+                                            Label::new("The editor for what's next")
+                                                .size(LabelSize::Small)
+                                                .color(Color::Muted)
+                                                .italic(),
+                                        )
+                                        .child(
+                                            Label::new(
+                                                "Linux-compatible ARM64 environment. Install the standard Linux version of terminal and npm CLI tools.",
+                                            )
+                                            .size(LabelSize::XSmall)
+                                            .color(Color::Muted),
+                                        ),
                                 ),
                             ),
-                    )
-                    .child(first_section.render(Default::default(), &self.focus_handle))
-                    .child(second_section)
+                    ))
+                    .when(!self.agent_setup_info_open, |this| {
+                        this.child(first_section.render(Default::default(), &self.focus_handle))
+                    })
+                    .when(!self.agent_setup_info_open, |this| this.child(second_section))
                     .when(ai_enabled && !showing_recent_projects, |this| {
                         let agent_tab_index = next_tab_index;
                         next_tab_index += 1;
-                        this.child(self.render_agent_card(agent_tab_index, cx))
+                        this.child(self.render_agent_card(agent_tab_index, window, cx))
                     })
-                    .when(!self.fallback_to_recent_projects, |this| {
-                        this.child(
-                            v_flex().gap_4().child(Divider::horizontal()).child(
-                                Button::new("welcome-exit", "Return to Onboarding")
-                                    .tab_index(next_tab_index as isize)
-                                    .full_width()
-                                    .label_size(LabelSize::XSmall)
-                                    .on_click(|_, window, cx| {
-                                        window.dispatch_action(OpenOnboarding.boxed_clone(), cx);
-                                    }),
-                            ),
-                        )
-                    }),
+                    .when(
+                        !self.fallback_to_recent_projects && !self.agent_setup_info_open,
+                        |this| {
+                            this.child(
+                                v_flex().gap_4().child(Divider::horizontal()).child(
+                                    Button::new("welcome-exit", "Return to Onboarding")
+                                        .tab_index(next_tab_index as isize)
+                                        .full_width()
+                                        .label_size(LabelSize::XSmall)
+                                        .on_click(|_, window, cx| {
+                                            window
+                                                .dispatch_action(OpenOnboarding.boxed_clone(), cx);
+                                        }),
+                                ),
+                            )
+                        },
+                    ),
             )
     }
 }

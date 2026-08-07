@@ -713,17 +713,38 @@ impl TerminalElement {
             }
         });
 
-        self.interactivity.on_mouse_up(
-            MouseButton::Left,
-            TerminalElement::generic_button_handler(
-                terminal.clone(),
-                focus.clone(),
-                false,
-                move |terminal, e, cx| {
+        self.interactivity.on_mouse_up(MouseButton::Left, {
+            let terminal = terminal.clone();
+            let focus = focus.clone();
+            let terminal_view = self.terminal_view.clone();
+            move |e, window, cx| {
+                if !focus.is_focused(window) {
+                    return;
+                }
+
+                terminal.update(cx, |terminal, cx| {
                     terminal.mouse_up(e, cx);
-                },
-            ),
-        );
+                    cx.notify();
+                });
+
+                // Android's direct-touch gesture recognizer represents a
+                // long press as a double-click followed by an optional drag.
+                // Once the finger lifts, expose the terminal's existing
+                // clipboard actions at the selection instead of requiring a
+                // hardware right-click or a two-finger tap.
+                if window.last_input_was_touch() && e.click_count == 2 {
+                    let has_selection = terminal
+                        .read(cx)
+                        .last_content
+                        .selection_text
+                        .as_ref()
+                        .is_some_and(|text| !text.is_empty());
+                    terminal_view.update(cx, |view, cx| {
+                        view.deploy_context_menu(e.position, has_selection, window, cx);
+                    });
+                }
+            }
+        });
         self.interactivity.on_mouse_down(
             MouseButton::Middle,
             TerminalElement::generic_button_handler(
@@ -795,6 +816,10 @@ impl TerminalElement {
 
     fn rem_size(&self, cx: &mut App) -> Option<Pixels> {
         let settings = ThemeSettings::get_global(cx).clone();
+        #[cfg(target_os = "android")]
+        if let Some(font_size) = TerminalSettings::get_global(cx).font_size {
+            return Some(font_size);
+        }
         let buffer_font_size = settings.buffer_font_size(cx);
         let rem_size_scale = {
             // Our default UI font size is 14px on a 16px base scale.
@@ -921,11 +946,20 @@ impl Element for TerminalElement {
                     TerminalMode::Embedded { .. } => {
                         window.text_style().font_size.to_pixels(window.rem_size())
                     }
-                    TerminalMode::Standalone => terminal_settings
-                        .font_size
-                        .map_or(buffer_font_size, |size| {
-                            theme_settings::adjusted_font_size(size, cx)
-                        }),
+                    TerminalMode::Standalone => {
+                        #[cfg(target_os = "android")]
+                        {
+                            terminal_settings.font_size.unwrap_or(buffer_font_size)
+                        }
+                        #[cfg(not(target_os = "android"))]
+                        {
+                            terminal_settings
+                                .font_size
+                                .map_or(buffer_font_size, |size| {
+                                    theme_settings::adjusted_font_size(size, cx)
+                                })
+                        }
+                    }
                 };
 
                 let theme = cx.theme().clone();

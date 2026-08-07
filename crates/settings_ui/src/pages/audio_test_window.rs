@@ -208,6 +208,7 @@ impl Render for AudioTestWindow {
             .id("audio-test-window")
             .track_focus(&self.focus_handle)
             .size_full()
+            .overflow_y_scroll()
             .p_4()
             .when(cfg!(target_os = "macos"), |this| this.pt_10())
             .gap_4()
@@ -275,9 +276,16 @@ pub fn open_audio_test_window(_window: &mut Window, cx: &mut App) {
         width: px(640.0),
         height: px(300.0),
     };
-    let window_min_size = Size {
-        width: px(400.0),
-        height: px(240.0),
+    let window_min_size = if cfg!(target_os = "android") {
+        Size {
+            width: px(320.0),
+            height: px(360.0),
+        }
+    } else {
+        Size {
+            width: px(400.0),
+            height: px(240.0),
+        }
     };
 
     cx.open_window(

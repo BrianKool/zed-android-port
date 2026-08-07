@@ -1305,6 +1305,17 @@ impl App {
         self.platform.open_url(url);
     }
 
+    /// Keeps a user-visible long-running task active when supported by the platform.
+    pub fn start_background_task(&self, task_id: &str, description: &str) {
+        self.platform.start_background_task(task_id, description);
+    }
+
+    /// Ends a previously started platform background task.
+    pub fn finish_background_task(&self, task_id: &str, description: &str, successful: bool) {
+        self.platform
+            .finish_background_task(task_id, description, successful);
+    }
+
     /// Registers the given URL scheme (e.g. `zed` for `zed://` urls) to be
     /// opened by the current app.
     ///

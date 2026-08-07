@@ -118,7 +118,7 @@ impl RuntimeProvider for ExternalTermuxAdapter {
     }
 
     fn environment_root(&self) -> std::path::PathBuf {
-        // Termux's `$PREFIX/.zed-env/`. Zdroid (com.zdroid, separate uid)
+        // Termux's `$PREFIX/.zed-env/`. Zdroid-B (com.zdroid, separate uid)
         // can't write here directly — Termux's data dir is private to
         // com.termux. The eventual JNI Intent bridge will route filesystem
         // ops here through Termux's RUN_COMMAND service. Returning the
@@ -141,11 +141,17 @@ impl RuntimeProvider for ExternalTermuxAdapter {
 
         vec![
             ("HOME".into(), EnvOp::Set(data_path.as_os_str().to_owned())),
-            ("TMPDIR".into(), EnvOp::Set(data_path.join("tmp").into_os_string())),
+            (
+                "TMPDIR".into(),
+                EnvOp::Set(data_path.join("tmp").into_os_string()),
+            ),
             ("TERM".into(), EnvOp::Set(OsString::from("xterm-256color"))),
             ("COLORTERM".into(), EnvOp::Set(OsString::from("truecolor"))),
             ("LANG".into(), EnvOp::Set(OsString::from("en_US.UTF-8"))),
-            ("ZED_BUILD_REMOTE_SERVER".into(), EnvOp::Set(OsString::from("never"))),
+            (
+                "ZED_BUILD_REMOTE_SERVER".into(),
+                EnvOp::Set(OsString::from("never")),
+            ),
             ("LD_PRELOAD".into(), EnvOp::Remove),
             ("PATH".into(), EnvOp::Set(existing_path)),
         ]

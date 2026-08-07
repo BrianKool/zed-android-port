@@ -40,7 +40,7 @@ use std::time::{Duration, Instant};
 use android_activity::AndroidApp;
 use android_activity::input::{MetaState, MotionAction, MotionEvent};
 use gpui::{
-    MouseButton, MouseDownEvent, MouseUpEvent, PlatformInput, Pixels, Point, ScrollDelta,
+    MouseButton, MouseDownEvent, MouseUpEvent, Pixels, PlatformInput, Point, ScrollDelta,
     ScrollWheelEvent, TouchPhase, point, px,
 };
 
@@ -67,21 +67,8 @@ const DRAG_THRESHOLD_PX: f64 = 8.0;
 /// to extend the selection.
 const LONG_PRESS_THRESHOLD: Duration = Duration::from_millis(500);
 
-/// Maximum delay between the primary finger landing and a second finger
-/// landing for the gesture to count as a 2-finger tap (right-click).
-/// Generous (longer than `LONG_PRESS_THRESHOLD`) so a user can
-/// long-press to select, then drop a second finger to trigger the
-/// context menu on the selected word — Moonlight-style hold-and-tap.
-const TWO_FINGER_TAP_WINDOW: Duration = Duration::from_millis(800);
-
-/// Maximum logical-pixel distance between the primary's anchor and where
-/// the second finger lands for the gesture to count as a 2-finger tap.
-/// Bumped from a former 12px (which never fired in practice — index +
-/// middle finger natural spread on a tablet is ~20-40mm = 200-400 logical
-/// pixels at typical density). 250px covers normal two-finger landings
-/// without false-positiving on clearly-distant two-finger gestures
-/// (those resolve as multi-finger scroll instead).
-const TWO_FINGER_TAP_SLOP_PX: f64 = 250.0;
+/// Span change before a two-finger gesture commits to one zoom step.
+const PINCH_STEP_PX: f64 = 8.0;
 
 /// Normalized touch input the SM consumes. Built from either an Android
 /// `MotionEvent` (primary surface) or the JNI-marshaled fields
@@ -100,12 +87,16 @@ pub(crate) enum TouchAction {
     Down,
     /// Additional finger landed. `index` is the position of the newly-
     /// added pointer in [`TouchEvent::pointers`].
-    PointerDown { index: usize },
+    PointerDown {
+        index: usize,
+    },
     Move,
     /// A non-last finger lifted. `index` is the position of the lifting
     /// pointer in [`TouchEvent::pointers`] (the pointer is still
     /// present in the array per Android's POINTER_UP semantics).
-    PointerUp { index: usize },
+    PointerUp {
+        index: usize,
+    },
     Up,
     Cancel,
 }
@@ -134,13 +125,15 @@ pub(crate) fn dispatch_primary(
         let android_app = state.android_app.clone();
         let extra_window_id = state.extra_window_id;
         let bounds = state.bounds.size;
-        return state
-            .trackpad_touch
-            .on_event(&touch_event, &android_app, scale_factor, extra_window_id, bounds);
+        return state.trackpad_touch.on_event(
+            &touch_event,
+            &android_app,
+            scale_factor,
+            extra_window_id,
+            bounds,
+        );
     }
-    let drag_capture = state
-        .drag_active
-        .load(std::sync::atomic::Ordering::Relaxed);
+    let drag_capture = state.drag_active.load(std::sync::atomic::Ordering::Relaxed);
     state.touch.on_event(&touch_event, drag_capture)
 }
 
@@ -157,22 +150,28 @@ pub(crate) fn dispatch_extra(
     positions: &[(f32, f32, i32)],
     scale_factor: f32,
 ) -> MotionInputs {
-    let Some(touch_event) =
-        build_from_extra_fields(action_masked, action_index, meta_state, positions, scale_factor)
-    else {
+    let Some(touch_event) = build_from_extra_fields(
+        action_masked,
+        action_index,
+        meta_state,
+        positions,
+        scale_factor,
+    ) else {
         return MotionInputs::new();
     };
     if crate::ime::trackpad_mode_enabled() {
         let android_app = state.android_app.clone();
         let extra_window_id = state.extra_window_id;
         let bounds = state.bounds.size;
-        return state
-            .trackpad_touch
-            .on_event(&touch_event, &android_app, scale_factor, extra_window_id, bounds);
+        return state.trackpad_touch.on_event(
+            &touch_event,
+            &android_app,
+            scale_factor,
+            extra_window_id,
+            bounds,
+        );
     }
-    let drag_capture = state
-        .drag_active
-        .load(std::sync::atomic::Ordering::Relaxed);
+    let drag_capture = state.drag_active.load(std::sync::atomic::Ordering::Relaxed);
     state.touch.on_event(&touch_event, drag_capture)
 }
 
@@ -286,6 +285,8 @@ enum GesturePhase {
     MultiFingerDown,
     /// 2+ fingers; motion past `DRAG_THRESHOLD_PX`, emitting `ScrollWheel`.
     MultiFingerScroll,
+    /// 2+ fingers; span changes emit synthetic Ctrl+wheel zoom events.
+    MultiFingerPinch,
     /// 2-finger tap already resolved as Right click. Waiting for all
     /// fingers to lift before returning to `Idle`.
     RightClickResolved,
@@ -313,6 +314,7 @@ pub(crate) struct TouchState {
     /// `cur_centroid - scroll_centroid` directly (no scale-factor divide;
     /// input is already in logical units).
     scroll_centroid: Option<Point<Pixels>>,
+    pinch_span: Option<f64>,
 }
 
 /// Average of all active pointers' logical-pixel positions. Returns
@@ -330,6 +332,13 @@ fn centroid(pointers: &[TouchPointer]) -> Point<Pixels> {
         sy += p.pos.y;
     }
     point(sx / n as f32, sy / n as f32)
+}
+
+fn two_finger_span(pointers: &[TouchPointer]) -> Option<f64> {
+    let [first, second, ..] = pointers else {
+        return None;
+    };
+    Some((second.pos - first.pos).magnitude())
 }
 
 impl TouchState {
@@ -408,23 +417,11 @@ impl TouchState {
                 let primary_id = primary.id;
                 let primary_pos = primary.pos;
 
-                // Two contexts qualify for right-click:
-                //   - `SingleFingerDown` within `TWO_FINGER_TAP_WINDOW`
-                //     and `TWO_FINGER_TAP_SLOP_PX` of the primary's
-                //     anchor (the simultaneous two-finger tap).
-                //   - `LongPressSelection` regardless of timing/slop —
-                //     the user has already committed to a held-finger
-                //     gesture via long-press; the 2nd finger landing
-                //     is Moonlight-style "hold-and-tap" and should fire
-                //     the context menu on the selected word.
+                // A second finger after long-press opens the selection
+                // context menu. A normal two-finger contact is reserved for
+                // pan or pinch so zoom never flashes a right-click menu.
                 let qualifies_as_two_finger_tap = match self.phase {
-                    GesturePhase::SingleFingerDown => {
-                        self.pointers.get(&primary_id).is_some_and(|s| {
-                            s.down_time.elapsed() < TWO_FINGER_TAP_WINDOW
-                                && (new_pos - s.down_pos).magnitude()
-                                    <= TWO_FINGER_TAP_SLOP_PX
-                        })
-                    }
+                    GesturePhase::SingleFingerDown => false,
                     GesturePhase::LongPressSelection => true,
                     _ => false,
                 };
@@ -444,12 +441,11 @@ impl TouchState {
                     // the context-menu emission. The pending
                     // `MouseDown(Left, count=2)` was emitted at
                     // long-press fire; emit its matching `Up` here.
-                    let cancel_count =
-                        if matches!(self.phase, GesturePhase::LongPressSelection) {
-                            2
-                        } else {
-                            0
-                        };
+                    let cancel_count = if matches!(self.phase, GesturePhase::LongPressSelection) {
+                        2
+                    } else {
+                        0
+                    };
                     out.push(PlatformInput::MouseUp(MouseUpEvent {
                         button: MouseButton::Left,
                         position: anchor,
@@ -489,9 +485,8 @@ impl TouchState {
                     GesturePhase::SingleFingerDown | GesturePhase::SingleFingerScroll
                 ) {
                     self.phase = GesturePhase::MultiFingerDown;
-                    // Drop any prior centroid; the MOVE handler will
-                    // recompute against the new pointer set.
-                    self.scroll_centroid = None;
+                    self.scroll_centroid = Some(centroid(&event.pointers));
+                    self.pinch_span = two_finger_span(&event.pointers);
                 }
             }
 
@@ -539,13 +534,29 @@ impl TouchState {
                         .unwrap_or(event.pointers[0].pos);
                     match self.phase {
                         GesturePhase::MultiFingerDown => {
-                            // Ambiguous (2-finger-tap vs scroll). Commit
-                            // to scroll once any pointer crosses the
-                            // drag threshold. The 2-finger-tap path
-                            // already fired (or didn't) at POINTER_DOWN
-                            // time — if we're still in
-                            // `MultiFingerDown`, the tap window expired
-                            // or the second finger landed too far.
+                            // Prefer span change (pinch) over centroid motion
+                            // (scroll) when both cross threshold together.
+                            let current_span = two_finger_span(&event.pointers);
+                            let pinch_delta = current_span
+                                .zip(self.pinch_span)
+                                .map_or(0.0, |(current, previous)| current - previous);
+                            if pinch_delta.abs() >= PINCH_STEP_PX {
+                                self.phase = GesturePhase::MultiFingerPinch;
+                                self.pinch_span = current_span;
+                                let mut zoom_modifiers = modifiers;
+                                zoom_modifiers.control = true;
+                                out.push(PlatformInput::ScrollWheel(ScrollWheelEvent {
+                                    position: primary_anchor,
+                                    delta: ScrollDelta::Lines(point(
+                                        0.0,
+                                        pinch_delta.signum() as f32,
+                                    )),
+                                    modifiers: zoom_modifiers,
+                                    touch_phase: TouchPhase::Moved,
+                                }));
+                                return out;
+                            }
+
                             let crossed = self
                                 .pointers
                                 .values()
@@ -557,6 +568,27 @@ impl TouchState {
                             self.scroll_centroid = Some(centroid(&event.pointers));
                         }
                         GesturePhase::MultiFingerScroll => {
+                            if let (Some(current), Some(previous)) =
+                                (two_finger_span(&event.pointers), self.pinch_span)
+                            {
+                                let delta = current - previous;
+                                self.pinch_span = Some(current);
+                                if delta.abs() >= PINCH_STEP_PX {
+                                    self.phase = GesturePhase::MultiFingerPinch;
+                                    let mut zoom_modifiers = modifiers;
+                                    zoom_modifiers.control = true;
+                                    out.push(PlatformInput::ScrollWheel(ScrollWheelEvent {
+                                        position: primary_anchor,
+                                        delta: ScrollDelta::Lines(point(
+                                            0.0,
+                                            delta.signum() as f32,
+                                        )),
+                                        modifiers: zoom_modifiers,
+                                        touch_phase: TouchPhase::Moved,
+                                    }));
+                                    return out;
+                                }
+                            }
                             let cur = centroid(&event.pointers);
                             if let Some(prev) = self.scroll_centroid {
                                 let delta = cur - prev;
@@ -570,6 +602,27 @@ impl TouchState {
                                 }
                             }
                             self.scroll_centroid = Some(cur);
+                        }
+                        GesturePhase::MultiFingerPinch => {
+                            if let (Some(current), Some(previous)) =
+                                (two_finger_span(&event.pointers), self.pinch_span)
+                            {
+                                let delta = current - previous;
+                                if delta.abs() >= PINCH_STEP_PX {
+                                    self.pinch_span = Some(current);
+                                    let mut zoom_modifiers = modifiers;
+                                    zoom_modifiers.control = true;
+                                    out.push(PlatformInput::ScrollWheel(ScrollWheelEvent {
+                                        position: primary_anchor,
+                                        delta: ScrollDelta::Lines(point(
+                                            0.0,
+                                            delta.signum() as f32,
+                                        )),
+                                        modifiers: zoom_modifiers,
+                                        touch_phase: TouchPhase::Moved,
+                                    }));
+                                }
+                            }
                         }
                         _ => {
                             // `RightClickResolved` (and any other phase
@@ -712,6 +765,7 @@ impl TouchState {
                 // Final finger lifted. Resolve the gesture per the
                 // phase we're closing out.
                 let position = event.pointers[0].pos;
+                let was_long_press = matches!(self.phase, GesturePhase::LongPressSelection);
                 let close = match self.phase {
                     // Plain tap: emit `Up(Left, count=1)` to match the
                     // `Down(Left, count=1)` from `TouchAction::Down`.
@@ -733,10 +787,17 @@ impl TouchState {
                 };
                 self.reset();
                 if let Some(click_count) = close {
+                    let mut close_modifiers = modifiers;
+                    // Android has no native long-press mouse event. Mark only the
+                    // synthetic release so touch-aware controls can distinguish it
+                    // from a real DeX double-click without affecting text selection.
+                    if was_long_press {
+                        close_modifiers.function = true;
+                    }
                     out.push(PlatformInput::MouseUp(MouseUpEvent {
                         button: MouseButton::Left,
                         position,
-                        modifiers,
+                        modifiers: close_modifiers,
                         click_count,
                     }));
                 }
@@ -777,6 +838,7 @@ impl TouchState {
         self.pointers.clear();
         self.phase = GesturePhase::Idle;
         self.scroll_centroid = None;
+        self.pinch_span = None;
     }
 }
 
@@ -871,7 +933,6 @@ enum TrackpadGesturePhase {
 #[derive(Debug, Clone)]
 struct TrackpadPointerState {
     down_time: Instant,
-    down_pos: Point<Pixels>,
     last_pos: Point<Pixels>,
     accumulated_motion: f64,
 }
@@ -924,7 +985,6 @@ impl TrackpadTouchState {
                     primary.id,
                     TrackpadPointerState {
                         down_time: Instant::now(),
-                        down_pos: primary.pos,
                         last_pos: primary.pos,
                         accumulated_motion: 0.0,
                     },
@@ -952,7 +1012,6 @@ impl TrackpadTouchState {
                     new_p.id,
                     TrackpadPointerState {
                         down_time: Instant::now(),
-                        down_pos: new_p.pos,
                         last_pos: new_p.pos,
                         accumulated_motion: 0.0,
                     },
@@ -1019,16 +1078,15 @@ impl TrackpadTouchState {
                     // Advance virtual cursor. Acceleration only on
                     // pure navigation; hold-to-drag stays 1:1 for
                     // text-selection precision.
-                    let (scaled_dx, scaled_dy) = if self.phase
-                        == TrackpadGesturePhase::SingleFingerDrag
-                    {
-                        (
-                            accelerate_delta(f32::from(delta.x)),
-                            accelerate_delta(f32::from(delta.y)),
-                        )
-                    } else {
-                        (f32::from(delta.x), f32::from(delta.y))
-                    };
+                    let (scaled_dx, scaled_dy) =
+                        if self.phase == TrackpadGesturePhase::SingleFingerDrag {
+                            (
+                                accelerate_delta(f32::from(delta.x)),
+                                accelerate_delta(f32::from(delta.y)),
+                            )
+                        } else {
+                            (f32::from(delta.x), f32::from(delta.y))
+                        };
                     self.cursor.x += px(scaled_dx);
                     self.cursor.y += px(scaled_dy);
                     // Clamp to the window's visible bounds so we don't
@@ -1080,8 +1138,7 @@ impl TrackpadTouchState {
                         f32::from(self.cursor.y) * scale_factor,
                     );
                 }
-                TrackpadGesturePhase::MultiFingerDown
-                | TrackpadGesturePhase::MultiFingerScroll => {
+                TrackpadGesturePhase::MultiFingerDown | TrackpadGesturePhase::MultiFingerScroll => {
                     let new_centroid = centroid(&event.pointers);
                     let baseline = self.scroll_centroid.unwrap_or(new_centroid);
                     let delta = point(new_centroid.x - baseline.x, new_centroid.y - baseline.y);

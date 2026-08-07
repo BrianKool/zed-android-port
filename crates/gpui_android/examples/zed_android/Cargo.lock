@@ -44,6 +44,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "acp_tools"
+version = "0.1.0"
+dependencies = [
+ "agent-client-protocol",
+ "agent_servers",
+ "agent_ui",
+ "collections",
+ "gpui",
+ "language",
+ "markdown",
+ "project",
+ "serde",
+ "serde_json",
+ "settings",
+ "theme_settings",
+ "ui",
+ "util",
+ "workspace",
+]
+
+[[package]]
 name = "action_log"
 version = "0.1.0"
 dependencies = [
@@ -281,13 +302,108 @@ dependencies = [
 ]
 
 [[package]]
+name = "agent_ui"
+version = "0.1.0"
+dependencies = [
+ "acp_thread",
+ "action_log",
+ "agent",
+ "agent-client-protocol",
+ "agent_servers",
+ "agent_settings",
+ "agent_skills",
+ "ai_onboarding",
+ "anyhow",
+ "async-channel 2.5.0",
+ "audio",
+ "base64 0.22.1",
+ "buffer_diff",
+ "chrono",
+ "client",
+ "cloud_api_types",
+ "collections",
+ "command_palette_hooks",
+ "component",
+ "context_server",
+ "db",
+ "editor",
+ "extension",
+ "extension_host",
+ "feature_flags",
+ "file_icons",
+ "fs",
+ "futures",
+ "fuzzy",
+ "git",
+ "gpui",
+ "gpui_tokio",
+ "heapless",
+ "html_to_markdown",
+ "http_client",
+ "image",
+ "indoc",
+ "itertools 0.14.0",
+ "jsonschema",
+ "language",
+ "language_model",
+ "language_models",
+ "log",
+ "lru",
+ "lsp",
+ "markdown",
+ "menu",
+ "multi_buffer",
+ "notifications",
+ "ordered-float 2.10.1",
+ "parking_lot",
+ "paths",
+ "picker",
+ "platform_title_bar",
+ "postage",
+ "project",
+ "prompt_store",
+ "proto",
+ "rand 0.9.4",
+ "release_channel",
+ "remote",
+ "remote_connection",
+ "rope",
+ "rules_library",
+ "schemars 1.2.1",
+ "serde",
+ "serde_json",
+ "serde_json_lenient",
+ "settings",
+ "skill_creator",
+ "streaming_diff",
+ "task",
+ "telemetry",
+ "terminal",
+ "terminal_view",
+ "text",
+ "theme",
+ "theme_settings",
+ "time",
+ "ui",
+ "ui_input",
+ "url",
+ "util",
+ "uuid",
+ "watch",
+ "workspace",
+ "zed_actions",
+]
+
+[[package]]
 name = "ahash"
 version = "0.8.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5a15f179cd60c4584b8a8c596927aadc462e27f2ca70c04e0071964a73ba7a75"
 dependencies = [
  "cfg-if",
+ "getrandom 0.3.4",
  "once_cell",
+ "serde",
  "version_check",
  "zerocopy",
 ]
@@ -1696,6 +1812,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "borrow-or-share"
+version = "0.2.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dc0b364ead1874514c8c2855ab558056ebfeb775653e7ae45ff72f28f8f3166c"
+
+[[package]]
 name = "borsh"
 version = "1.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1787,6 +1909,12 @@ name = "by_address"
 version = "1.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "64fa3c856b712db6612c019f14756e64e4bcea13337a6b33b696333a9eaa2d06"
+
+[[package]]
+name = "bytecount"
+version = "0.6.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "175812e0be2bccb6abe50bb8d566126198344f707e304f45c648fd8f2cc0365e"
 
 [[package]]
 name = "bytemuck"
@@ -4323,6 +4451,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "email_address"
+version = "0.2.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e079f19b08ca6239f47f8ba8509c11cf3ea30095831f7fed61441475edd8c449"
+dependencies = [
+ "serde",
+]
+
+[[package]]
 name = "embed-resource"
 version = "3.0.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4697,6 +4834,17 @@ checksum = "2acce4a10f12dc2fb14a218589d4f1f62ef011b2d0cc4b3cb1bba8e94da14649"
 
 [[package]]
 name = "fancy-regex"
+version = "0.16.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "998b056554fbe42e03ae0e152895cd1a7e1002aec800fdc6635d20270260c46f"
+dependencies = [
+ "bit-set 0.8.0",
+ "regex-automata",
+ "regex-syntax",
+]
+
+[[package]]
+name = "fancy-regex"
 version = "0.17.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "72cf461f865c862bb7dc573f643dd6a2b6842f7c30b07882b56bd148cc2761b8"
@@ -4927,6 +5075,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8bf7cc16383c4b8d58b9905a8509f02926ce3058053c056376248d958c9df1e8"
 
 [[package]]
+name = "fluent-uri"
+version = "0.4.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bc74ac4d8359ae70623506d512209619e5cf8f347124910440dbc221714b328e"
+dependencies = [
+ "borrow-or-share",
+ "ref-cast",
+ "serde",
+]
+
+[[package]]
 name = "flume"
 version = "0.11.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5037,6 +5196,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cb4cb245038516f5f85277875cdaa4f7d2c9a0fa0468de06ed190163b1581fcf"
 dependencies = [
  "percent-encoding",
+]
+
+[[package]]
+name = "fraction"
+version = "0.15.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e076045bb43dac435333ed5f04caf35c7463631d0dae2deb2638d94dd0a5b872"
+dependencies = [
+ "lazy_static",
+ "num",
 ]
 
 [[package]]
@@ -5750,7 +5919,9 @@ dependencies = [
  "fuzzy",
  "fuzzy_nucleo",
  "git",
+ "git2",
  "gpui",
+ "http_client",
  "itertools 0.14.0",
  "language",
  "language_model",
@@ -5761,6 +5932,7 @@ dependencies = [
  "multi_buffer",
  "notifications",
  "panel",
+ "paths",
  "picker",
  "project",
  "prompt_store",
@@ -7336,6 +7508,34 @@ dependencies = [
 ]
 
 [[package]]
+name = "jsonschema"
+version = "0.37.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "73c9ffb2b5c56d58030e1b532d8e8389da94590515f118cf35b5cb68e4764a7e"
+dependencies = [
+ "ahash",
+ "bytecount",
+ "data-encoding",
+ "email_address",
+ "fancy-regex 0.16.2",
+ "fraction",
+ "getrandom 0.3.4",
+ "idna",
+ "itoa",
+ "num-cmp",
+ "num-traits",
+ "percent-encoding",
+ "referencing",
+ "regex",
+ "regex-syntax",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "unicode-general-category",
+ "uuid-simd",
+]
+
+[[package]]
 name = "jsonwebtoken"
 version = "10.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7629,6 +7829,7 @@ dependencies = [
  "extension_host",
  "fs",
  "futures",
+ "fuzzy",
  "google_ai",
  "gpui",
  "gpui_tokio",
@@ -7645,6 +7846,8 @@ dependencies = [
  "open_ai",
  "open_router",
  "opencode",
+ "paths",
+ "picker",
  "rand 0.9.4",
  "release_channel",
  "schemars 1.2.1",
@@ -8207,6 +8410,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0fae87c125b03c1d2c0150c90365d7d6bcc53fb73a9acaef207d2d065860f062"
 dependencies = [
  "imgref",
+]
+
+[[package]]
+name = "lru"
+version = "0.16.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7f66e8d5d03f609abc3a39e6f08e4164ebf1447a732906d39eb9b99b7919ef39"
+dependencies = [
+ "hashbrown 0.16.1",
 ]
 
 [[package]]
@@ -9026,6 +9238,12 @@ dependencies = [
  "smallvec",
  "zeroize",
 ]
+
+[[package]]
+name = "num-cmp"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "63335b2e2c34fae2fb0aa2cecfd9f0832a1e24b3b32ecec612c3426d46dc8aaa"
 
 [[package]]
 name = "num-complex"
@@ -10989,7 +11207,7 @@ dependencies = [
  "credentials_provider",
  "dap",
  "extension",
- "fancy-regex",
+ "fancy-regex 0.17.0",
  "fs",
  "futures",
  "fuzzy",
@@ -11750,6 +11968,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "referencing"
+version = "0.37.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4283168a506f0dcbdce31c9f9cce3129c924da4c6bca46e46707fcb746d2d70c"
+dependencies = [
+ "ahash",
+ "fluent-uri",
+ "getrandom 0.3.4",
+ "hashbrown 0.16.1",
+ "parking_lot",
+ "percent-encoding",
+ "serde_json",
+]
+
+[[package]]
 name = "refineable"
 version = "0.1.0"
 dependencies = [
@@ -12099,6 +12332,33 @@ name = "rtrb"
 version = "0.3.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4ade083ccbb4bf536df69d1f6432cc23deb7acccff86b183f3923a6fd56a1153"
+
+[[package]]
+name = "rules_library"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "collections",
+ "editor",
+ "gpui",
+ "language",
+ "language_model",
+ "log",
+ "menu",
+ "picker",
+ "platform_title_bar",
+ "prompt_store",
+ "release_channel",
+ "rope",
+ "serde",
+ "settings",
+ "theme_settings",
+ "ui",
+ "ui_input",
+ "util",
+ "workspace",
+ "zed_actions",
+]
 
 [[package]]
 name = "rust-embed"
@@ -12892,6 +13152,7 @@ dependencies = [
  "futures",
  "fuzzy",
  "gpui",
+ "gpui_android",
  "heck 0.5.0",
  "itertools 0.14.0",
  "language",
@@ -13008,6 +13269,44 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0fda2ff0d084019ba4d7c6f371c95d8fd75ce3524c3cb8fb653a3023f6323e64"
 
 [[package]]
+name = "sidebar"
+version = "0.1.0"
+dependencies = [
+ "acp_thread",
+ "action_log",
+ "agent",
+ "agent-client-protocol",
+ "agent_settings",
+ "agent_ui",
+ "anyhow",
+ "async-channel 2.5.0",
+ "chrono",
+ "editor",
+ "feature_flags",
+ "fs",
+ "git",
+ "gpui",
+ "itertools 0.14.0",
+ "log",
+ "menu",
+ "platform_title_bar",
+ "project",
+ "recent_projects",
+ "remote",
+ "remote_connection",
+ "serde",
+ "serde_json",
+ "settings",
+ "telemetry",
+ "theme",
+ "theme_settings",
+ "ui",
+ "util",
+ "workspace",
+ "zed_actions",
+]
+
+[[package]]
 name = "signal-hook"
 version = "0.3.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -13100,6 +13399,29 @@ name = "siphasher"
 version = "1.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b2aa850e253778c88a04c3d7323b043aeda9d3e30d5971937c1855769763678e"
+
+[[package]]
+name = "skill_creator"
+version = "0.1.0"
+dependencies = [
+ "agent_skills",
+ "anyhow",
+ "editor",
+ "fs",
+ "gpui",
+ "language",
+ "menu",
+ "platform_title_bar",
+ "release_channel",
+ "serde_yaml_ng",
+ "settings",
+ "theme_settings",
+ "ui",
+ "ui_input",
+ "util",
+ "workspace",
+ "worktree",
+]
 
 [[package]]
 name = "skrifa"
@@ -15164,6 +15486,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ce61d488bcdc9bc8b5d1772c404828b17fc481c0a582b5581e95fb233aef503e"
 
 [[package]]
+name = "unicode-general-category"
+version = "1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0b993bddc193ae5bd0d623b49ec06ac3e9312875fdae725a975c51db1cc1677f"
+
+[[package]]
 name = "unicode-ident"
 version = "1.0.24"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -15383,6 +15711,16 @@ dependencies = [
  "serde_core",
  "sha1_smol",
  "wasm-bindgen",
+]
+
+[[package]]
+name = "uuid-simd"
+version = "0.8.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "23b082222b4f6619906941c17eb2297fff4c2fb96cb60164170522942a200bd8"
+dependencies = [
+ "outref",
+ "vsimd",
 ]
 
 [[package]]
@@ -16129,6 +16467,24 @@ dependencies = [
  "collections",
  "gpui",
  "serde",
+]
+
+[[package]]
+name = "web_search_providers"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "client",
+ "cloud_api_client",
+ "cloud_api_types",
+ "cloud_llm_client",
+ "futures",
+ "gpui",
+ "http_client",
+ "language_model",
+ "serde",
+ "serde_json",
+ "web_search",
 ]
 
 [[package]]
@@ -17713,6 +18069,11 @@ dependencies = [
 name = "zed_android"
 version = "0.1.0"
 dependencies = [
+ "acp_tools",
+ "agent",
+ "agent_servers",
+ "agent_settings",
+ "agent_ui",
  "android-activity",
  "android_logger",
  "anyhow",
@@ -17748,6 +18109,7 @@ dependencies = [
  "language",
  "language_extension",
  "language_model",
+ "language_models",
  "language_selector",
  "language_tools",
  "languages",
@@ -17766,6 +18128,7 @@ dependencies = [
  "project",
  "project_panel",
  "project_symbols",
+ "prompt_store",
  "recent_projects",
  "release_channel",
  "remote",
@@ -17773,11 +18136,13 @@ dependencies = [
  "rust-embed",
  "search",
  "semver",
+ "serde_json",
  "session",
  "settings",
  "settings_profile_selector",
  "settings_ui",
  "shellexpand",
+ "sidebar",
  "snippet_provider",
  "snippets_ui",
  "svg_preview",
@@ -17796,9 +18161,12 @@ dependencies = [
  "vim",
  "vim_mode_setting",
  "watch",
+ "web_search",
+ "web_search_providers",
  "which_key",
  "workspace",
  "zdroid_runtime",
+ "zed-reqwest",
  "zed_actions",
 ]
 
