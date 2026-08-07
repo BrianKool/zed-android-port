@@ -25,10 +25,10 @@ use crate::display::AndroidDisplay;
 use crate::keyboard::AndroidKeyboardLayout;
 use crate::window::{AndroidWindow, AndroidWindowStatePtr};
 
-/// AChoreographer FFI — NDK API 24+. We avoid going through Java's
-/// android.view.Choreographer because we'd need a JNI hop on every
-/// vsync; the NDK exposes the same scheduler natively. Linked from
-/// libandroid.so which Android already keeps mapped.
+// AChoreographer FFI - NDK API 24+. We avoid going through Java's
+// android.view.Choreographer because we'd need a JNI hop on every
+// vsync; the NDK exposes the same scheduler natively. Linked from
+// libandroid.so which Android already keeps mapped.
 #[link(name = "android")]
 unsafe extern "C" {
     fn AChoreographer_getInstance() -> *mut c_void;
@@ -625,7 +625,6 @@ impl AndroidPlatform {
                     action_index,
                     meta_state,
                     button_state,
-                    event_time_millis: _,
                     vscroll,
                     hscroll,
                     positions,
@@ -855,6 +854,13 @@ impl AndroidPlatform {
         }
 
         if !currently_visible {
+            // A tap can move focus between a terminal and an editor while the
+            // keyboard is closed. Prime Android's EditorInfo immediately so
+            // the next explicit keyboard toggle opens with the focused
+            // surface's rules instead of the previously focused terminal's.
+            if reassert_requested {
+                self.tick_ime_target_and_selection(extra_window_id, window_ptr, &app);
+            }
             return;
         }
 

@@ -4318,6 +4318,13 @@ impl Workspace {
         }
     }
 
+    /// Reveal and focus the active item in the center panes, dismissing any
+    /// zoomed dock panel that would otherwise obscure it.
+    pub fn reveal_center_pane(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.dismiss_zoomed_items_to_reveal(None, window, cx);
+        self.focus_center_pane(window, cx);
+    }
+
     pub fn activate_panel_for_proto_id(
         &mut self,
         panel_id: PanelId,
@@ -7840,11 +7847,11 @@ impl Workspace {
                     container = container.min_w(min);
                 }
             } else {
-                let mut size = size_state
+                let size = size_state
                     .and_then(|state| state.size)
                     .unwrap_or_else(|| panel.default_size(window, cx));
                 #[cfg(target_os = "android")]
-                {
+                let size = {
                     // The IME reduces the GPUI SurfaceView height. A bottom dock
                     // previously kept its pre-keyboard absolute height, allowing
                     // a tall terminal's prompt to extend behind the keyboard.
@@ -7854,8 +7861,8 @@ impl Workspace {
                     let available_height = window.viewport_size().height;
                     let maximum_dock_height =
                         (available_height - minimum_center_height).max(px(120.));
-                    size = size.min(maximum_dock_height);
-                }
+                    size.min(maximum_dock_height)
+                };
                 container = container.h(size);
             }
         }
@@ -11162,6 +11169,11 @@ pub fn open_settings_file(
             .await?;
         let _ = worktree_creation_task.await?;
         let _ = settings_open_task.await?;
+        workspace.update_in(cx, |workspace, window, cx| {
+            window.activate_window();
+            workspace.reveal_center_pane(window, cx);
+            cx.notify();
+        })?;
         anyhow::Ok(())
     })
     .detach_and_log_err(cx);
@@ -11183,16 +11195,19 @@ pub fn init_settings_file_actions(cx: &mut App) {
             );
         });
     });
-    cx.on_action(|_: &zed_actions::OpenSettingsFile, cx| {
-        with_active_or_new_workspace(cx, |_, window, cx| {
-            open_settings_file(
-                paths::settings_file(),
-                || settings::initial_user_settings_content().as_ref().into(),
-                window,
-                cx,
-            );
+    #[cfg(not(target_os = "android"))]
+    {
+        cx.on_action(|_: &zed_actions::OpenSettingsFile, cx| {
+            with_active_or_new_workspace(cx, |_, window, cx| {
+                open_settings_file(
+                    paths::settings_file(),
+                    || settings::initial_user_settings_content().as_ref().into(),
+                    window,
+                    cx,
+                );
+            });
         });
-    });
+    }
 }
 
 #[cfg(test)]

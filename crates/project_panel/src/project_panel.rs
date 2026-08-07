@@ -5635,6 +5635,16 @@ impl ProjectPanel {
             )
             .on_click(
                 cx.listener(move |project_panel, event: &gpui::ClickEvent, window, cx| {
+                    #[cfg(target_os = "android")]
+                    if event.modifiers().function && event.click_count() > 1 {
+                        cx.stop_propagation();
+                        if !project_panel.marked_entries.contains(&selection) {
+                            project_panel.marked_entries.clear();
+                        }
+                        project_panel.deploy_context_menu(event.position(), entry_id, window, cx);
+                        return;
+                    }
+
                     if event.is_right_click() || event.first_focus() || show_editor {
                         return;
                     }
@@ -5862,7 +5872,12 @@ impl ProjectPanel {
                             .flex_none()
                     })
                     .child(if show_editor {
-                        h_flex().h_6().w_full().child(self.filename_editor.clone())
+                        h_flex()
+                            .h_6()
+                            .min_w_0()
+                            .w_full()
+                            .overflow_hidden()
+                            .child(self.filename_editor.clone())
                     } else {
                         h_flex()
                             .h_6()

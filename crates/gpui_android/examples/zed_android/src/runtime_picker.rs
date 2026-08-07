@@ -23,12 +23,11 @@ use std::sync::{
 };
 
 use gpui::{
-    AnyElement, App, AppContext as _, Context, Entity, FocusHandle, Focusable, Render,
-    ScrollHandle, Size, StatefulInteractiveElement, Tiling, Window, WindowBounds, WindowKind,
-    WindowOptions, actions, prelude::*, px,
+    AnyElement, App, AppContext as _, Context, DismissEvent, Entity, EventEmitter, FocusHandle,
+    Focusable, Render, ScrollHandle, StatefulInteractiveElement, Tiling, Window, actions,
+    prelude::*,
 };
 use platform_title_bar::PlatformTitleBar;
-use release_channel::ReleaseChannel;
 use theme::ActiveTheme;
 use ui::{
     Button, Chip, Clickable, Color, Disableable, FixedWidth, FluentBuilder, Headline, HeadlineSize,
@@ -36,7 +35,7 @@ use ui::{
     div, h_flex, v_flex,
 };
 use util::ResultExt as _;
-use workspace::{Workspace, client_side_decorations};
+use workspace::{ModalView, MultiWorkspace, Workspace, client_side_decorations};
 use zdroid_runtime::{
     HealthStatus, RuntimeId, RuntimeProvider, adapters,
     adapters::chroot::SPAWND_RELEASE_URL,
@@ -99,13 +98,8 @@ actions!(
 ///   - Settings â†’ "Android Runtime" â†’ "Open picker".
 ///   - Onboarding basics page â†’ "Set up Android runtime" button.
 ///
-/// The handler unconditionally opens the picker as a STANDALONE
-/// WINDOW (`cx.open_window`), not as a workspace Modal. The window
-/// path works from any caller's window context: action dispatched
-/// from inside the Settings window still spawns the picker as its
-/// own independent OS window (on Android, an ExtraWindowActivity).
-/// The modal path required dispatching from the workspace window and
-/// rendered behind any window stacked on top â€” bad UX.
+/// The handler opens the picker as a workspace modal so phone and DeX
+/// both keep it attached to MainActivity and can dismiss it predictably.
 pub fn register(cx: &mut App) {
     cx.observe_new(
         |workspace: &mut Workspace, _window, cx: &mut Context<Workspace>| {
@@ -115,12 +109,18 @@ pub fn register(cx: &mut App) {
                 && !std::path::Path::new(RUNTIME_TOML_PATH).exists()
                 && !FIRST_RUNTIME_PICKER_OPENED.swap(true, Ordering::AcqRel)
             {
-                cx.defer(|cx| {
+                cx.spawn(async move |_workspace, cx| {
+                    while !gpui_android::storage::initial_permissions_settled() {
+                        cx.background_executor()
+                            .timer(std::time::Duration::from_millis(100))
+                            .await;
+                    }
                     log::info!(
-                        "zdroid_runtime_picker: opening automatically for first-time runtime setup"
+                        "zdroid_runtime_picker: initial permissions settled; opening first-time runtime setup"
                     );
-                    open_runtime_picker(cx);
-                });
+                    cx.update(open_runtime_picker)
+                })
+                .detach();
             }
         },
     )
@@ -128,15 +128,15 @@ pub fn register(cx: &mut App) {
 }
 
 fn handle_pick_runtime(
-    _workspace: &mut Workspace,
+    workspace: &mut Workspace,
     _: &PickRuntime,
     window: &mut Window,
     cx: &mut Context<Workspace>,
 ) {
-    open_runtime_picker_window(window, cx);
+    workspace.toggle_modal(window, cx, |_, cx| RuntimePicker::new(cx));
 }
 
-/// Spawn the runtime picker as its own window. Public so any callsite
+/// Show the runtime picker in the active workspace. Public so any callsite
 /// (settings page on_click, onboarding button on_click, lib.rs first-
 /// launch hook if we ever add one back) can open the same picker with
 /// the same parameters. Dedupes against an already-open instance so
@@ -150,57 +150,21 @@ pub fn open_runtime_picker_window(_window: &mut Window, cx: &mut App) {
 }
 
 fn open_runtime_picker(cx: &mut App) {
-    let existing = cx
+    let workspace_window = cx
         .windows()
         .into_iter()
-        .find_map(|w| w.downcast::<RuntimePicker>());
+        .find_map(|window| window.downcast::<MultiWorkspace>());
 
-    if let Some(existing) = existing {
-        existing
-            .update(cx, |_, window, _| window.activate_window())
-            .log_err();
+    let Some(workspace_window) = workspace_window else {
+        log::error!("zdroid_runtime_picker: no active workspace window");
         return;
-    }
-
-    let app_id = ReleaseChannel::global(cx).app_id();
-    // Sized to fit all three adapter cards on a fresh open without the
-    // user having to drag the window taller. The cards (with NotInstalled
-    // detail lines visible) come in around ~165px each in DP; three
-    // stacked plus header, title bar, gap_3 spacing, and p_6 container
-    // padding lands at ~700 DP minimum content. The 800 DP height gives
-    // headroom for theme variance and Samsung DeX's chrome insets.
-    // Width stays generous so the right-hand action button doesn't
-    // wrap into the body text on the longest tagline.
-    let window_size = Size {
-        width: px(640.0),
-        height: px(800.0),
-    };
-    let window_min_size = Size {
-        width: px(320.0),
-        height: px(360.0),
     };
 
-    cx.open_window(
-        WindowOptions {
-            titlebar: Some(gpui::TitlebarOptions {
-                title: Some("Android Runtime".into()),
-                appears_transparent: true,
-                traffic_light_position: Some(gpui::point(px(12.0), px(12.0))),
-            }),
-            focus: true,
-            show: true,
-            is_movable: true,
-            kind: WindowKind::Normal,
-            window_background: cx.theme().window_background_appearance(),
-            app_id: Some(app_id.to_owned()),
-            window_decorations: Some(gpui::WindowDecorations::Client),
-            window_bounds: Some(WindowBounds::centered(window_size, cx)),
-            window_min_size: Some(window_min_size),
-            ..Default::default()
-        },
-        |_, cx| cx.new(RuntimePicker::new),
-    )
-    .log_err();
+    workspace_window
+        .update(cx, |multi_workspace, window, cx| {
+            multi_workspace.toggle_modal(window, cx, |_, cx| RuntimePicker::new(cx));
+        })
+        .log_err();
 }
 
 struct AdapterEntry {
@@ -239,7 +203,7 @@ pub struct RuntimePicker {
 
 impl RuntimePicker {
     pub fn new(cx: &mut Context<Self>) -> Self {
-        let title_bar = if !cfg!(target_os = "macos") {
+        let title_bar = if !cfg!(any(target_os = "macos", target_os = "android")) {
             Some(cx.new(|cx| PlatformTitleBar::new("runtime-picker-title-bar", cx)))
         } else {
             None
@@ -289,9 +253,23 @@ impl RuntimePicker {
                     tx: tx.clone(),
                     last_percent: None,
                 };
-                if let Err(err) = adapter.install(&mut sink) {
-                    log::error!("zdroid_runtime_picker: BootstrapAdapter::install failed: {err:#}");
-                    let _ = tx.unbounded_send(format!("ERROR: {err:#}"));
+                match adapter.install(&mut sink) {
+                    Ok(()) => {
+                        if let Err(err) = super::ensure_agent_cli_launchers() {
+                            log::error!(
+                                "zdroid_runtime_picker: Agent launcher repair failed: {err:#}"
+                            );
+                            let _ = tx.unbounded_send(format!(
+                                "ERROR: Bootstrap installed, but Agent launchers could not be created: {err:#}"
+                            ));
+                        }
+                    }
+                    Err(err) => {
+                        log::error!(
+                            "zdroid_runtime_picker: BootstrapAdapter::install failed: {err:#}"
+                        );
+                        let _ = tx.unbounded_send(format!("ERROR: {err:#}"));
+                    }
                 }
                 // tx + sink drop here â†’ channel closes â†’ foreground exits.
             })
@@ -406,6 +384,10 @@ impl Focusable for RuntimePicker {
         self.focus_handle.clone()
     }
 }
+
+impl EventEmitter<DismissEvent> for RuntimePicker {}
+
+impl ModalView for RuntimePicker {}
 
 impl Render for RuntimePicker {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {

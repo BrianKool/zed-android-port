@@ -58,6 +58,12 @@ class MainActivity : GameActivity(), ImeHost {
     /// MainActivity is always gpui's primary window — id 0.
     override val imeWindowId: Long = 0L
 
+    @Volatile
+    private var storagePermissionRequestInFlight = false
+    @Volatile
+    private var initialPermissionFlowSettled = false
+    private var initialNotificationStage = 0
+
     @Suppress("unused")
     fun startAgentBackgroundTask(taskId: String, description: String) {
         runOnUiThread {
@@ -73,10 +79,32 @@ class MainActivity : GameActivity(), ImeHost {
         }
     }
 
+    @Suppress("unused")
+    fun setBackgroundExecutionEnabled(enabled: Boolean) {
+        runOnUiThread {
+            if (enabled && !initialPermissionFlowSettled) {
+                AgentForegroundService.persistBackgroundExecutionEnabled(this, true)
+            } else {
+                AgentForegroundService.setBackgroundExecutionEnabled(this, enabled)
+            }
+        }
+    }
+
+    private fun startBackgroundExecutionIfEnabled() {
+        if (AgentForegroundService.isBackgroundExecutionEnabled(this)) {
+            AgentForegroundService.setBackgroundExecutionEnabled(this, true)
+        }
+    }
+
     private fun requestAgentNotificationPermissionIfNeeded() {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) return
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) ==
             PackageManager.PERMISSION_GRANTED) return
+
+        if (!initialPermissionFlowSettled) {
+            Log.i(TAG, "Agent notification permission is covered by initial permission flow")
+            return
+        }
 
         val preferences = getSharedPreferences("zdroid_permissions", Context.MODE_PRIVATE)
         if (preferences.getBoolean("asked_agent_notifications", false)) return
@@ -84,9 +112,58 @@ class MainActivity : GameActivity(), ImeHost {
         ActivityCompat.requestPermissions(
             this,
             arrayOf(Manifest.permission.POST_NOTIFICATIONS),
-            REQ_AGENT_NOTIFICATIONS,
+            REQ_NOTIFICATION_PERMISSION,
         )
     }
+
+    private fun continueInitialPermissionFlow() {
+        storagePermissionRequestInFlight = false
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU ||
+            ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) ==
+            PackageManager.PERMISSION_GRANTED
+        ) {
+            initialPermissionFlowSettled = true
+            Log.i(TAG, "Initial permission flow settled without notification prompt")
+            startBackgroundExecutionIfEnabled()
+            return
+        }
+
+        val preferences = getSharedPreferences("zdroid_permissions", Context.MODE_PRIVATE)
+        if (preferences.getBoolean("asked_agent_notifications", false)) {
+            initialPermissionFlowSettled = true
+            Log.i(TAG, "Initial permission flow settled; notification permission was already asked")
+            startBackgroundExecutionIfEnabled()
+            return
+        }
+        preferences.edit().putBoolean("asked_agent_notifications", true).apply()
+        initialNotificationStage = 1
+        Log.i(TAG, "Initial permission flow waiting to create notification channels")
+        if (hasWindowFocus()) {
+            beginLegacyNotificationPermissionPrompt()
+        }
+    }
+
+    private fun beginLegacyNotificationPermissionPrompt() {
+        if (initialNotificationStage != 1) return
+        initialNotificationStage = 2
+        Log.i(TAG, "Initial permission flow creating notification channels")
+        AgentForegroundService.ensureNotificationChannels(this)
+
+        // targetSdk <= 32 gives prompt timing to Android. If this device does
+        // not display a dialog (already answered or OEM policy), do not leave
+        // first-run setup blocked forever.
+        splashHandler.postDelayed({
+            if (initialNotificationStage == 2) {
+                initialNotificationStage = 0
+                initialPermissionFlowSettled = true
+                Log.i(TAG, "Initial permission flow settled; no notification dialog appeared")
+                startBackgroundExecutionIfEnabled()
+            }
+        }, 1500L)
+    }
+
+    @Suppress("unused") // called from Rust via JNI
+    fun isInitialPermissionFlowSettled(): Boolean = initialPermissionFlowSettled
 
     @Suppress("unused")
     fun writeCredential(url: String, username: String, password: ByteArray): Boolean =
@@ -457,6 +534,11 @@ class MainActivity : GameActivity(), ImeHost {
                 "zdroid_ime",
                 "restartImeForTarget: switching mode ${currentImeMode} -> $modeId"
             )
+            if (currentImeMode == ImeInputMode.TERMINAL && modeId != ImeInputMode.TERMINAL) {
+                extraKeysView?.clearModifiers()
+                extraKeysPendingMeta = 0
+                extraKeysLockedMeta = 0
+            }
             currentImeMode = modeId
             updateExtrasRowVisibility()
             // Focus moved to a different input target — fresh
@@ -524,19 +606,6 @@ class MainActivity : GameActivity(), ImeHost {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         installSplashOverlay()
-        AgentForegroundService.ensureNotificationChannels(this)
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
-            ContextCompat.checkSelfPermission(
-                this,
-                Manifest.permission.POST_NOTIFICATIONS,
-            ) != PackageManager.PERMISSION_GRANTED
-        ) {
-            ActivityCompat.requestPermissions(
-                this,
-                arrayOf(Manifest.permission.POST_NOTIFICATIONS),
-                REQ_NOTIFICATION_PERMISSION,
-            )
-        }
         // Edge-to-edge: tell the OS we want to draw behind status / nav bars
         // and the cutout area, so gpui's surface gets the full display
         // bounds. Without this, GameActivity respects system insets and the
@@ -1165,6 +1234,19 @@ class MainActivity : GameActivity(), ImeHost {
 
     override fun onWindowFocusChanged(hasFocus: Boolean) {
         super.onWindowFocusChanged(hasFocus)
+        when {
+            hasFocus && initialNotificationStage == 1 -> beginLegacyNotificationPermissionPrompt()
+            !hasFocus && initialNotificationStage == 2 -> {
+                initialNotificationStage = 3
+                Log.i(TAG, "Initial notification permission dialog took focus")
+            }
+            hasFocus && initialNotificationStage == 3 -> {
+                initialNotificationStage = 0
+                initialPermissionFlowSettled = true
+                Log.i(TAG, "Initial permission flow settled after notification dialog")
+                startBackgroundExecutionIfEnabled()
+            }
+        }
         // DeX needs the system cursor to remain free so the user can reach
         // window borders and controls. Never acquire relative pointer capture.
         window.decorView.releasePointerCapture()
@@ -1271,13 +1353,9 @@ class MainActivity : GameActivity(), ImeHost {
         Log.i(TAG, "openUrl: $url")
         runOnUiThread {
             try {
-                startActivity(
-                    Intent(Intent.ACTION_VIEW, Uri.parse(url)).apply {
-                        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                    }
-                )
+                ZdroidBrowserLauncher.open(this, url)
             } catch (t: Throwable) {
-                Log.e(TAG, "openUrl: startActivity ACTION_VIEW failed for $url", t)
+                Log.e(TAG, "openUrl failed for $url", t)
             }
         }
     }
@@ -1352,20 +1430,26 @@ class MainActivity : GameActivity(), ImeHost {
         }
         if (needed.isEmpty()) {
             Log.i(TAG, "requestStoragePermissions: already granted")
-            return 1
+            runOnUiThread { continueInitialPermissionFlow() }
+            return 0
         }
         Log.i(TAG, "requestStoragePermissions: prompting for ${needed.joinToString(",")}")
+        storagePermissionRequestInFlight = true
         runOnUiThread {
-            ActivityCompat.requestPermissions(this, needed.toTypedArray(), REQ_STORAGE_PERMS)
+            try {
+                ActivityCompat.requestPermissions(this, needed.toTypedArray(), REQ_STORAGE_PERMS)
+            } catch (error: Throwable) {
+                Log.e(TAG, "Storage permission request failed", error)
+                continueInitialPermissionFlow()
+            }
         }
         return 0
     }
 
     /// Returns Android's currently-active DNS server IPs as a comma-joined
-    /// string. The Rust side writes them to /sdcard/.zed/r in resolv.conf
-    /// format so Bun-compiled CLIs (whose c-ares is patched to read from
-    /// /sdcard/.zed/r) can do DNS without proot. Falls back to empty
-    /// string if no active network — caller layers in public-DNS defaults.
+    /// string. Rust stores them in app-private storage; native CLI launchers
+    /// expose that file as /proc/self/fd/9 so static resolvers work without
+    /// shared-storage permission. An empty result uses public-DNS defaults.
     @Suppress("unused") // called from Rust via JNI
     fun getActiveDnsServers(): String {
         val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
@@ -1471,6 +1555,10 @@ class MainActivity : GameActivity(), ImeHost {
         if (requestCode == REQ_NOTIFICATION_PERMISSION) {
             val granted = grantResults.firstOrNull() == PackageManager.PERMISSION_GRANTED
             Log.i(TAG, "Agent notification permission granted=$granted")
+            initialPermissionFlowSettled = true
+            initialNotificationStage = 0
+            Log.i(TAG, "Initial permission flow settled after notification result")
+            startBackgroundExecutionIfEnabled()
             return
         }
         if (requestCode != REQ_STORAGE_PERMS) {
@@ -1480,6 +1568,7 @@ class MainActivity : GameActivity(), ImeHost {
             "${perm.removePrefix("android.permission.")}=${if (granted == PackageManager.PERMISSION_GRANTED) "OK" else "DENIED"}"
         }
         Log.i(TAG, "onRequestPermissionsResult: $results")
+        continueInitialPermissionFlow()
     }
 
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
@@ -1647,7 +1736,6 @@ class MainActivity : GameActivity(), ImeHost {
         private const val REQ_CREATE_DOCUMENT = 0xA2
         private const val REQ_STORAGE_PERMS = 0xA3
         private const val REQ_NOTIFICATION_PERMISSION = 0xA4
-        private const val REQ_AGENT_NOTIFICATIONS = 0xA4
         /// Software cursor side length in dp. Scaled by display
         /// density at instantiation time to give the sprite a
         /// consistent visual size across devices.

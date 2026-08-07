@@ -16,8 +16,8 @@ use feature_flags::AcpBetaFeatureFlag;
 use crate::completion_provider::AvailableSkill;
 use crate::message_editor::SharedSessionCapabilities;
 
-use gpui::List;
 use gpui::TaskExt;
+use gpui::{List, MouseButton};
 use heapless::Vec as ArrayVec;
 use language_model::{LanguageModelEffortLevel, Speed};
 use settings::update_settings_file;
@@ -3655,6 +3655,13 @@ impl ThreadView {
                             .flex_wrap()
                             .gap_y_1()
                             .justify_between()
+                            .when(cfg!(target_os = "android"), |this| {
+                                this.on_mouse_down(MouseButton::Left, |_, window, _cx| {
+                                    if window.soft_keyboard_visible() {
+                                        window.toggle_soft_keyboard();
+                                    }
+                                })
+                            })
                             .child(
                                 h_flex()
                                     .min_w_0()

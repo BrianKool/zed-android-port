@@ -245,51 +245,6 @@ fn zed_menu_items() -> Vec<MenuEntry> {
     ]
 }
 
-/// Settings submenu nested under Zed — mirrors production
-/// `crates/zed/src/zed/app_menus.rs:69-87`. All ten entries the user
-/// listed: file/default-variant handlers landed in `editor` and
-/// `workspace` (see `editor::init_bundled_file_actions`,
-/// `workspace::init_settings_file_actions`,
-/// `editor::open_project_settings_file`).
-fn zed_settings_submenu_items() -> Vec<MenuEntry> {
-    vec![
-        MenuEntry::Action("Open Settings", Box::new(zed_actions::OpenSettings)),
-        MenuEntry::Action("GitHub Accounts", Box::new(git_ui::OpenGithubAccounts)),
-        MenuEntry::Action(
-            "Open Settings File",
-            Box::new(zed_actions::OpenSettingsFile),
-        ),
-        MenuEntry::Action(
-            "Open Project Settings",
-            Box::new(zed_actions::OpenProjectSettings),
-        ),
-        MenuEntry::Action(
-            "Open Project Settings File",
-            Box::new(zed_actions::OpenProjectSettingsFile),
-        ),
-        MenuEntry::Action(
-            "Open Default Settings",
-            Box::new(zed_actions::OpenDefaultSettings),
-        ),
-        MenuEntry::Separator,
-        MenuEntry::Action("Open Keymap", Box::new(zed_actions::OpenKeymap)),
-        MenuEntry::Action("Open Keymap File", Box::new(zed_actions::OpenKeymapFile)),
-        MenuEntry::Action(
-            "Open Default Key Bindings",
-            Box::new(zed_actions::OpenDefaultKeymap),
-        ),
-        MenuEntry::Separator,
-        MenuEntry::Action(
-            "Select Theme…",
-            Box::new(zed_actions::theme_selector::Toggle::default()),
-        ),
-        MenuEntry::Action(
-            "Select Icon Theme…",
-            Box::new(zed_actions::icon_theme_selector::Toggle::default()),
-        ),
-    ]
-}
-
 fn file_menu_items() -> Vec<MenuEntry> {
     vec![
         MenuEntry::Action("New File", Box::new(workspace::NewFile)),

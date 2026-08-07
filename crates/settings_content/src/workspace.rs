@@ -85,6 +85,11 @@ pub struct WorkspaceSettingsContent {
     ///
     /// Default: true
     pub use_system_prompts: Option<bool>,
+    /// Keep Zdroid-B alive as an Android foreground service so agent and
+    /// terminal setup tasks can continue while the app is in the background.
+    ///
+    /// Default: true
+    pub background_execution: Option<bool>,
     /// Aliases for the command palette. When you type a key in this map,
     /// it will be assumed to equal the value.
     ///

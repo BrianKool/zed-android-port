@@ -15,6 +15,10 @@ impl Editor {
         self.auto_show_ime = auto_show_ime;
     }
 
+    pub fn set_suppress_auto_show_ime(&mut self, suppress: bool) {
+        self.suppress_auto_show_ime = suppress;
+    }
+
     pub fn set_autoindent(&mut self, autoindent: bool) {
         if autoindent {
             self.autoindent_mode = Some(AutoindentMode::EachLine);
@@ -3078,6 +3082,6 @@ impl EntityInputHandler for Editor {
     }
 
     fn should_auto_show_ime(&self, _window: &mut Window, _cx: &mut Context<Self>) -> bool {
-        self.mode.is_single_line() || self.auto_show_ime
+        !self.suppress_auto_show_ime && (self.mode.is_single_line() || self.auto_show_ime)
     }
 }

@@ -3295,6 +3295,7 @@ impl AgentPanel {
 
     fn open_thread_history(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(workspace) = self.workspace.upgrade() else {
+            log::warn!("Agent history could not open: workspace is gone");
             return;
         };
         let Some(multi_workspace) = workspace
@@ -3302,12 +3303,16 @@ impl AgentPanel {
             .multi_workspace()
             .and_then(|multi_workspace| multi_workspace.upgrade())
         else {
+            log::warn!("Agent history could not open: multi-workspace is unavailable");
             return;
         };
 
         multi_workspace.update(cx, |multi_workspace, cx| {
             if let Some(sidebar) = multi_workspace.sidebar() {
+                log::info!("Agent history opening thread switcher");
                 sidebar.toggle_thread_switcher(false, window, cx);
+            } else {
+                log::warn!("Agent history could not open: sidebar is unavailable");
             }
         });
     }

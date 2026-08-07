@@ -218,6 +218,9 @@
   // When set to false, Zed will use its built-in prompts. Note that on Linux,
   // this option is ignored and Zed will always use the built-in prompts.
   "use_system_prompts": true,
+  // Keep Android agent and setup-terminal work running when Zdroid-B is
+  // backgrounded. A persistent notification is shown while enabled.
+  "background_execution": true,
   // Whether the cursor blinks in the editor.
   "cursor_blink": true,
   // Cursor shape for the default editor.
@@ -1773,6 +1776,8 @@
   },
   // Settings specific to the terminal
   "terminal": {
+    // Keep terminal text independent from editor buffer zoom.
+    "font_size": 14,
     // What shell to use when opening a terminal. May take 3 values:
     // 1. Use the system's default terminal configuration in /etc/passwd
     //      "shell": "system"

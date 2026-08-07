@@ -1,4 +1,5 @@
 use std::{
+    fs::OpenOptions,
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -30,9 +31,12 @@ const GITHUB_GIT_USERNAME: &str = "x-access-token";
 
 #[derive(Clone, Deserialize)]
 pub(crate) struct GithubUser {
+    pub(crate) id: u64,
     pub(crate) login: String,
     #[serde(default)]
     pub(crate) name: Option<String>,
+    #[serde(default)]
+    pub(crate) email: Option<String>,
 }
 
 impl GithubUser {
@@ -47,6 +51,56 @@ impl GithubUser {
             _ => self.login.clone(),
         }
     }
+}
+
+pub(crate) fn ensure_git_identity(user: &GithubUser) -> Result<()> {
+    let config_path = paths::home_dir().join(".gitconfig");
+    if let Some(parent) = config_path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("create Git config directory {}", parent.display()))?;
+    }
+    OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&config_path)
+        .with_context(|| format!("create Git config {}", config_path.display()))?;
+
+    let mut config = git2::Config::open(&config_path)
+        .with_context(|| format!("open Git config {}", config_path.display()))?;
+    let has_name = config
+        .get_string("user.name")
+        .ok()
+        .is_some_and(|value| !value.trim().is_empty());
+    if !has_name {
+        let name = user
+            .name
+            .as_deref()
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .unwrap_or(&user.login);
+        config
+            .set_str("user.name", name)
+            .context("set Git user.name")?;
+    }
+
+    let has_email = config
+        .get_string("user.email")
+        .ok()
+        .is_some_and(|value| !value.trim().is_empty());
+    if !has_email {
+        let email = user
+            .email
+            .as_deref()
+            .map(str::trim)
+            .filter(|email| !email.is_empty())
+            .map(ToOwned::to_owned)
+            .unwrap_or_else(|| format!("{}+{}@users.noreply.github.com", user.id, user.login));
+        config
+            .set_str("user.email", &email)
+            .context("set Git user.email")?;
+    }
+
+    Ok(())
 }
 
 #[derive(Clone, Deserialize)]
@@ -267,7 +321,13 @@ impl GithubAccountsModal {
                 Ok(Some((username, token))) if username == GITHUB_GIT_USERNAME => {
                     match std::str::from_utf8(&token) {
                         Ok(token) => match validate_token(&http_client, token).await {
-                            Ok(user) => AuthState::SignedIn(user.display_label().into()),
+                            Ok(user) => match ensure_git_identity(&user) {
+                                Ok(()) => AuthState::SignedIn(user.display_label().into()),
+                                Err(error) => AuthState::Error(
+                                    format!("GitHub is signed in, but Git identity setup failed: {error:#}")
+                                        .into(),
+                                ),
+                            },
                             Err(error) => AuthState::Error(error.to_string().into()),
                         },
                         Err(_) => AuthState::Error("Stored GitHub credential is invalid.".into()),
@@ -317,6 +377,7 @@ impl GithubAccountsModal {
         cx.spawn(async move |this, cx| {
             let result: Result<GithubUser> = async {
                 let user = validate_token(&http_client, &token).await?;
+                ensure_git_identity(&user)?;
                 let store = cx.update(|cx| {
                     cx.write_credentials(GITHUB_CREDENTIALS_KEY, &user.login, token.as_bytes())
                 });
@@ -359,6 +420,7 @@ impl GithubAccountsModal {
 
                 let token = poll_for_access_token(&http_client, &executor, &device).await?;
                 let user = validate_token(&http_client, &token).await?;
+                ensure_git_identity(&user)?;
                 let store = cx.update(|cx| {
                     cx.write_credentials(
                         GITHUB_CREDENTIALS_KEY,
@@ -558,9 +620,11 @@ impl Render for GithubAccountsModal {
         v_flex()
             .id("github-accounts-modal")
             .key_context("GithubAccountsModal")
-            .w(rems(34.))
+            .when(!cfg!(target_os = "android"), |this| {
+                this.w(rems(34.)).elevation_3(cx)
+            })
+            .when(cfg!(target_os = "android"), |this| this.size_full())
             .max_w_full()
-            .elevation_3(cx)
             .overflow_hidden()
             .track_focus(&self.focus_handle)
             .on_action(cx.listener(Self::dismiss))

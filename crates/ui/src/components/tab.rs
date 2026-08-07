@@ -143,6 +143,9 @@ impl RenderOnce for Tab {
 
         self.div
             .h(Tab::container_height(cx))
+            .when(cfg!(target_os = "android"), |this| {
+                this.max_w(px(240.)).min_w_0()
+            })
             .bg(tab_bg)
             .border_color(cx.theme().colors().border)
             .map(|this| match self.position {
@@ -169,6 +172,8 @@ impl RenderOnce for Tab {
                 h_flex()
                     .group("")
                     .relative()
+                    .min_w_0()
+                    .overflow_hidden()
                     .h(Tab::content_height(cx))
                     .px(DynamicSpacing::Base04.px(cx))
                     .gap(DynamicSpacing::Base04.rems(cx))

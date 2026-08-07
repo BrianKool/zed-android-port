@@ -1168,6 +1168,7 @@ impl ThreadMetadataStore {
         cx.observe_new::<crate::ConversationView>(move |_view, _window, cx| {
             let view_entity = cx.entity();
             let entity_id = view_entity.entity_id();
+            log::info!("Agent history observing conversation entity={entity_id:?}");
 
             cx.on_release({
                 let weak_store = weak_store.clone();
@@ -1251,6 +1252,9 @@ impl ThreadMetadataStore {
         let view = conversation_view.read(cx);
         let thread_id = view.thread_id;
         let Some(thread) = view.root_thread(cx) else {
+            log::warn!(
+                "Agent history update skipped: conversation thread={thread_id:?} has no root thread"
+            );
             return;
         };
 
@@ -1331,6 +1335,16 @@ impl ThreadMetadataStore {
             remote_connection,
             archived,
         };
+
+        log::info!(
+            "Agent history saving thread={thread_id:?} session={} draft={} empty_paths={} archived={archived}",
+            metadata
+                .session_id
+                .as_ref()
+                .map_or("none", |session_id| session_id.0.as_ref()),
+            is_draft,
+            metadata.worktree_paths.is_empty(),
+        );
 
         self.save(metadata, cx);
     }

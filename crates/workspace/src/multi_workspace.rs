@@ -2,9 +2,9 @@ use anyhow::Result;
 use fs::Fs;
 
 use gpui::{
-    AnyView, App, Context, DragMoveEvent, Entity, EntityId, EventEmitter, FocusHandle, Focusable,
-    ManagedView, MouseButton, Pixels, Render, Subscription, Task, TaskExt, Tiling, WeakEntity,
-    Window, WindowId, actions, deferred, px,
+    Action, AnyView, App, Context, DragMoveEvent, Entity, EntityId, EventEmitter, FocusHandle,
+    Focusable, ManagedView, MouseButton, Pixels, Render, Subscription, Task, TaskExt, Tiling,
+    WeakEntity, Window, WindowId, actions, deferred, hsla, px, relative,
 };
 pub use project::ProjectGroupKey;
 use project::{DisableAiSettings, Project};
@@ -21,7 +21,7 @@ use zed_actions::agents_sidebar::ToggleThreadSwitcher;
 
 use agent_settings::AgentSettings;
 use settings::SidebarDockPosition;
-use ui::{ContextMenu, right_click_menu};
+use ui::{ContextMenu, IconButton, IconName, Tooltip, right_click_menu};
 
 const SIDEBAR_RESIZE_HANDLE_SIZE: Pixels = px(6.0);
 
@@ -2234,6 +2234,70 @@ impl Render for MultiWorkspace {
                 .children(right_sidebar)
                 .child(self.workspace().read(cx).modal_layer.clone())
                 .children(self.sidebar_overlay.as_ref().map(|view| {
+                    if cfg!(target_os = "android") {
+                        return deferred(
+                            div()
+                                .absolute()
+                                .size_full()
+                                .inset_0()
+                                .occlude()
+                                .bg(hsla(0.0, 0.0, 0.0, 0.48))
+                                .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                                    cx.stop_propagation();
+                                })
+                                .on_mouse_up(MouseButton::Left, |_, _, cx| {
+                                    cx.stop_propagation();
+                                })
+                                .child(
+                                    v_flex().size_full().items_center().justify_center().child(
+                                        div()
+                                            .relative()
+                                            .w(relative(0.9))
+                                            .h(relative(0.9))
+                                            .min_w_0()
+                                            .min_h_0()
+                                            .overflow_hidden()
+                                            .rounded_md()
+                                            .border_1()
+                                            .border_color(cx.theme().colors().border)
+                                            .bg(cx.theme().colors().elevated_surface_background)
+                                            .occlude()
+                                            .child(
+                                                div()
+                                                    .size_full()
+                                                    .min_w_0()
+                                                    .min_h_0()
+                                                    .overflow_hidden()
+                                                    .pt_8()
+                                                    .child(view.clone()),
+                                            )
+                                            .child(
+                                                div().absolute().top_2().right_2().child(
+                                                    IconButton::new(
+                                                        "close-sidebar-overlay",
+                                                        IconName::Close,
+                                                    )
+                                                    .tooltip(Tooltip::text("Close"))
+                                                    .on_click(|_, window, cx| {
+                                                        window.dispatch_action(
+                                                            menu::Cancel.boxed_clone(),
+                                                            cx,
+                                                        );
+                                                    }),
+                                                ),
+                                            )
+                                            .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                                                cx.stop_propagation();
+                                            })
+                                            .on_mouse_up(MouseButton::Left, |_, _, cx| {
+                                                cx.stop_propagation();
+                                            }),
+                                    ),
+                                ),
+                        )
+                        .with_priority(2);
+                    }
+
                     deferred(div().absolute().size_full().inset_0().occlude().child(
                         v_flex().h(px(0.0)).top_20().items_center().child(
                             h_flex().occlude().child(view.clone()).on_mouse_down(

@@ -105,8 +105,10 @@ impl RenderOnce for AlertModal {
                 this.track_focus(&focus_handle)
             })
             .id(self.id)
-            .elevation_3(cx)
-            .w(width)
+            .when(!cfg!(target_os = "android"), |this| {
+                this.elevation_3(cx).w(width)
+            })
+            .when(cfg!(target_os = "android"), |this| this.size_full())
             .bg(cx.theme().colors().elevated_surface_background)
             .overflow_hidden();
 

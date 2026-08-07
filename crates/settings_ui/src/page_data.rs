@@ -103,7 +103,7 @@ pub(crate) fn settings_data(cx: &App) -> Vec<SettingsPage> {
 /// The click handler dispatches the `zdroid_runtime::PickRuntime`
 /// action registered in `crates/gpui_android/examples/zed_android/src/
 /// runtime_picker.rs::register`. The action handler unconditionally
-/// calls `cx.open_window` to spawn the picker as its own window
+/// shows the picker in the active workspace modal layer
 /// (ExtraWindowActivity on Android), so it doesn't matter that this
 /// dispatch starts in the Settings window — the picker is a peer
 /// window, not nested inside Settings. Dispatched via
@@ -308,12 +308,17 @@ fn developer_page() -> SettingsPage {
 fn general_page(cx: &App) -> SettingsPage {
     #[cfg(target_os = "android")]
     fn zdroid_build_section() -> [SettingsPageItem; 3] {
+        let version = gpui_android::updater::current_version();
         [
             SettingsPageItem::SectionHeader("About Zdroid-B"),
             SettingsPageItem::StaticInfo(StaticInfo {
                 title: "Zdroid-B Version".into(),
                 description: Some("Edition ID: zdroid-b. Android package: com.zdroid".into()),
-                value: "beta-2c".into(),
+                value: if version.is_empty() {
+                    "Unknown".into()
+                } else {
+                    version.into()
+                },
                 files: USER,
             }),
             SettingsPageItem::ActionLink(ActionLink {
@@ -387,6 +392,21 @@ fn general_page(cx: &App) -> SettingsPage {
                     pick: |settings_content| settings_content.workspace.use_system_prompts.as_ref(),
                     write: |settings_content, value, _| {
                         settings_content.workspace.use_system_prompts = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Background Execution",
+                description: "Keep Zdroid-B agent and setup-terminal tasks running while the app is backgrounded. Shows a persistent Android notification.",
+                field: Box::new(SettingField {
+                    json_path: Some("background_execution"),
+                    pick: |settings_content| {
+                        settings_content.workspace.background_execution.as_ref()
+                    },
+                    write: |settings_content, value, _| {
+                        settings_content.workspace.background_execution = value;
                     },
                 }),
                 metadata: None,
@@ -1532,7 +1552,7 @@ fn keymap_page() -> SettingsPage {
                             original_window.activate_window();
                         })
                         .ok();
-                    window.remove_window();
+                    crate::close_settings_ui_from_app(settings_window, window, cx);
                 }),
                 files: USER,
             }),

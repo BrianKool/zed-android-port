@@ -1041,6 +1041,7 @@ impl VsCodeSettings {
             show_call_status_icon: None,
             use_system_path_prompts: self.read_bool("files.simpleDialog.enable").map(|b| !b),
             use_system_prompts: None,
+            background_execution: None,
             use_system_window_tabs: self.read_bool("window.nativeTabs"),
             when_closing_with_no_tabs: self.read_bool("window.closeWhenEmpty").map(|b| {
                 if b {

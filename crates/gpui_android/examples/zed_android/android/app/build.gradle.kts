@@ -21,6 +21,37 @@ val signingProps = Properties().apply {
 }
 val hasReleaseSigning = signingPropsFile.exists()
 
+// Cargo build scripts (notably wasmtime-c-api-impl) invoke `cmake`
+// directly. Android Studio installs CMake inside the SDK but does not add it
+// to the Gradle daemon's PATH, so a truly clean build used to fail whenever a
+// previously cached native artifact was absent. Resolve the SDK the same ways
+// Android tooling does and publish its newest bundled CMake to every Cargo
+// task, keeping local and CI builds reproducible.
+val localProperties = Properties().apply {
+    val propertiesFile = rootProject.file("local.properties")
+    if (propertiesFile.exists()) {
+        propertiesFile.inputStream().use { load(it) }
+    }
+}
+val androidSdkDir = sequenceOf(
+    System.getenv("ANDROID_SDK_ROOT"),
+    System.getenv("ANDROID_HOME"),
+    localProperties.getProperty("sdk.dir"),
+)
+    .filterNotNull()
+    .map(::file)
+    .firstOrNull { it.isDirectory }
+val sdkCmakeBin = androidSdkDir
+    ?.resolve("cmake")
+    ?.listFiles()
+    ?.filter { it.isDirectory }
+    ?.maxByOrNull { it.name }
+    ?.resolve("bin")
+    ?.takeIf { it.resolve("cmake.exe").isFile || it.resolve("cmake").isFile }
+val cargoBuildPath = sdkCmakeBin?.let {
+    "${it.absolutePath}${File.pathSeparator}${System.getenv("PATH").orEmpty()}"
+}
+
 // Main Rust library bundling.
 //
 // Android Gradle only packages files already present under jniLibs; it does
@@ -50,6 +81,7 @@ tasks.register<Exec>("buildZedAndroidLib") {
     providers.environmentVariable("ANDROID_NDK_HOME").orNull?.let { ndk ->
         environment("ANDROID_NDK_HOME", ndk)
     }
+    cargoBuildPath?.let { environment("PATH", it) }
 
     outputs.file(zedAndroidLib)
     outputs.upToDateWhen { false }
@@ -142,6 +174,7 @@ tasks.register<Exec>("buildZdExec") {
     providers.environmentVariable("ANDROID_NDK_HOME").orNull?.let { ndk ->
         environment("ANDROID_NDK_HOME", ndk)
     }
+    cargoBuildPath?.let { environment("PATH", it) }
 
     inputs.files(zdExecSrc)
     inputs.file("${workspaceRoot}/crates/zdroid_runtime/Cargo.toml")
@@ -209,6 +242,7 @@ tasks.register<Exec>("buildAskpassHelper") {
     providers.environmentVariable("ANDROID_NDK_HOME").orNull?.let { ndk ->
         environment("ANDROID_NDK_HOME", ndk)
     }
+    cargoBuildPath?.let { environment("PATH", it) }
 
     inputs.files(askpassHelperSrc)
     inputs.file("${askpassHelperDir}/Cargo.toml")
@@ -293,8 +327,8 @@ android {
         // denied â€” the entire L2 plan stops working. Skipping Play Store
         // eligibility is the explicit trade.
         targetSdk = 28
-        versionCode = 44
-        versionName = "beta-2c"
+        versionCode = 100
+        versionName = "1.0.0"
         ndk {
             abiFilters += listOf("arm64-v8a")
         }

@@ -5150,9 +5150,70 @@ impl Sidebar {
             })
             .collect();
 
+        // Android uses the thread switcher as the Agent Panel history UI, but
+        // it does not currently populate the desktop Sidebar's project-group
+        // rows. The metadata store is still the source of truth, so build the
+        // current workspace's history directly when those rows are absent.
+        if entries.is_empty() {
+            entries.extend(self.stored_thread_entries_for_active_workspace(cx));
+        }
+
         entries.sort_by(|a, b| self.switcher_entry_cmp(a, b));
 
         entries
+    }
+
+    fn stored_thread_entries_for_active_workspace(&self, cx: &App) -> Vec<ThreadSwitcherEntry> {
+        let Some(multi_workspace) = self.multi_workspace.upgrade() else {
+            return Vec::new();
+        };
+        let workspace = multi_workspace.read(cx).workspace().clone();
+        let workspace_paths = workspace_path_list(&workspace, cx);
+        let agent_server_store = workspace
+            .read(cx)
+            .project()
+            .read(cx)
+            .agent_server_store()
+            .clone();
+
+        ThreadMetadataStore::global(cx)
+            .read(cx)
+            .entries()
+            .filter(|metadata| {
+                !metadata.archived
+                    && (metadata.folder_paths() == &workspace_paths
+                        || metadata.main_worktree_paths() == &workspace_paths)
+            })
+            .cloned()
+            .map(|metadata| {
+                let agent = Agent::from(metadata.agent_id.clone());
+                let icon = match agent {
+                    Agent::NativeAgent => IconName::ZedAgent,
+                    Agent::Custom { .. } => IconName::Terminal,
+                    _ => IconName::ZedAgent,
+                };
+                let icon_from_external_svg =
+                    agent_server_store.read(cx).agent_icon(&metadata.agent_id);
+                let timestamp: SharedString =
+                    format_history_entry_timestamp(Self::thread_display_time(&metadata)).into();
+
+                ThreadSwitcherEntry::Thread(ThreadSwitcherThreadEntry {
+                    title: metadata.display_title(),
+                    icon,
+                    icon_from_external_svg,
+                    status: AgentThreadStatus::default(),
+                    workspace: workspace.clone(),
+                    project_name: None,
+                    worktrees: Vec::new(),
+                    diff_stats: DiffStats::default(),
+                    is_draft: metadata.is_draft(),
+                    is_title_generating: false,
+                    notified: false,
+                    timestamp,
+                    metadata,
+                })
+            })
+            .collect()
     }
 
     fn dismiss_thread_switcher(&mut self, cx: &mut Context<Self>) {
@@ -5274,9 +5335,20 @@ impl Sidebar {
         }
 
         let entries = self.mru_entries_for_switcher(cx);
-        if entries.is_empty() {
-            return;
-        }
+        let metadata_store = ThreadMetadataStore::global(cx);
+        let metadata_store = metadata_store.read(cx);
+        let stored_entries = metadata_store.entries().count();
+        let stored_unarchived_entries = metadata_store
+            .entries()
+            .filter(|entry| !entry.archived)
+            .count();
+        log::info!(
+            "Agent history requested visible={} stored={} unarchived={} sidebar_rows={}",
+            entries.len(),
+            stored_entries,
+            stored_unarchived_entries,
+            self.contents.entries.len(),
+        );
 
         let weak_multi_workspace = self.multi_workspace.clone();
 

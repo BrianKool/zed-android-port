@@ -325,7 +325,7 @@ impl ConfigOptionSelector {
 
         match &option.kind {
             acp::SessionConfigKind::Select(select) => {
-                find_option_name(&select.options, &select.current_value)
+                find_option_name(&option.id, &select.options, &select.current_value)
                     .unwrap_or_else(|| "Unknown".to_string())
             }
             _ => "Unknown".to_string(),
@@ -735,7 +735,7 @@ fn extract_options(
                 .iter()
                 .map(|opt| ConfigOptionValue {
                     value: opt.value.clone(),
-                    name: opt.name.clone(),
+                    name: model_option_display_name(config_id, opt),
                     description: opt.description.clone(),
                     group: None,
                 })
@@ -745,7 +745,7 @@ fn extract_options(
                 .flat_map(|group| {
                     group.options.iter().map(|opt| ConfigOptionValue {
                         value: opt.value.clone(),
-                        name: opt.name.clone(),
+                        name: model_option_display_name(config_id, opt),
                         description: opt.description.clone(),
                         group: Some(group.name.clone()),
                     })
@@ -755,6 +755,72 @@ fn extract_options(
         },
         _ => Vec::new(),
     }
+}
+
+fn model_option_display_name(
+    config_id: &acp::SessionConfigId,
+    option: &acp::SessionConfigSelectOption,
+) -> String {
+    if config_id.0.as_ref() != "model" {
+        return option.name.clone();
+    }
+
+    if let Some(name) = explicit_claude_model_name(option.value.0.as_ref()) {
+        return name;
+    }
+
+    let Some(versioned_name) = option
+        .description
+        .as_deref()
+        .and_then(|description| description.split('\u{b7}').next())
+        .map(str::trim)
+        .filter(|name| name.chars().any(|character| character.is_ascii_digit()))
+    else {
+        return option.name.clone();
+    };
+
+    if option.value.0.as_ref() == "default" {
+        return format!("{versioned_name} (Default)");
+    }
+
+    if option.value.0.contains("[1m]") {
+        return format!("{versioned_name} (1M context)");
+    }
+
+    versioned_name.to_string()
+}
+
+fn explicit_claude_model_name(value: &str) -> Option<String> {
+    let (value, long_context) = value
+        .strip_suffix("[1m]")
+        .map_or((value, false), |value| (value, true));
+    let remainder = value.strip_prefix("claude-")?;
+    let mut parts = remainder.split('-');
+    let family = parts.next()?;
+    if !matches!(family, "fable" | "opus" | "sonnet" | "haiku") {
+        return None;
+    }
+    let version = parts.collect::<Vec<_>>();
+    if version.is_empty()
+        || version
+            .iter()
+            .any(|part| !part.chars().all(|character| character.is_ascii_digit()))
+    {
+        return None;
+    }
+
+    let family_name = match family {
+        "fable" => "Fable",
+        "opus" => "Opus",
+        "sonnet" => "Sonnet",
+        "haiku" => "Haiku",
+        _ => return None,
+    };
+    let mut name = format!("{family_name} {}", version.join("."));
+    if long_context {
+        name.push_str(" (1M context)");
+    }
+    Some(name)
 }
 
 fn get_current_value(
@@ -850,6 +916,7 @@ async fn fuzzy_search_options(
 }
 
 fn find_option_name(
+    config_id: &acp::SessionConfigId,
     options: &acp::SessionConfigSelectOptions,
     value_id: &acp::SessionConfigValueId,
 ) -> Option<String> {
@@ -857,13 +924,13 @@ fn find_option_name(
         acp::SessionConfigSelectOptions::Ungrouped(opts) => opts
             .iter()
             .find(|o| &o.value == value_id)
-            .map(|o| o.name.clone()),
+            .map(|o| model_option_display_name(config_id, o)),
         acp::SessionConfigSelectOptions::Grouped(groups) => groups.iter().find_map(|group| {
             group
                 .options
                 .iter()
                 .find(|o| &o.value == value_id)
-                .map(|o| o.name.clone())
+                .map(|o| model_option_display_name(config_id, o))
         }),
         _ => None,
     }

@@ -1,15 +1,20 @@
 package com.zdroid
 
 import android.content.Context
+import android.graphics.Color
+import android.graphics.drawable.GradientDrawable
 import android.os.Build
 import android.os.Bundle
 import android.util.Log
 import android.view.InputDevice
+import android.view.Gravity
 import android.view.KeyEvent
 import android.view.MotionEvent
 import android.view.SurfaceHolder
 import android.view.SurfaceView
 import android.view.View
+import android.widget.FrameLayout
+import android.widget.ImageButton
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
@@ -145,6 +150,8 @@ class ExtraWindowActivity : AppCompatActivity(), ImeHost {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        @Suppress("DEPRECATION")
+        overridePendingTransition(0, 0)
 
         // Edge-to-edge to match MainActivity. On phone (non-freeform) this
         // makes the secondary surface fill the screen end-to-end. On
@@ -256,7 +263,35 @@ class ExtraWindowActivity : AppCompatActivity(), ImeHost {
             // builds bypass that listener path when DeX windowing
             // is active.
         }
-        setContentView(surfaceView)
+        val root = FrameLayout(this).apply {
+            addView(
+                surfaceView,
+                FrameLayout.LayoutParams(
+                    FrameLayout.LayoutParams.MATCH_PARENT,
+                    FrameLayout.LayoutParams.MATCH_PARENT,
+                ),
+            )
+            addView(
+                ImageButton(this@ExtraWindowActivity).apply {
+                    setImageResource(android.R.drawable.ic_menu_close_clear_cancel)
+                    imageTintList = android.content.res.ColorStateList.valueOf(Color.WHITE)
+                    contentDescription = "Close and return to Zdroid-B"
+                    background = GradientDrawable().apply {
+                        shape = GradientDrawable.OVAL
+                        setColor(Color.argb(210, 45, 47, 54))
+                        setStroke(dp(1), Color.argb(220, 125, 129, 140))
+                    }
+                    setPadding(dp(10), dp(10), dp(10), dp(10))
+                    elevation = dp(8).toFloat()
+                    setOnClickListener { closeAndReturn() }
+                },
+                FrameLayout.LayoutParams(dp(44), dp(44), Gravity.TOP or Gravity.END).apply {
+                    topMargin = dp(12)
+                    marginEnd = dp(12)
+                },
+            )
+        }
+        setContentView(root)
 
         // IME host. Invisible 1x1 view that owns the InputConnection
         // for this extra window's gpui surface. Without it, focusing
@@ -754,6 +789,10 @@ class ExtraWindowActivity : AppCompatActivity(), ImeHost {
     }
 
     override fun dispatchKeyEvent(event: KeyEvent): Boolean {
+        if (event.keyCode == KeyEvent.KEYCODE_BACK) {
+            if (event.action == KeyEvent.ACTION_UP) closeAndReturn()
+            return true
+        }
         if (event.action == KeyEvent.ACTION_DOWN && InputModality.isPointer()) {
             InputModality.setNonPointer()
             applyCursorVisibility()
@@ -844,6 +883,15 @@ class ExtraWindowActivity : AppCompatActivity(), ImeHost {
             ys,
             ids,
         )
+    }
+
+    private fun dp(value: Int): Int =
+        (value * resources.displayMetrics.density + 0.5f).toInt()
+
+    private fun closeAndReturn() {
+        finish()
+        @Suppress("DEPRECATION")
+        overridePendingTransition(0, 0)
     }
 
     companion object {

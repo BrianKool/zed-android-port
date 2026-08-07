@@ -83,7 +83,6 @@ pub(crate) enum ExtraWindowEvent {
         action_index: i32,
         meta_state: i32,
         button_state: i32,
-        event_time_millis: i64,
         vscroll: f32,
         hscroll: f32,
         positions: Vec<(f32, f32, i32)>,
@@ -447,7 +446,7 @@ fn launch_extra_activity_inner(
     env: &mut jni::AttachGuard<'_>,
     android_app: &AndroidApp,
     window_id: u64,
-    bounds: Option<LaunchBounds>,
+    _bounds: Option<LaunchBounds>,
 ) -> Result<()> {
     let main_activity = unsafe { JObject::from_raw(android_app.activity_as_ptr() as _) };
 
@@ -490,57 +489,14 @@ fn launch_extra_activity_inner(
         &[JValue::Object(&extra_key), JValue::Long(window_id as i64)],
     )?;
 
-    // `documentLaunchMode="always"` on the manifest already implies
-    // FLAG_ACTIVITY_NEW_DOCUMENT | FLAG_ACTIVITY_MULTIPLE_TASK, so we don't
-    // set them here â€” setting them additionally was causing MainActivity
-    // to be backgrounded under DeX freeform windowing.
-    if let Some(rect) = bounds {
-        // Build ActivityOptions.makeBasic().setLaunchBounds(Rect) and pass
-        // its Bundle to startActivity. Lets us request an initial freeform
-        // window rect (size + position) instead of letting the OS pick.
-        let rect_class = env.find_class("android/graphics/Rect")?;
-        let rect_obj = env.new_object(
-            &rect_class,
-            "(IIII)V",
-            &[
-                JValue::Int(rect.left),
-                JValue::Int(rect.top),
-                JValue::Int(rect.right),
-                JValue::Int(rect.bottom),
-            ],
-        )?;
-        let activity_options_class = env.find_class("android/app/ActivityOptions")?;
-        let opts = env
-            .call_static_method(
-                &activity_options_class,
-                "makeBasic",
-                "()Landroid/app/ActivityOptions;",
-                &[],
-            )?
-            .l()?;
-        env.call_method(
-            &opts,
-            "setLaunchBounds",
-            "(Landroid/graphics/Rect;)Landroid/app/ActivityOptions;",
-            &[JValue::Object(&rect_obj)],
-        )?;
-        let bundle = env
-            .call_method(&opts, "toBundle", "()Landroid/os/Bundle;", &[])?
-            .l()?;
-        env.call_method(
-            &main_activity,
-            "startActivity",
-            "(Landroid/content/Intent;Landroid/os/Bundle;)V",
-            &[JValue::Object(&intent), JValue::Object(&bundle)],
-        )?;
-    } else {
-        env.call_method(
-            &main_activity,
-            "startActivity",
-            "(Landroid/content/Intent;)V",
-            &[JValue::Object(&intent)],
-        )?;
-    }
+    // Keep every Zdroid-owned surface in MainActivity's task. Supplying
+    // launch bounds asks DeX to create a separate freeform OS window.
+    env.call_method(
+        &main_activity,
+        "startActivity",
+        "(Landroid/content/Intent;)V",
+        &[JValue::Object(&intent)],
+    )?;
 
     Ok(())
 }
@@ -548,7 +504,7 @@ fn launch_extra_activity_inner(
 fn call_finish_and_remove_task(_android_app: &AndroidApp, activity: &GlobalRef) -> Result<()> {
     let vm = unsafe { JavaVM::from_raw(_android_app.vm_as_ptr().cast())? };
     let mut env = vm.attach_current_thread()?;
-    env.call_method(activity.as_obj(), "finishAndRemoveTask", "()V", &[])?;
+    env.call_method(activity.as_obj(), "finish", "()V", &[])?;
     Ok(())
 }
 
@@ -740,7 +696,7 @@ pub extern "system" fn Java_com_zdroid_NativeBridge_nativeOnExtraTouchEvent<'loc
     action_index: i32,
     meta_state: i32,
     button_state: i32,
-    event_time_millis: i64,
+    _event_time_millis: i64,
     vscroll: f32,
     hscroll: f32,
     xs: JFloatArray<'local>,
@@ -762,7 +718,6 @@ pub extern "system" fn Java_com_zdroid_NativeBridge_nativeOnExtraTouchEvent<'loc
         action_index,
         meta_state,
         button_state,
-        event_time_millis,
         vscroll,
         hscroll,
         positions,

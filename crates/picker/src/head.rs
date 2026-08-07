@@ -22,6 +22,10 @@ impl Head {
     ) -> Self {
         let editor = (ui_input::ERASED_EDITOR_FACTORY.get().unwrap())(window, cx);
 
+        if cfg!(target_os = "android") {
+            editor.set_suppress_auto_show_ime(true, cx);
+        }
+
         editor.set_placeholder_text(placeholder_text.as_ref(), window, cx);
         let this = cx.weak_entity();
         editor

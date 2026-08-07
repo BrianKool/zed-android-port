@@ -1081,12 +1081,12 @@ impl Terminal {
                 // cheap half of the resize; the PTY signal above is the
                 // expensive half we throttle.
                 term.resize(new_bounds);
-                // If there are matches we need to emit a wake up event to
-                // invalidate the matches and recalculate their locations
-                // in the new terminal layout
-                if !self.matches.is_empty() {
-                    cx.emit(Event::Wakeup);
-                }
+                // A dock or side-panel resize changes the cursor's screen
+                // position even when the shell emits no output. Always
+                // invalidate the rendered snapshot so text and cursor move
+                // together; limiting this to active search matches left the
+                // Android cursor painted at its pre-resize column.
+                cx.emit(Event::Wakeup);
             }
             InternalEvent::Clear => {
                 trace!("Clearing");

@@ -8,11 +8,11 @@ use editor::{Editor, EditorEvent};
 use futures::{StreamExt, channel::mpsc};
 use fuzzy::StringMatchCandidate;
 use gpui::{
-    Action, App, AsyncApp, ClipboardItem, DEFAULT_ADDITIONAL_WINDOW_SIZE, Div, Entity, FocusHandle,
-    Focusable, Global, KeyContext, ListState, ReadGlobal as _, ScrollHandle, Stateful,
-    Subscription, Task, Tiling, TitlebarOptions, UniformListScrollHandle, WeakEntity, Window,
-    WindowBounds, WindowHandle, WindowOptions, actions, div, list, point, prelude::*, px,
-    uniform_list,
+    Action, App, AsyncApp, ClipboardItem, DEFAULT_ADDITIONAL_WINDOW_SIZE, DismissEvent, Div,
+    Entity, EventEmitter, FocusHandle, Focusable, Global, KeyContext, ListState, PromptLevel,
+    ReadGlobal as _, ScrollHandle, Stateful, Subscription, Task, Tiling, TitlebarOptions,
+    UniformListScrollHandle, WeakEntity, Window, WindowBounds, WindowHandle, WindowOptions,
+    actions, div, list, point, prelude::*, px, uniform_list,
 };
 
 use language::Buffer;
@@ -37,15 +37,14 @@ use std::{
 };
 use theme_settings::ThemeSettings;
 use ui::{
-    Banner, ContextMenu, Divider, DropdownMenu, DropdownStyle, IconButtonShape, KeyBinding,
-    KeybindingHint, PopoverMenu, Scrollbars, Switch, Tooltip, TreeViewItem, WithScrollbar,
-    prelude::*,
+    Banner, ContextMenu, Divider, DropdownMenu, DropdownStyle, IconButton, IconButtonShape,
+    IconName, KeyBinding, KeybindingHint, PopoverMenu, Scrollbars, Switch, Tooltip, TreeViewItem,
+    WithScrollbar, prelude::*,
 };
 
 use util::{ResultExt as _, paths::PathStyle, rel_path::RelPath};
 use workspace::{
-    AppState, MultiWorkspace, OpenOptions, OpenVisible, Workspace, WorkspaceSettings,
-    client_side_decorations,
+    AppState, ModalView, MultiWorkspace, Workspace, WorkspaceSettings, client_side_decorations,
 };
 use zed_actions::{OpenProjectSettings, OpenSettings, OpenSettingsAt};
 
@@ -431,10 +430,9 @@ fn init_renderers(cx: &mut App) {
     cx.default_global::<SettingFieldRenderer>()
         .add_renderer::<UnimplementedSettingField>(
             |settings_window, item, _, settings_file, _, sub_field, _, cx| {
-                render_settings_item(
-                    settings_window,
-                    item,
-                    settings_file,
+                let control = if cfg!(target_os = "android") {
+                    div().into_any_element()
+                } else {
                     Button::new("open-in-settings-file", "Edit in settings.json")
                         .style(ButtonStyle::Outlined)
                         .size(ButtonSize::Medium)
@@ -447,7 +445,13 @@ fn init_renderers(cx: &mut App) {
                         .on_click(cx.listener(|this, _, window, cx| {
                             this.open_current_settings_file(window, cx);
                         }))
-                        .into_any_element(),
+                        .into_any_element()
+                };
+                render_settings_item(
+                    settings_window,
+                    item,
+                    settings_file,
+                    control,
                     sub_field,
                     cx,
                 )
@@ -578,6 +582,13 @@ pub fn open_settings_editor(
 ) {
     telemetry::event!("Settings Viewed");
 
+    #[cfg(target_os = "android")]
+    let workspace_handle = workspace_handle.or_else(|| {
+        cx.windows()
+            .into_iter()
+            .find_map(|window| window.downcast::<MultiWorkspace>())
+    });
+
     /// Assumes a settings GUI window is already open
     fn open_path(
         path: &str,
@@ -647,6 +658,58 @@ pub fn open_settings_editor(
                 }
             })
             .ok();
+    }
+
+    // Android renders settings inside the current workspace. Starting a
+    // second Activity takes Samsung devices roughly two seconds even when
+    // transitions are disabled; a workspace overlay appears on the next GPUI
+    // frame and keeps all input, IME, and scrolling in MainActivity.
+    #[cfg(target_os = "android")]
+    if let Some(workspace_handle) = workspace_handle {
+        log::info!("settings_ui: opening settings in Android workspace overlay");
+        let path = path.map(ToOwned::to_owned);
+        let original_window = workspace_handle;
+        cx.defer(move |cx| {
+            if let Err(err) = workspace_handle.update(cx, move |multi_workspace, window, cx| {
+                if let Some(settings_window) = multi_workspace.active_modal::<SettingsWindow>(cx) {
+                    settings_window.update(cx, |settings_window, cx| {
+                        settings_window.original_window = Some(original_window);
+                        if let Some(path) = path.as_deref() {
+                            open_path(path, settings_window, window, cx);
+                        } else if let Some(target_id) = target_worktree_id
+                            && let Some(file_index) = settings_window
+                                .files
+                                .iter()
+                                .position(|(file, _)| file.worktree_id() == Some(target_id))
+                        {
+                            settings_window.change_file(file_index, window, cx);
+                            cx.notify();
+                        }
+                    });
+                    return;
+                }
+
+                multi_workspace.toggle_modal(window, cx, |window, cx| {
+                    log::info!("settings_ui: constructing Android settings overlay");
+                    let mut settings_window =
+                        SettingsWindow::new(Some(original_window), window, cx);
+                    if let Some(path) = path.as_deref() {
+                        open_path(path, &mut settings_window, window, cx);
+                    } else if let Some(target_id) = target_worktree_id
+                        && let Some(file_index) = settings_window
+                            .files
+                            .iter()
+                            .position(|(file, _)| file.worktree_id() == Some(target_id))
+                    {
+                        settings_window.change_file(file_index, window, cx);
+                    }
+                    settings_window
+                });
+            }) {
+                log::error!("settings_ui: Android settings overlay failed: {err}");
+            }
+        });
+        return;
     }
 
     let existing_window = cx
@@ -816,6 +879,38 @@ pub struct SettingsWindow {
     pub(crate) hidden_deleted_skill_directory_paths: HashSet<PathBuf>,
     pub(crate) regex_validation_error: Option<String>,
     last_copied_link_path: Option<&'static str>,
+}
+
+pub(crate) fn close_settings_ui(_window: &mut Window, cx: &mut Context<SettingsWindow>) {
+    #[cfg(target_os = "android")]
+    {
+        // Settings is rendered as a modal in MainActivity on Android. Removing
+        // the GPUI window here would close the application's main window.
+        cx.emit(DismissEvent);
+    }
+
+    #[cfg(not(target_os = "android"))]
+    _window.remove_window();
+}
+
+pub(crate) fn close_settings_ui_from_app(
+    settings_window: &SettingsWindow,
+    _window: &mut Window,
+    cx: &mut App,
+) {
+    #[cfg(target_os = "android")]
+    if let Some(original_window) = settings_window.original_window {
+        original_window
+            .update(cx, |multi_workspace, window, cx| {
+                multi_workspace.workspace().update(cx, |workspace, cx| {
+                    workspace.hide_modal(window, cx);
+                });
+            })
+            .log_err();
+    }
+
+    #[cfg(not(target_os = "android"))]
+    _window.remove_window();
 }
 
 struct SearchDocument {
@@ -1692,6 +1787,7 @@ impl SettingsWindow {
         })
         .detach();
 
+        #[cfg(not(target_os = "android"))]
         cx.on_window_closed(|cx, _window_id| {
             if let Some(existing_window) = cx
                 .windows()
@@ -1709,27 +1805,8 @@ impl SettingsWindow {
         })
         .detach();
 
-        let app_state = AppState::global(cx);
-        let workspaces: Vec<Entity<Workspace>> = app_state
-            .workspace_store
-            .read(cx)
-            .workspaces()
-            .filter_map(|weak| weak.upgrade())
-            .collect();
-
-        for workspace in workspaces {
-            let project = workspace.read(cx).project().clone();
-            cx.observe_release_in(&project, window, |this, _, window, cx| {
-                this.fetch_files(window, cx)
-            })
-            .detach();
-            cx.subscribe_in(&project, window, Self::handle_project_event)
-                .detach();
-            cx.observe_release_in(&workspace, window, |this, _, window, cx| {
-                this.fetch_files(window, cx)
-            })
-            .detach();
-        }
+        #[cfg(not(target_os = "android"))]
+        Self::observe_existing_workspaces(window, cx);
 
         let this_weak = cx.weak_entity();
         cx.observe_new::<Project>({
@@ -1790,7 +1867,7 @@ impl SettingsWindow {
         })
         .detach();
 
-        let title_bar = if !cfg!(target_os = "macos") {
+        let title_bar = if !cfg!(any(target_os = "macos", target_os = "android")) {
             Some(cx.new(|cx| PlatformTitleBar::new("settings-title-bar", cx)))
         } else {
             None
@@ -1845,15 +1922,53 @@ impl SettingsWindow {
             last_copied_link_path: None,
         };
 
+        #[cfg(not(target_os = "android"))]
         this.fetch_files(window, cx);
         this.build_ui(window, cx);
         this.build_search_index();
+
+        // The Android settings view is mounted as a modal in the active
+        // workspace. Reading that workspace while the modal is being attached
+        // would re-enter its entity update and panic. Finish constructing the
+        // modal first, then attach project observers and populate project files
+        // on the next GPUI tick.
+        #[cfg(target_os = "android")]
+        cx.defer_in(window, |this, window, cx| {
+            Self::observe_existing_workspaces(window, cx);
+            this.fetch_files(window, cx);
+            this.rebuild_pages(window, cx);
+            cx.notify();
+        });
 
         this.search_bar.update(cx, |editor, cx| {
             editor.focus_handle(cx).focus(window, cx);
         });
 
         this
+    }
+
+    fn observe_existing_workspaces(window: &mut Window, cx: &mut Context<Self>) {
+        let app_state = AppState::global(cx);
+        let workspaces: Vec<Entity<Workspace>> = app_state
+            .workspace_store
+            .read(cx)
+            .workspaces()
+            .filter_map(|weak| weak.upgrade())
+            .collect();
+
+        for workspace in workspaces {
+            let project = workspace.read(cx).project().clone();
+            cx.observe_release_in(&project, window, |this, _, window, cx| {
+                this.fetch_files(window, cx)
+            })
+            .detach();
+            cx.subscribe_in(&project, window, Self::handle_project_event)
+                .detach();
+            cx.observe_release_in(&workspace, window, |this, _, window, cx| {
+                this.fetch_files(window, cx)
+            })
+            .detach();
+        }
     }
 
     fn handle_project_event(
@@ -2623,6 +2738,11 @@ impl SettingsWindow {
             })
             .unwrap_or(OVERFLOW_LIMIT);
         let edit_in_json_id = SharedString::new(format!("edit-in-json-{}", selected_file_ix));
+        let edit_in_json_label = match &self.current_file {
+            SettingsUiFile::User => "Edit User settings.json",
+            SettingsUiFile::Project(_) => "Edit Project .zed/settings.json",
+            SettingsUiFile::Server(_) => "Edit settings.json",
+        };
 
         h_flex()
             .w_full()
@@ -2701,19 +2821,21 @@ impl SettingsWindow {
                             })
                     }),
             )
-            .child(
-                Button::new(edit_in_json_id, "Edit in settings.json")
-                    .tab_index(0_isize)
-                    .style(ButtonStyle::OutlinedGhost)
-                    .tooltip(Tooltip::for_action_title_in(
-                        "Edit in settings.json",
-                        &OpenCurrentFile,
-                        &self.focus_handle,
-                    ))
-                    .on_click(cx.listener(|this, _, window, cx| {
-                        this.open_current_settings_file(window, cx);
-                    })),
-            )
+            .when(!cfg!(target_os = "android"), |this| {
+                this.child(
+                    Button::new(edit_in_json_id, edit_in_json_label)
+                        .tab_index(0_isize)
+                        .style(ButtonStyle::OutlinedGhost)
+                        .tooltip(Tooltip::for_action_title_in(
+                            "Edit in settings.json",
+                            &OpenCurrentFile,
+                            &self.focus_handle,
+                        ))
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.open_current_settings_file(window, cx);
+                        })),
+                )
+            })
     }
 
     pub(crate) fn display_name(&self, file: &SettingsUiFile) -> Option<String> {
@@ -3465,23 +3587,26 @@ impl SettingsWindow {
                         )
                         .child(self.render_sub_page_breadcrumbs()),
                 )
-                .when(current_sub_page.link.in_json, |this| {
-                    this.child(
-                        div().flex_shrink_0().child(
-                            Button::new("open-in-settings-file", "Edit in settings.json")
-                                .tab_index(0_isize)
-                                .style(ButtonStyle::OutlinedGhost)
-                                .tooltip(Tooltip::for_action_title_in(
-                                    "Edit in settings.json",
-                                    &OpenCurrentFile,
-                                    &self.focus_handle,
-                                ))
-                                .on_click(cx.listener(|this, _, window, cx| {
-                                    this.open_current_settings_file(window, cx);
-                                })),
-                        ),
-                    )
-                })
+                .when(
+                    current_sub_page.link.in_json && !cfg!(target_os = "android"),
+                    |this| {
+                        this.child(
+                            div().flex_shrink_0().child(
+                                Button::new("open-in-settings-file", "Edit in settings.json")
+                                    .tab_index(0_isize)
+                                    .style(ButtonStyle::OutlinedGhost)
+                                    .tooltip(Tooltip::for_action_title_in(
+                                        "Edit in settings.json",
+                                        &OpenCurrentFile,
+                                        &self.focus_handle,
+                                    ))
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.open_current_settings_file(window, cx);
+                                    })),
+                            ),
+                        )
+                    },
+                )
                 .into_any_element();
 
             let active_page_render_fn = &current_sub_page.link.render;
@@ -3519,16 +3644,21 @@ impl SettingsWindow {
                             .child(Label::new(label))
                             .child(Label::new(error).size(LabelSize::Small).color(Color::Muted)),
                     )
-                    .action_slot(
-                        div().pr_1().pb_1().child(
-                            Button::new("fix-in-json", "Fix in settings.json")
-                                .tab_index(0_isize)
-                                .style(ButtonStyle::Tinted(ui::TintColor::Warning))
-                                .on_click(cx.listener(|this, _, window, cx| {
-                                    this.open_current_settings_file(window, cx);
-                                })),
-                        ),
-                    )
+                    .action_slot(div().pr_1().pb_1().child(if cfg!(target_os = "android") {
+                        Button::new("reset-invalid-settings", "Reset settings")
+                            .tab_index(0_isize)
+                            .style(ButtonStyle::Tinted(ui::TintColor::Warning))
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.reset_current_settings_file(window, cx);
+                            }))
+                    } else {
+                        Button::new("fix-in-json", "Fix in settings.json")
+                            .tab_index(0_isize)
+                            .style(ButtonStyle::Tinted(ui::TintColor::Warning))
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.open_current_settings_file(window, cx);
+                            }))
+                    }))
             }
 
             let parse_error = error.parse_error();
@@ -3616,8 +3746,7 @@ impl SettingsWindow {
                                             })
                                             .log_err();
                                     }
-                                    // Close the settings window
-                                    window.remove_window();
+                                    close_settings_ui(window, cx);
                                 })),
                         ),
                     )
@@ -3743,19 +3872,18 @@ impl SettingsWindow {
                         multi_workspace
                             .workspace()
                             .clone()
-                            .update(cx, |workspace, cx| {
-                                workspace
-                                    .with_local_or_wsl_workspace(
-                                        window,
-                                        cx,
-                                        open_user_settings_in_workspace,
-                                    )
-                                    .detach();
+                            .update(cx, |_workspace, cx| {
+                                workspace::open_settings_file(
+                                    paths::settings_file(),
+                                    || settings::initial_user_settings_content().as_ref().into(),
+                                    window,
+                                    cx,
+                                );
                             });
                     })
                     .ok();
 
-                window.remove_window();
+                close_settings_ui(window, cx);
             }
             SettingsUiFile::Project((worktree_id, path)) => {
                 let settings_path = path.join(paths::local_settings_file_relative_path());
@@ -3827,8 +3955,9 @@ impl SettingsWindow {
                                 .log_err()?;
 
                             workspace_weak
-                                .update_in(cx, |_, window, cx| {
+                                .update_in(cx, |workspace, window, cx| {
                                     window.activate_window();
+                                    workspace.reveal_center_pane(window, cx);
                                     cx.notify();
                                 })
                                 .ok();
@@ -3839,13 +3968,71 @@ impl SettingsWindow {
                     })
                     .ok();
 
-                window.remove_window();
+                close_settings_ui(window, cx);
             }
             SettingsUiFile::Server(_) => {
                 // Server files are not editable
                 return;
             }
         };
+    }
+
+    fn reset_current_settings_file(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let (path, initial_content, label) = match &self.current_file {
+            SettingsUiFile::User => (
+                paths::settings_file().clone(),
+                settings::initial_user_settings_content().into_owned(),
+                "user settings",
+            ),
+            SettingsUiFile::Project((worktree_id, base_path)) => {
+                let relative_path = base_path.join(paths::local_settings_file_relative_path());
+                let Some(path) =
+                    all_projects(self.original_window.as_ref(), cx).find_map(|project| {
+                        project
+                            .read(cx)
+                            .worktree_for_id(*worktree_id, cx)
+                            .map(|worktree| worktree.read(cx).absolutize(&relative_path))
+                    })
+                else {
+                    log::error!("Could not locate the project settings file to reset");
+                    return;
+                };
+                (
+                    path,
+                    settings::initial_project_settings_content().into_owned(),
+                    "project settings",
+                )
+            }
+            SettingsUiFile::Server(_) => return,
+        };
+
+        let prompt = window.prompt(
+            PromptLevel::Warning,
+            &format!("Reset {label}?"),
+            Some("This removes the invalid settings in this file and restores its defaults."),
+            &["Reset", "Cancel"],
+            cx,
+        );
+        let fs = <dyn fs::Fs>::global(cx);
+        let is_user = matches!(self.current_file, SettingsUiFile::User);
+        cx.spawn_in(window, async move |_, cx| {
+            if prompt.await? != 0 {
+                return anyhow::Ok(());
+            }
+
+            fs.atomic_write(path.clone(), initial_content.clone())
+                .await
+                .with_context(|| format!("Failed to reset settings file {}", path.display()))?;
+
+            if is_user {
+                cx.update_global(|store: &mut SettingsStore, _window, cx| {
+                    let _ = store.set_user_settings(&initial_content, cx);
+                })?;
+            }
+
+            anyhow::Ok(())
+        })
+        .detach_and_log_err(cx);
     }
 
     fn current_page_index(&self) -> usize {
@@ -4045,6 +4232,20 @@ impl SettingsWindow {
     }
 }
 
+impl Focusable for SettingsWindow {
+    fn focus_handle(&self, _: &App) -> FocusHandle {
+        self.focus_handle.clone()
+    }
+}
+
+impl EventEmitter<DismissEvent> for SettingsWindow {}
+
+impl ModalView for SettingsWindow {
+    fn render_bare(&self) -> bool {
+        false
+    }
+}
+
 impl Render for SettingsWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let ui_font = theme_settings::setup_ui_font(window, cx);
@@ -4055,14 +4256,30 @@ impl Render for SettingsWindow {
                 .text_color(cx.theme().colors().text)
                 .size_full()
                 .children(self.title_bar.clone())
+                .when(cfg!(target_os = "android"), |this| {
+                    this.child(
+                        h_flex()
+                            .h(px(48.0))
+                            .w_full()
+                            .px_3()
+                            .pr_12()
+                            .border_b_1()
+                            .border_color(cx.theme().colors().border)
+                            .bg(cx.theme().colors().elevated_surface_background)
+                            .child(Label::new("Settings"))
+                            .child(div().flex_1()),
+                    )
+                })
                 .child(
                     div()
                         .id("settings-window")
                         .key_context("SettingsWindow")
                         .track_focus(&self.focus_handle)
-                        .on_action(cx.listener(|this, _: &OpenCurrentFile, window, cx| {
-                            this.open_current_settings_file(window, cx);
-                        }))
+                        .when(!cfg!(target_os = "android"), |this| {
+                            this.on_action(cx.listener(|this, _: &OpenCurrentFile, window, cx| {
+                                this.open_current_settings_file(window, cx);
+                            }))
+                        })
                         .on_action(|_: &Minimize, window, _cx| {
                             window.minimize_window();
                         })
@@ -4161,51 +4378,6 @@ fn all_projects(
                 }),
         )
         .filter(move |project| seen_project_ids.insert(project.entity_id()))
-}
-
-fn open_user_settings_in_workspace(
-    workspace: &mut Workspace,
-    window: &mut Window,
-    cx: &mut Context<Workspace>,
-) {
-    let project = workspace.project().clone();
-
-    cx.spawn_in(window, async move |workspace, cx| {
-        let (config_dir, settings_file) = project.update(cx, |project, cx| {
-            (
-                project.try_windows_path_to_wsl(paths::config_dir().as_path(), cx),
-                project.try_windows_path_to_wsl(paths::settings_file().as_path(), cx),
-            )
-        });
-        let config_dir = config_dir.await?;
-        let settings_file = settings_file.await?;
-        project
-            .update(cx, |project, cx| {
-                project.find_or_create_worktree(&config_dir, false, cx)
-            })
-            .await
-            .ok();
-        workspace
-            .update_in(cx, |workspace, window, cx| {
-                workspace.open_paths(
-                    vec![settings_file],
-                    OpenOptions {
-                        visible: Some(OpenVisible::None),
-                        ..Default::default()
-                    },
-                    None,
-                    window,
-                    cx,
-                )
-            })?
-            .await;
-
-        workspace.update_in(cx, |_, window, cx| {
-            window.activate_window();
-            cx.notify();
-        })
-    })
-    .detach();
 }
 
 fn update_settings_file(

@@ -60,6 +60,22 @@ pub fn init(cx: &mut App) {
     editor::set_blame_renderer(blame_ui::GitBlameRenderer, cx);
     commit_view::init(cx);
 
+    #[cfg(target_os = "android")]
+    {
+        let credentials = cx.read_credentials(github_auth::GITHUB_CREDENTIALS_KEY);
+        let http_client = cx.http_client();
+        cx.spawn(async move |_| {
+            let Some((_, token)) = credentials.await? else {
+                return anyhow::Ok(());
+            };
+            let token = std::str::from_utf8(&token)?;
+            let user = github_auth::validate_token(&http_client, token).await?;
+            github_auth::ensure_git_identity(&user)?;
+            anyhow::Ok(())
+        })
+        .detach_and_log_err(cx);
+    }
+
     cx.observe_new(|editor: &mut Editor, _, cx| {
         conflict_view::register_editor(editor, editor.buffer().clone(), cx);
     })
@@ -1236,7 +1252,10 @@ impl GitCloneModal {
 
     fn render_source_choice(&self, cx: &mut Context<Self>) -> AnyElement {
         v_flex()
+            .size_full()
+            .min_h_0()
             .p_3()
+            .pr_12()
             .gap_2()
             .child(Label::new("Clone Repository").size(LabelSize::Large))
             .child(
@@ -1565,13 +1584,23 @@ impl Render for GitCloneModal {
 
         div()
             .elevation_3(cx)
-            .w(rems(34.))
-            .when(is_narrow, |this| this.w(narrow_modal_width))
+            .when(!cfg!(target_os = "android"), |this| this.w(rems(34.)))
+            .when(!cfg!(target_os = "android") && is_narrow, |this| {
+                this.w(narrow_modal_width)
+            })
+            .when(cfg!(target_os = "android"), |this| this.size_full())
             .max_w_full()
-            .max_h(rems(40.))
-            .when(is_narrow, |this| this.max_h(narrow_modal_height))
-            .when(self.mode == GitCloneMode::Github, |this| this.h(rems(40.)))
-            .when(is_narrow, |this| this.h(narrow_modal_height))
+            .when(!cfg!(target_os = "android"), |this| this.max_h(rems(40.)))
+            .when(!cfg!(target_os = "android") && is_narrow, |this| {
+                this.max_h(narrow_modal_height)
+            })
+            .when(
+                !cfg!(target_os = "android") && self.mode == GitCloneMode::Github,
+                |this| this.h(rems(40.)),
+            )
+            .when(!cfg!(target_os = "android") && is_narrow, |this| {
+                this.h(narrow_modal_height)
+            })
             .overflow_hidden()
             .track_focus(&self.focus_handle)
             .child(match self.mode {

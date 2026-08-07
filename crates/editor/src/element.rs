@@ -7159,9 +7159,8 @@ impl EditorElement {
                     // and falls through to the touch SM's scroll
                     // synthesis, which is exactly the "whole column
                     // acts like one big drag" bug.
-                    let Some((scrollbar_layout, axis)) = scrollbars_layout
-                        .get_hovered_axis(window)
-                        .or_else(|| {
+                    let Some((scrollbar_layout, axis)) =
+                        scrollbars_layout.get_hovered_axis(window).or_else(|| {
                             scrollbars_layout
                                 .iter_scrollbars()
                                 .find(|(layout, _)| layout.hitbox.bounds.contains(&event.position))

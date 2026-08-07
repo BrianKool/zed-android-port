@@ -993,6 +993,30 @@ impl AcpConnection {
                     .description("Login with your Google or Vertex AI account")
                     .meta(meta),
             )]
+        } else if cfg!(target_os = "android") && agent_id.0.as_ref() == "codex-acp" {
+            // codex-acp's built-in ChatGPT method waits for an ACP authenticate
+            // request while its nested browser flow runs. On Android that flow
+            // can remain pending forever even after the localhost callback.
+            // Use the same terminal OAuth command exposed in Agent Info instead;
+            // it writes ~/.codex/auth.json, then ConversationView restarts the
+            // ACP server so it observes the new credentials.
+            let value = serde_json::json!({
+                "label": "Sign in to Codex",
+                "command": "/data/data/com.zdroid/files/usr/.zed/bin/codex",
+                "args": ["login"],
+                "env": {},
+            });
+            let meta = acp::Meta::from_iter([("terminal-auth".to_string(), value)]);
+            let mut methods = vec![acp::AuthMethod::Agent(
+                acp::AuthMethodAgent::new("zdroid-chatgpt-login", "ChatGPT")
+                    .description("Sign in with your ChatGPT subscription in the Zdroid-B terminal")
+                    .meta(meta),
+            )];
+            methods.extend(response.auth_methods.into_iter().filter(|method| {
+                let name = method.name().to_ascii_lowercase();
+                !name.contains("chatgpt") && !name.contains("website")
+            }));
+            methods
         } else {
             response.auth_methods
         };
@@ -1154,6 +1178,16 @@ impl AcpConnection {
                                 return Err(Arc::new(err));
                             }
                         };
+
+                    if cfg!(target_os = "android") {
+                        log::info!(
+                            "ACP restored session agent={} session={} models={:?} config_options={:?}",
+                            this.id,
+                            session_id,
+                            response.models,
+                            response.config_options
+                        );
+                    }
 
                     let (modes, models, config_options) =
                         config_state(response.modes, response.models, response.config_options);
@@ -1484,6 +1518,15 @@ impl AgentConnection for AcpConnection {
             )
             .await
             .map_err(map_acp_error)?;
+
+            if cfg!(target_os = "android") {
+                log::info!(
+                    "ACP new session agent={} models={:?} config_options={:?}",
+                    self.id,
+                    response.models,
+                    response.config_options
+                );
+            }
 
             let (modes, models, config_options) =
                 config_state(response.modes, response.models, response.config_options);

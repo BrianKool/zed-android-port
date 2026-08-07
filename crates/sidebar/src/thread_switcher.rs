@@ -375,6 +375,9 @@ impl Render for ThreadSwitcher {
                     .max_h_128()
                     .overflow_y_scroll()
                     .track_scroll(&self.scroll_handle)
+                    .when(self.entries.is_empty(), |this| {
+                        this.p_4().child("No conversation history yet")
+                    })
                     .children(self.entries.iter().enumerate().map(|(ix, entry)| {
                         let diff_stats = entry.diff_stats();
 

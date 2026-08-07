@@ -133,6 +133,7 @@ pub fn ensure_package_manager_launchers(prefix: &Path) -> Result<()> {
         let script = format!(
             "#!/system/bin/sh\n\
              export LD_LIBRARY_PATH=\"$PREFIX/lib${{LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}}\"\n\
+             export DEBIAN_FRONTEND=\"${{DEBIAN_FRONTEND:-noninteractive}}\"\n\
              exec \"$PREFIX/bin/{tool}\" \"$@\"\n"
         );
         fs::write(&launcher, script)
@@ -240,7 +241,14 @@ exit "$result"
     }
     fs::write(
         &apt_config,
-        format!("Dir::Bin::dpkg \"{}\";\n", dpkg_launcher.to_string_lossy()),
+        format!(
+            "Dir::Bin::dpkg \"{}\";\n\
+             Dpkg::Options {{\n\
+               \"--force-confdef\";\n\
+               \"--force-confold\";\n\
+             }};\n",
+            dpkg_launcher.to_string_lossy()
+        ),
     )
     .with_context(|| format!("write apt config at {}", apt_config.display()))?;
     Ok(())

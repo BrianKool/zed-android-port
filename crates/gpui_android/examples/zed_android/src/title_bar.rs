@@ -11,10 +11,10 @@
 use std::path::PathBuf;
 
 use gpui::{
-    Action, Anchor, AnyElement, App, AppContext, Context, DismissEvent, Entity, FocusHandle,
-    Focusable, InteractiveElement, IntoElement, MouseButton, MouseDownEvent, ParentElement, Pixels,
-    Point, Render, SharedString, Styled, WeakEntity, Window, anchored, deferred, div,
-    prelude::FluentBuilder,
+    Action, Anchor, AnyElement, App, Context, DismissEvent, Entity, FocusHandle, Focusable,
+    InteractiveElement, IntoElement, MouseButton, MouseDownEvent, ParentElement, Pixels, Point,
+    Render, SharedString, Styled, WeakEntity, Window, anchored, deferred, div,
+    prelude::FluentBuilder, px,
 };
 use log::error;
 use project::trusted_worktrees::TrustedWorktrees;
@@ -181,7 +181,7 @@ impl TitleBar {
             ),
             RemoteConnectionOptions::Wsl(_) => (None, "Remote Project", IconName::Linux),
             RemoteConnectionOptions::Docker(_) => (None, "Dev Container", IconName::Box),
-            #[cfg(any(test, feature = "test-support"))]
+            #[cfg(test)]
             RemoteConnectionOptions::Mock(_) => (None, "Mock Remote Project", IconName::Server),
         };
 
@@ -274,9 +274,23 @@ impl TitleBar {
             .display(worktree.path_style())
             .to_string();
         Some(
-            Label::new(root)
-                .size(LabelSize::Small)
-                .color(Color::Muted)
+            div()
+                .id("zed-android-project-name")
+                .min_w_0()
+                .max_w(px(280.))
+                .px_3()
+                .py_1()
+                .rounded_full()
+                .border_1()
+                .border_color(cx.theme().colors().border)
+                .bg(cx.theme().colors().element_background)
+                .child(
+                    Label::new(root)
+                        .size(LabelSize::Large)
+                        .weight(gpui::FontWeight::SEMIBOLD)
+                        .color(Color::Default)
+                        .truncate(),
+                )
                 .into_any_element(),
         )
     }
@@ -364,7 +378,7 @@ impl Render for TitleBar {
 
         h_flex()
             .w_full()
-            .h_6()
+            .h_7()
             .px_2()
             .gap_2()
             .items_center()

@@ -9,16 +9,10 @@ import android.graphics.drawable.RippleDrawable
 import android.view.Gravity
 import android.view.KeyEvent
 import android.view.MotionEvent
-import android.widget.HorizontalScrollView
 import android.widget.LinearLayout
 import android.widget.TextView
 
-/// Termux-style "programming extras" row that floats above the system
-/// soft keyboard. Nine keys total (`Esc`, `Tab`, `Ctrl`, `Alt`,
-/// `Shift`, `←`, `↑`, `↓`, `→`) sized via `weight=1` so they distribute
-/// across the available width, with rounded corners, ripple
-/// feedback, and Catppuccin Mocha-derived colors that match the
-/// editor theme.
+/// Termux-style two-row key grid that floats above the soft keyboard.
 ///
 /// **Sticky modifier semantics (Termux convention).** Tapping `Ctrl`
 /// or `Alt` once arms the modifier for the next regular key; the
@@ -46,9 +40,8 @@ class ExtraKeysView(
     /// `null` for hosts that don't need the intercept (e.g. test
     /// scaffolds).
     private val onModifierStateChanged: ((pending: Int, locked: Int) -> Unit)? = null,
-) : HorizontalScrollView(context) {
+) : LinearLayout(context) {
 
-    private val row: LinearLayout
     private var pendingMeta: Int = 0
     private var lockedMeta: Int = 0
 
@@ -62,46 +55,38 @@ class ExtraKeysView(
     private val density = resources.displayMetrics.density
 
     init {
-        isHorizontalScrollBarEnabled = false
-        isVerticalScrollBarEnabled = false
-        overScrollMode = OVER_SCROLL_NEVER
-        // Catppuccin Mocha "Base" with light alpha so the editor
-        // bleeds through subtly. Looks integrated rather than a
-        // hard bar bolted onto the screen.
+        orientation = VERTICAL
         setBackgroundColor(Color.parseColor("#E61E1E2E"))
-        // HorizontalScrollView's default child sizing is
-        // WRAP_CONTENT regardless of what the child asks for; the
-        // child only gets MATCH_PARENT width when fillViewport is
-        // true. Without this the inner LinearLayout shrinks to the
-        // sum of its WRAP_CONTENT children, weight distribution
-        // gets applied across that tiny width, and multi-character
-        // labels ("Esc", "Tab", "Ctrl", "Alt") wrap each character
-        // onto its own line.
-        isFillViewport = true
+        val pad = dp(2)
+        setPadding(pad, pad, pad, pad)
 
-        row = LinearLayout(context).apply {
-            orientation = LinearLayout.HORIZONTAL
-            layoutParams = LayoutParams(
-                LayoutParams.MATCH_PARENT,
-                LayoutParams.WRAP_CONTENT,
-            )
-            val pad = dp(6)
-            setPadding(pad, pad, pad, pad)
-        }
-        addView(row)
+        val firstRow = makeRow()
+        addRegularKey(firstRow, "ESC", KeyEvent.KEYCODE_ESCAPE)
+        addRegularKey(firstRow, "/", KeyEvent.KEYCODE_SLASH)
+        addRegularKey(firstRow, "-", KeyEvent.KEYCODE_MINUS)
+        addRegularKey(firstRow, "HOME", KeyEvent.KEYCODE_MOVE_HOME)
+        addRegularKey(firstRow, "↑", KeyEvent.KEYCODE_DPAD_UP)
+        addRegularKey(firstRow, "END", KeyEvent.KEYCODE_MOVE_END)
+        addRegularKey(firstRow, "PGUP", KeyEvent.KEYCODE_PAGE_UP)
+        addView(firstRow)
 
-        addRegularKey("Esc", KeyEvent.KEYCODE_ESCAPE)
-        addRegularKey("Tab", KeyEvent.KEYCODE_TAB)
-        addModifierKey("Ctrl", KeyEvent.META_CTRL_ON or KeyEvent.META_CTRL_LEFT_ON)
-        addModifierKey("Alt", KeyEvent.META_ALT_ON or KeyEvent.META_ALT_LEFT_ON)
-        addModifierKey("Shift", KeyEvent.META_SHIFT_ON or KeyEvent.META_SHIFT_LEFT_ON)
-        addRegularKey("←", KeyEvent.KEYCODE_DPAD_LEFT)
-        addRegularKey("↑", KeyEvent.KEYCODE_DPAD_UP)
-        addRegularKey("↓", KeyEvent.KEYCODE_DPAD_DOWN)
-        addRegularKey("→", KeyEvent.KEYCODE_DPAD_RIGHT)
+        val secondRow = makeRow()
+        addRegularKey(secondRow, "TAB", KeyEvent.KEYCODE_TAB)
+        addModifierKey(secondRow, "CTRL", KeyEvent.META_CTRL_ON or KeyEvent.META_CTRL_LEFT_ON)
+        addModifierKey(secondRow, "ALT", KeyEvent.META_ALT_ON or KeyEvent.META_ALT_LEFT_ON)
+        addRegularKey(secondRow, "←", KeyEvent.KEYCODE_DPAD_LEFT)
+        addRegularKey(secondRow, "↓", KeyEvent.KEYCODE_DPAD_DOWN)
+        addRegularKey(secondRow, "→", KeyEvent.KEYCODE_DPAD_RIGHT)
+        addRegularKey(secondRow, "PGDN", KeyEvent.KEYCODE_PAGE_DOWN)
+        addView(secondRow)
     }
 
-    private fun addRegularKey(label: String, keyCode: Int) {
+    private fun makeRow() = LinearLayout(context).apply {
+        orientation = HORIZONTAL
+        layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT)
+    }
+
+    private fun addRegularKey(row: LinearLayout, label: String, keyCode: Int) {
         val button = makeButton(label, isModifier = false)
         attachRepeatingTouchHandler(button, keyCode)
         row.addView(button)
@@ -160,10 +145,15 @@ class ExtraKeysView(
         }
     }
 
-    private fun addModifierKey(label: String, metaBits: Int) {
+    private fun addModifierKey(row: LinearLayout, label: String, metaBits: Int) {
         val (button, fill) = makeButtonWithFill(label, isModifier = true)
         modifierEntries[metaBits] = ModifierEntry(button, fill)
-        button.setOnClickListener {
+        button.setOnTouchListener { view, event ->
+            if (event.actionMasked != MotionEvent.ACTION_DOWN) {
+                view.isPressed = false
+                return@setOnTouchListener true
+            }
+            view.isPressed = true
             // Three-state cycle: off → armed (pending) → latched
             // (locked) → off. Tapping any regular key in between
             // clears `pending` but leaves `locked` alone, so the
@@ -178,6 +168,7 @@ class ExtraKeysView(
                 else -> pendingMeta = pendingMeta or metaBits
             }
             refreshModifierVisuals()
+            true
         }
         row.addView(button)
     }
@@ -190,7 +181,7 @@ class ExtraKeysView(
         label: String,
         isModifier: Boolean,
     ): Pair<TextView, GradientDrawable> {
-        val cornerRadius = dp(10).toFloat()
+        val cornerRadius = dp(4).toFloat()
 
         // Inner rounded fill — what the user actually "sees" as
         // the button surface. Color is mutated in
@@ -216,12 +207,12 @@ class ExtraKeysView(
 
         val button = TextView(context).apply {
             text = label
-            textSize = if (isModifier) 13f else 15f
-            typeface = if (isModifier) {
-                Typeface.create(Typeface.SANS_SERIF, Typeface.BOLD)
-            } else {
-                Typeface.create(Typeface.SANS_SERIF, Typeface.NORMAL)
+            textSize = when {
+                label.length >= 4 -> 10f
+                isModifier -> 11f
+                else -> 12f
             }
+            typeface = Typeface.create(Typeface.MONOSPACE, Typeface.BOLD)
             setTextColor(Color.parseColor("#CDD6F4")) // Catppuccin Mocha "Text"
             gravity = Gravity.CENTER
             // Belt-and-suspenders: even with `fillViewport=true`
@@ -237,15 +228,13 @@ class ExtraKeysView(
             isFocusable = false
             isFocusableInTouchMode = false
 
-            val padH = dp(8)
-            val padV = dp(12)
+            val padH = dp(2)
+            val padV = dp(4)
             setPadding(padH, padV, padH, padV)
-            minHeight = dp(44) // Material standard tap target
+            minHeight = dp(32)
 
-            // weight=1 + width=0 distributes the row's available
-            // width equally across all 9 keys. WRAP_CONTENT would
-            // sit them at the left.
-            val margin = dp(3)
+            minWidth = 0
+            val margin = dp(1)
             layoutParams = LinearLayout.LayoutParams(
                 /* width = */ 0,
                 /* height = */ LinearLayout.LayoutParams.WRAP_CONTENT,
@@ -278,6 +267,13 @@ class ExtraKeysView(
     fun consumePendingModifier() {
         if (pendingMeta == 0) return
         pendingMeta = 0
+        refreshModifierVisuals()
+    }
+
+    fun clearModifiers() {
+        if (pendingMeta == 0 && lockedMeta == 0) return
+        pendingMeta = 0
+        lockedMeta = 0
         refreshModifierVisuals()
     }
 
@@ -315,13 +311,6 @@ class ExtraKeysView(
 
     private fun dp(value: Int): Int = (value * density).toInt()
 
-    override fun onInterceptTouchEvent(ev: MotionEvent?): Boolean {
-        // Defer to child onClick listeners; the default ScrollView
-        // intercept can swallow a touch that drifted slightly
-        // during a press, costing a key tap.
-        return false
-    }
-
     companion object {
         // Catppuccin Mocha surface palette for the three modifier
         // states. Surface0 (off) sits well against the row's
@@ -330,7 +319,7 @@ class ExtraKeysView(
         // is the accent color, unambiguously different from any
         // regular key fill.
         private val COLOR_OFF = Color.parseColor("#313244")
-        private val COLOR_ARMED = Color.parseColor("#45475A")
-        private val COLOR_LATCHED = Color.parseColor("#89B4FA")
+        private val COLOR_ARMED = Color.parseColor("#89B4FA")
+        private val COLOR_LATCHED = Color.parseColor("#CBA6F7")
     }
 }

@@ -188,22 +188,72 @@ fn active_provider(data_path: &std::path::Path) -> Box<dyn RuntimeProvider> {
 
 const CODEX_TERMUX_VERSION: &str = "0.146.0";
 
+fn zdroid_bootstrap_paths() -> Result<(PathBuf, PathBuf)> {
+    let prefix = std::env::var_os("PREFIX")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("/data/data/com.zdroid/files/usr"));
+    let home = prefix
+        .parent()
+        .context("Zdroid bootstrap prefix has no parent")?
+        .join("home");
+    std::fs::create_dir_all(&home).context("create Zdroid terminal home")?;
+    Ok((prefix, home))
+}
+
 /// Make the subscription-backed ACP agents available without asking users to
 /// configure an API provider. Both adapters inherit the active runtime's HOME,
 /// so they reuse the login performed by `codex login` / `claude` in Zdroid's
 /// integrated terminal. Codex must use an Android-targeted binary: the regular
 /// Linux-musl npm binary cannot reliably use Android's netd resolver.
 fn ensure_codex_acp_launcher() -> Result<PathBuf> {
-    let home = PathBuf::from(std::env::var_os("HOME").context("HOME is not set")?);
+    let (prefix, home) = zdroid_bootstrap_paths()?;
     let launcher = home.join(".local/bin/zdroid-codex-acp-cli");
     let parent = launcher.parent().context("Codex launcher has no parent")?;
     std::fs::create_dir_all(parent).context("create Codex launcher directory")?;
+
+    let browser_launcher = home.join(".local/bin/zdroid-open-url");
+    std::fs::write(
+        &browser_launcher,
+        r#"#!/system/bin/sh
+set -eu
+url="${1:-}"
+if [ -z "$url" ]; then exit 2; fi
+/system/bin/log -t zed_android_browser "Opening OAuth URL through Zdroid bridge" || true
+exec /system/bin/am broadcast \
+  -a com.zdroid.action.OPEN_URL \
+  -n com.zdroid/.OpenUrlReceiver \
+  --es url "$url"
+"#,
+    )
+    .context("write Android browser bridge")?;
+    let mut permissions = std::fs::metadata(&browser_launcher)?.permissions();
+    permissions.set_mode(0o700);
+    std::fs::set_permissions(&browser_launcher, permissions)
+        .context("chmod Android browser bridge")?;
+
+    // Rust's `open` crate prefers Termux's helper on Android and can ignore
+    // BROWSER entirely. Shadow it in the managed PATH so Codex never targets
+    // com.termux/.app.TermuxOpenReceiver from inside the Zdroid sandbox.
+    let termux_open_url_launcher = home.join(".local/bin/termux-open-url");
+    std::fs::write(
+        &termux_open_url_launcher,
+        format!(
+            "#!/system/bin/sh\n/system/bin/log -t zed_android_browser 'Redirecting termux-open-url through Zdroid' || true\nexec {} \"$@\"\n",
+            browser_launcher.to_string_lossy()
+        ),
+    )
+    .context("write Termux URL compatibility bridge")?;
+    let mut permissions = std::fs::metadata(&termux_open_url_launcher)?.permissions();
+    permissions.set_mode(0o700);
+    std::fs::set_permissions(&termux_open_url_launcher, permissions)
+        .context("chmod Termux URL compatibility bridge")?;
 
     let script = format!(
         r#"#!/system/bin/sh
 set -eu
 
 version="{CODEX_TERMUX_VERSION}"
+prefix="{prefix}"
 root="$HOME/.local/share/zdroid/codex-termux-$version"
 codex_bin="$root/node_modules/@mmmbuto/codex-cli-termux/bin/codex.bin"
 archive="/sdcard/.zed/mmmbuto-codex-cli-termux-$version.tgz"
@@ -230,7 +280,7 @@ if [ ! -x "$codex_bin" ]; then
         mkdir -p "$root.staging"
         echo "Zdroid-B: installing Android Codex $version (one-time setup)..." >&2
         if [ -f "$archive" ]; then source="$archive"; else source="@mmmbuto/codex-cli-termux@$version"; fi
-        npm_config_platform=android npm install --force --no-audit --no-fund --prefix "$root.staging" "$source" >&2
+        npm_config_platform=android "$prefix/bin/npm" install --force --no-audit --no-fund --prefix "$root.staging" "$source" >&2
         rm -rf "$root"
         mv "$root.staging" "$root"
         rm -rf "$lock"
@@ -249,74 +299,68 @@ if [ ! -x "$codex_bin" ]; then
     exit 127
 fi
 
+# The Android package is downloaded after app startup, so the boot-time repair
+# cannot see it. Patch the resolver path immediately before every launch. The
+# replacement has the same 16-byte width and fd 9 is opened below.
+"$prefix/bin/node" -e '
+const fs = require("fs");
+const path = process.argv[1];
+const replacement = Buffer.from("/proc/self/fd/9\0", "binary");
+let bytes = fs.readFileSync(path);
+let changed = false;
+for (const value of ["/etc/resolv.conf", "/sdcard/.zed/r\0\0"]) {{
+    const needle = Buffer.from(value, "binary");
+    for (let offset = bytes.indexOf(needle); offset >= 0; offset = bytes.indexOf(needle, offset + replacement.length)) {{
+        replacement.copy(bytes, offset);
+        changed = true;
+    }}
+}}
+if (changed) fs.writeFileSync(path, bytes);
+' "$codex_bin"
+
 bin_dir="$(dirname "$codex_bin")"
+resolv_conf="${{ZDROID_RESOLV_CONF:-$HOME/../zdroid-resolv.conf}}"
+if [ ! -r "$resolv_conf" ]; then
+    printf 'nameserver 1.1.1.1\nnameserver 8.8.8.8\n' > "$resolv_conf"
+fi
+exec 9<"$resolv_conf"
 export CODEX_MANAGED_BY_NPM=1
 export CODEX_SELF_EXE="$codex_bin"
+export BROWSER="{browser_launcher}"
+export PATH="{managed_bin}:$PATH"
 export LD_LIBRARY_PATH="$bin_dir${{LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}}"
 exec "$codex_bin" "$@"
-"#
+"#,
+        browser_launcher = browser_launcher.to_string_lossy(),
+        managed_bin = parent.to_string_lossy(),
+        prefix = prefix.to_string_lossy(),
     );
     std::fs::write(&launcher, script).context("write Codex ACP launcher")?;
     let mut permissions = std::fs::metadata(&launcher)?.permissions();
     permissions.set_mode(0o700);
     std::fs::set_permissions(&launcher, permissions).context("chmod Codex ACP launcher")?;
-    let prefix = std::env::var_os("PREFIX")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("/data/data/com.zdroid/files/usr"));
     let terminal_launcher = prefix.join(".zed/bin/codex");
     if let Some(parent) = terminal_launcher.parent() {
         std::fs::create_dir_all(parent).context("create Codex terminal launcher directory")?;
     }
-    std::fs::write(
-        &terminal_launcher,
-        r#"#!/system/bin/sh
-# The terminal keeps the regular Codex CLI so its browser OAuth flow behaves
-# exactly like the setup that originally worked in Zdroid-B. The Agent panel
-# uses the separate Android-compatible CODEX_PATH launcher above and shares the
-# resulting ~/.codex/auth.json credentials.
-regular_cli="$PREFIX/bin/codex"
-if [ -x "$regular_cli" ]; then
-    exec "$regular_cli" "$@"
-fi
-echo 'Zdroid-B: regular Codex CLI is not installed. Re-run Zdroid Bootstrap setup or run npm install -g @openai/codex.' >&2
-exit 127
-"#,
-    )
-    .context("write Codex terminal launcher")?;
+    let terminal_script = format!(
+        "#!/system/bin/sh\nexec {} \"$@\"\n",
+        launcher.to_string_lossy()
+    );
+    std::fs::write(&terminal_launcher, terminal_script).context("write Codex terminal launcher")?;
     let mut permissions = std::fs::metadata(&terminal_launcher)?.permissions();
     permissions.set_mode(0o700);
     std::fs::set_permissions(&terminal_launcher, permissions)
         .context("chmod Codex terminal launcher")?;
 
-    let local_archive = PathBuf::from(format!(
-        "/sdcard/.zed/mmmbuto-codex-cli-termux-{CODEX_TERMUX_VERSION}.tgz"
-    ));
-    if local_archive.is_file() {
-        let launcher = launcher.clone();
-        std::thread::spawn(move || {
-            log::info!("zed_android: preparing Android Codex from local package");
-            match std::process::Command::new(&launcher)
-                .arg("--version")
-                .output()
-            {
-                Ok(output) if output.status.success() => log::info!(
-                    "zed_android: Android Codex ready: {}",
-                    String::from_utf8_lossy(&output.stdout).trim()
-                ),
-                Ok(output) => log::error!(
-                    "zed_android: Android Codex setup failed ({}): {}",
-                    output.status,
-                    String::from_utf8_lossy(&output.stderr).trim()
-                ),
-                Err(err) => log::error!("zed_android: could not start Android Codex setup: {err}"),
-            }
-        });
-    }
     Ok(launcher)
 }
 
 fn ensure_claude_acp_launcher() -> Result<PathBuf> {
-    let home = PathBuf::from(std::env::var_os("HOME").context("HOME is not set")?);
+    let (prefix, home) = zdroid_bootstrap_paths()?;
+    if let Err(err) = ensure_claude_model_catalog(&home) {
+        log::warn!("zed_android: could not update Claude model catalog: {err:#}");
+    }
     let launcher = home.join(".local/bin/zdroid-claude-agent-acp");
     let parent = launcher
         .parent()
@@ -328,20 +372,26 @@ fn ensure_claude_acp_launcher() -> Result<PathBuf> {
     // an older Zdroid install cannot silently fall back to family aliases only.
     let script = r#"#!/system/bin/sh
 set -eu
-claude_cli="$(command -v claude 2>/dev/null || true)"
-if [ -z "$claude_cli" ]; then
-    echo 'Zdroid-B: Claude CLI is not installed. Run npm install -g @anthropic-ai/claude-code, then restart Zdroid-B.' >&2
+claude_cli="$PREFIX/.zed/bin/claude"
+if [ ! -x "$claude_cli" ]; then
+    echo 'Zdroid-B: Claude launcher is missing. Restart Zdroid-B, then use Install Claude in Agent Info.' >&2
     exit 127
 fi
 export CLAUDE_CODE_EXECUTABLE="$claude_cli"
+export DISABLE_AUTOUPDATER=1
 cache="${npm_config_cache:-$HOME/../node/cache}"
-acp_js="$(find "$cache/_npx" -path '*/node_modules/@agentclientprotocol/claude-agent-acp/dist/index.js' -type f 2>/dev/null | tail -n 1 || true)"
-if [ -n "$acp_js" ]; then
-    exec node "$acp_js" "$@"
+managed_acp="$HOME/.local/share/zdroid/claude-code/node_modules/@agentclientprotocol/claude-agent-acp/dist/index.js"
+managed_package="$(dirname "$(dirname "$managed_acp")")/package.json"
+managed_version="$(node -p "try { require('$managed_package').version } catch (_) { '' }" 2>/dev/null || true)"
+if [ -f "$managed_acp" ] && [ "$managed_version" = "0.64.2" ]; then
+    /system/bin/log -t zed_android "Claude ACP source=managed version=$managed_version" || true
+    exec node "$managed_acp" "$@"
 fi
 
-# First launch populates npm's cache. Subsequent launches bypass npx above,
-# avoiding Android's phantom-process limit during normal agent startup.
+# Always resolve the pinned package when the managed copy is missing or stale.
+# A hash directory in npm's _npx cache does not encode package version, so
+# blindly running the last matching file can silently revive an older ACP.
+/system/bin/log -t zed_android "Claude ACP source=npx version=0.64.2 managed_version=${managed_version:-missing}" || true
 exec npx --yes --prefer-offline --no-audit --no-fund @agentclientprotocol/claude-agent-acp@0.64.2 "$@"
 "#;
     std::fs::write(&launcher, script).context("write Claude ACP launcher")?;
@@ -354,9 +404,53 @@ exec npx --yes --prefer-offline --no-audit --no-fund @agentclientprotocol/claude
     // that command before it sees our Custom-server replacement. Keep a small
     // compatibility entry on the bootstrap PATH so either launch route reaches
     // the same Android-aware wrapper instead of failing with status 127.
-    let prefix = std::env::var_os("PREFIX")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("/data/data/com.zdroid/files/usr"));
+    let terminal_launcher = prefix.join(".zed/bin/claude");
+    if let Some(parent) = terminal_launcher.parent() {
+        std::fs::create_dir_all(parent).context("create Claude terminal launcher directory")?;
+    }
+    std::fs::write(
+        &terminal_launcher,
+        r#"#!/system/bin/sh
+set -eu
+managed_cli="$HOME/.local/share/zdroid/claude-code/node_modules/@anthropic-ai/claude-code/cli.js"
+global_cli="$PREFIX/lib/node_modules/@anthropic-ai/claude-code/cli.js"
+if [ -f "$managed_cli" ]; then
+    resolved_cli="$managed_cli"
+elif [ -f "$global_cli" ]; then
+    resolved_cli="$global_cli"
+else
+    real_cli="$PREFIX/bin/claude"
+    resolved_cli="$(readlink -f "$real_cli" 2>/dev/null || true)"
+fi
+if [ -z "${resolved_cli:-}" ] || [ ! -f "$resolved_cli" ]; then
+    echo 'Zdroid-B: A compatible Claude CLI is not installed. Use Install Claude in Agent Info; unversioned npm releases from 2.1.113 onward are native binaries that cannot run in Android/Bionic.' >&2
+    exit 127
+fi
+case "$resolved_cli" in
+    *.exe)
+        echo 'Zdroid-B: This Claude CLI uses an incompatible native executable. Use Install Claude in Agent Info to install the Android-compatible JavaScript release.' >&2
+        exit 126
+        ;;
+esac
+resolv_conf="${ZDROID_RESOLV_CONF:-$HOME/../zdroid-resolv.conf}"
+if [ ! -r "$resolv_conf" ]; then
+    printf 'nameserver 1.1.1.1\nnameserver 8.8.8.8\n' > "$resolv_conf"
+fi
+exec 9<"$resolv_conf"
+# Keep the pinned JavaScript release in app-owned HOME. This avoids npm global
+# shims disappearing during package upgrades and prevents Claude's updater
+# from migrating to an Android-incompatible native build.
+export DISABLE_AUTOUPDATER=1
+export USE_BUILTIN_RIPGREP=0
+exec node "$resolved_cli" "$@"
+"#,
+    )
+    .context("write Claude terminal launcher")?;
+    let mut permissions = std::fs::metadata(&terminal_launcher)?.permissions();
+    permissions.set_mode(0o700);
+    std::fs::set_permissions(&terminal_launcher, permissions)
+        .context("chmod Claude terminal launcher")?;
+
     let compatibility_launcher = prefix.join("bin/claude-agent-acp");
     if let Some(parent) = compatibility_launcher.parent() {
         std::fs::create_dir_all(parent).context("create Claude ACP compatibility directory")?;
@@ -378,8 +472,71 @@ exec npx --yes --prefer-offline --no-audit --no-fund @agentclientprotocol/claude
     Ok(launcher)
 }
 
-const RESOLV_CONF_NEEDLE: &[u8] = b"/etc/resolv.conf";
-const RESOLV_CONF_REPLACEMENT: &[u8] = b"/sdcard/.zed/r\0\0";
+/// Recreate launchers that live inside `$PREFIX` after Bootstrap atomically
+/// replaces that directory on a first install or runtime upgrade.
+pub(crate) fn ensure_agent_cli_launchers() -> Result<()> {
+    ensure_codex_acp_launcher().context("recreate Codex launchers")?;
+    ensure_claude_acp_launcher().context("recreate Claude launchers")?;
+    Ok(())
+}
+
+const ZDROID_CLAUDE_MODELS: &[&str] = &[
+    "claude-fable-5",
+    "claude-opus-5",
+    "claude-opus-4-8",
+    "claude-opus-4-7",
+    "claude-sonnet-5",
+    "claude-sonnet-4-7",
+    "claude-sonnet-4-6",
+    "claude-haiku-4-5",
+];
+
+fn ensure_claude_model_catalog(home: &Path) -> Result<()> {
+    let settings_dir = home.join(".claude");
+    let settings_path = settings_dir.join("settings.json");
+    std::fs::create_dir_all(&settings_dir).context("create Claude settings directory")?;
+
+    let mut settings = if settings_path.is_file() {
+        let bytes = std::fs::read(&settings_path).context("read Claude settings")?;
+        serde_json::from_slice::<serde_json::Value>(&bytes)
+            .context("parse Claude settings as JSON")?
+    } else {
+        serde_json::json!({})
+    };
+    let object = settings
+        .as_object_mut()
+        .context("Claude settings root is not a JSON object")?;
+    let models = object
+        .entry("availableModels")
+        .or_insert_with(|| serde_json::Value::Array(Vec::new()))
+        .as_array_mut()
+        .context("Claude availableModels is not a JSON array")?;
+
+    let mut changed = false;
+    for model in ZDROID_CLAUDE_MODELS {
+        if !models.iter().any(|value| value.as_str() == Some(model)) {
+            models.push(serde_json::Value::String((*model).to_string()));
+            changed = true;
+        }
+    }
+    if !changed && settings_path.is_file() {
+        return Ok(());
+    }
+
+    let temporary_path = settings_dir.join("settings.json.zdroid.tmp");
+    std::fs::write(&temporary_path, serde_json::to_vec_pretty(&settings)?)
+        .context("write temporary Claude settings")?;
+    std::fs::rename(&temporary_path, &settings_path).context("replace Claude settings")?;
+    log::info!(
+        "zed_android: ensured {} Claude model catalog entries",
+        ZDROID_CLAUDE_MODELS.len()
+    );
+    Ok(())
+}
+
+const RESOLV_CONF_NEEDLE: &[u8; 16] = b"/etc/resolv.conf";
+const LEGACY_RESOLV_CONF_NEEDLE: &[u8; 16] = b"/sdcard/.zed/r\0\0";
+const RESOLV_CONF_REPLACEMENT: &[u8; 16] = b"/proc/self/fd/9\0";
 
 fn patch_native_cli_binary(path: &Path) -> Result<bool> {
     let metadata = std::fs::metadata(path)?;
@@ -389,16 +546,18 @@ fn patch_native_cli_binary(path: &Path) -> Result<bool> {
 
     let mut bytes = std::fs::read(path)?;
     let mut patched = false;
-    let mut offset = 0;
-    while let Some(relative) = bytes[offset..]
-        .windows(RESOLV_CONF_NEEDLE.len())
-        .position(|window| window == RESOLV_CONF_NEEDLE)
-    {
-        let start = offset + relative;
-        bytes[start..start + RESOLV_CONF_REPLACEMENT.len()]
-            .copy_from_slice(RESOLV_CONF_REPLACEMENT);
-        patched = true;
-        offset = start + RESOLV_CONF_REPLACEMENT.len();
+    for needle in [RESOLV_CONF_NEEDLE, LEGACY_RESOLV_CONF_NEEDLE] {
+        let mut offset = 0;
+        while let Some(relative) = bytes[offset..]
+            .windows(needle.len())
+            .position(|window| window == needle)
+        {
+            let start = offset + relative;
+            bytes[start..start + RESOLV_CONF_REPLACEMENT.len()]
+                .copy_from_slice(RESOLV_CONF_REPLACEMENT);
+            patched = true;
+            offset = start + RESOLV_CONF_REPLACEMENT.len();
+        }
     }
     if patched {
         std::fs::write(path, bytes)?;
@@ -445,6 +604,9 @@ fn repair_installed_cli_dns() {
     };
     let mut patched = 0;
     visit(&prefix.join("lib/node_modules"), 14, &mut patched);
+    if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
+        visit(&home.join(".local/share/zdroid"), 16, &mut patched);
+    }
     log::info!("zed_android: native CLI DNS repair patched {patched} binaries");
 }
 
@@ -884,11 +1046,9 @@ fn android_main(app: AndroidApp) {
     // grants once, RealFs reads of /storage/emulated/0/... start working.
     gpui_android::storage::request_once(&app);
 
-    // Materialize Android's active DNS servers into /sdcard/.zed/r so
-    // hex-patched Bun-compiled CLIs (claude, codex, future) can resolve
-    // hostnames without proot. Patched binaries open `/sdcard/.zed/r`
-    // instead of the original `/etc/resolv.conf`. Falls back to public
-    // DNS if ConnectivityManager gives nothing (no active network yet).
+    // Materialize Android's active DNS servers in app-private storage. Native
+    // CLI launchers inherit it as fd 9; patched binaries open
+    // `/proc/self/fd/9` instead of Android's missing `/etc/resolv.conf`.
     gpui_android::dns_bridge::populate_resolv_conf(&app);
     repair_installed_cli_dns();
     if let Some(prefix) = std::env::var_os("PREFIX").map(PathBuf::from)
@@ -1513,6 +1673,17 @@ fn boot(cx: &mut App, data_path: &std::path::Path, dns_resolver: AndroidDnsResol
     .detach();
     info!("zed_android: android_input atomics observer registered");
 
+    let apply_background_execution = |cx: &gpui::App| {
+        let enabled = workspace::WorkspaceSettings::get_global(cx).background_execution;
+        gpui_android::storage::set_background_execution_enabled(enabled);
+    };
+    apply_background_execution(cx);
+    cx.observe_global::<SettingsStore>(move |cx| {
+        apply_background_execution(cx);
+    })
+    .detach();
+    info!("zed_android: background execution observer registered");
+
     // Drive the vim-mode soft-keyboard routing gate. In a vim command
     // mode (Normal / Visual / operator-pending / Helix) soft-keyboard
     // text has to arrive as key *events* so vim's keymap reads `j`/`d`/
@@ -1888,7 +2059,6 @@ fn boot(cx: &mut App, data_path: &std::path::Path, dns_resolver: AndroidDnsResol
 
     settings_ui::init(cx);
     workspace::init_settings_file_actions(cx);
-    editor::init_bundled_file_actions(cx);
     terminal_view::init(cx);
     // Onboarding reads `AllAgentServersSettings` from the SettingsStore;
     // `SettingsStore::get` panics if the type isn't registered, so register
@@ -1930,7 +2100,30 @@ fn boot(cx: &mut App, data_path: &std::path::Path, dns_resolver: AndroidDnsResol
     cx.observe_new(move |workspace: &mut Workspace, window, cx| {
         let Some(window) = window else { return };
 
-        workspace.register_action(editor::open_project_settings_file);
+        // Agent history is implemented by the shared Sidebar thread switcher.
+        // The Android boot path does not run crates/zed's initialize_window,
+        // so register the same Sidebar here after MultiWorkspace construction.
+        // Creating it in a defer avoids Sidebar::new re-entering a currently
+        // borrowed MultiWorkspace.
+        if let Some(multi_workspace) = workspace
+            .multi_workspace()
+            .and_then(|multi_workspace| multi_workspace.upgrade())
+            && multi_workspace.read(cx).sidebar().is_none()
+        {
+            cx.spawn_in(window, async move |workspace_handle, cx| {
+                workspace_handle.update_in(cx, |_, window, cx| {
+                    let sidebar =
+                        cx.new(|cx| sidebar::Sidebar::new(multi_workspace.clone(), window, cx));
+                    multi_workspace.update(cx, |multi_workspace, cx| {
+                        multi_workspace.register_sidebar(sidebar, cx);
+                    });
+                    log::info!("zed_android: registered MultiWorkspace sidebar");
+                })?;
+                anyhow::Ok(())
+            })
+            .detach_and_log_err(cx);
+        }
+
         workspace
             .register_action(agent_ui::AgentPanel::toggle_focus)
             .register_action(agent_ui::AgentPanel::focus)

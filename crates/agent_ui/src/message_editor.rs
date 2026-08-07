@@ -2050,7 +2050,7 @@ impl Addon for MessageEditorAddon {
 
     fn extend_key_context(&self, key_context: &mut KeyContext, cx: &App) {
         let settings = agent_settings::AgentSettings::get_global(cx);
-        if settings.use_modifier_to_send {
+        if settings.use_modifier_to_send || cfg!(target_os = "android") {
             key_context.add("use_modifier_to_send");
         }
     }

@@ -385,12 +385,12 @@ impl WelcomePage {
         cx.notify();
 
         let terminal_task = task::SpawnInTerminal {
-            id: task::TaskId(format!("zdroid-agent-setup-{id}")),
-            full_label: label.to_string(),
+            id: task::TaskId("zdroid-agent-setup".into()),
+            full_label: "Zdroid-B Agent Setup".to_string(),
             label: label.to_string(),
             command: Some(command.to_string()),
             command_label: command.to_string(),
-            use_new_terminal: true,
+            use_new_terminal: false,
             allow_concurrent_runs: false,
             reveal: task::RevealStrategy::Always,
             reveal_target: zed_actions::RevealTarget::Dock,
@@ -401,13 +401,22 @@ impl WelcomePage {
             ..Default::default()
         };
 
-        self.workspace
-            .update(cx, |workspace, cx| {
-                workspace
-                    .spawn_in_terminal(terminal_task, window, cx)
-                    .detach();
-            })
-            .log_err();
+        let Ok(task) = self.workspace.update(cx, |workspace, cx| {
+            workspace.spawn_in_terminal(terminal_task, window, cx)
+        }) else {
+            return;
+        };
+
+        let background_id = format!("zdroid-agent-setup-{id}");
+        cx.start_background_task(&background_id, label);
+        cx.spawn(async move |_, cx| {
+            let result = task.await;
+            let successful = matches!(result, Some(Ok(status)) if status.success());
+            cx.update(|cx| {
+                cx.finish_background_task(&background_id, label, successful);
+            });
+        })
+        .detach();
     }
 
     fn render_agent_setup_info(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -478,9 +487,15 @@ impl WelcomePage {
                 .border_1()
                 .border_color(colors.border_variant)
                 .child(
-                    div()
+                    v_flex()
                         .min_w_0()
                         .flex_1()
+                        .gap_1()
+                        .child(
+                            Label::new(label)
+                                .size(LabelSize::XSmall)
+                                .color(Color::Default),
+                        )
                         .child(Label::new(text).buffer_font(cx).size(LabelSize::XSmall)),
                 )
                 .child(
@@ -521,65 +536,65 @@ impl WelcomePage {
             .child(command(
                 "agent-command-repair",
                 "Repair package state",
-                "env LD_LIBRARY_PATH=\"$PREFIX/lib\" apt --fix-broken install -y",
-                Some("env LD_LIBRARY_PATH=\"$PREFIX/lib\" apt --fix-broken install -y"),
+                "env LD_LIBRARY_PATH=\"$PREFIX/lib\" \"$PREFIX/.zed/bin/apt\" --fix-broken install -y",
+                Some("env LD_LIBRARY_PATH=\"$PREFIX/lib\" \"$PREFIX/.zed/bin/apt\" --fix-broken install -y"),
             ))
             .child(command(
                 "agent-command-update",
                 "Update packages",
-                "env LD_LIBRARY_PATH=\"$PREFIX/lib\" pkg update -y",
-                Some("env LD_LIBRARY_PATH=\"$PREFIX/lib\" pkg update -y"),
+                "env LD_LIBRARY_PATH=\"$PREFIX/lib\" \"$PREFIX/.zed/bin/pkg\" update -y",
+                Some("env LD_LIBRARY_PATH=\"$PREFIX/lib\" \"$PREFIX/.zed/bin/pkg\" update -y"),
             ))
             .child(command(
                 "agent-command-upgrade",
                 "Upgrade packages",
-                "env LD_LIBRARY_PATH=\"$PREFIX/lib\" pkg upgrade -y",
-                Some("env LD_LIBRARY_PATH=\"$PREFIX/lib\" pkg upgrade -y"),
+                "env LD_LIBRARY_PATH=\"$PREFIX/lib\" DEBIAN_FRONTEND=noninteractive \"$PREFIX/.zed/bin/pkg\" upgrade -y -o Dpkg::Options::=\"--force-confdef\" -o Dpkg::Options::=\"--force-confold\"",
+                Some("env LD_LIBRARY_PATH=\"$PREFIX/lib\" DEBIAN_FRONTEND=noninteractive \"$PREFIX/.zed/bin/pkg\" upgrade -y -o Dpkg::Options::=\"--force-confdef\" -o Dpkg::Options::=\"--force-confold\""),
             ))
             .child(command(
                 "agent-command-base-install",
                 "Install base packages",
-                "env LD_LIBRARY_PATH=\"$PREFIX/lib\" pkg install -y nodejs-lts git",
-                Some("env LD_LIBRARY_PATH=\"$PREFIX/lib\" pkg install -y nodejs-lts git"),
+                "env LD_LIBRARY_PATH=\"$PREFIX/lib\" \"$PREFIX/.zed/bin/pkg\" install -y nodejs-lts git",
+                Some("env LD_LIBRARY_PATH=\"$PREFIX/lib\" \"$PREFIX/.zed/bin/pkg\" install -y nodejs-lts git"),
             ))
             .child(Label::new("Codex").size(LabelSize::Small))
             .child(command(
                 "agent-command-codex-install",
                 "Install Codex",
-                "npm install -g @openai/codex",
-                Some("npm install -g @openai/codex"),
+                "\"$PREFIX/.zed/bin/codex\" --version",
+                Some("\"$PREFIX/.zed/bin/codex\" --version"),
             ))
             .child(command(
                 "agent-command-codex-login",
-                "Sign in to Codex",
-                "codex login",
-                Some("codex login"),
+                "Login to Codex",
+                "\"$PREFIX/.zed/bin/codex\" login",
+                Some("\"$PREFIX/.zed/bin/codex\" login"),
             ))
             .child(Label::new("Claude Code").size(LabelSize::Small))
             .child(command(
                 "agent-command-claude-install",
                 "Install Claude",
-                "npm install -g @anthropic-ai/claude-code @agentclientprotocol/claude-agent-acp@0.64.2",
-                Some("npm install -g @anthropic-ai/claude-code @agentclientprotocol/claude-agent-acp@0.64.2"),
+                "\"$PREFIX/bin/npm\" install --prefix \"$HOME/.local/share/zdroid/claude-code\" --no-save --force @anthropic-ai/claude-code@2.1.112 @agentclientprotocol/claude-agent-acp@0.64.2 && test -f \"$HOME/.local/share/zdroid/claude-code/node_modules/@anthropic-ai/claude-code/cli.js\" && ln -sf \"$PREFIX/.zed/bin/claude\" \"$PREFIX/bin/claude\" && \"$PREFIX/.zed/bin/claude\" --version",
+                Some("\"$PREFIX/bin/npm\" install --prefix \"$HOME/.local/share/zdroid/claude-code\" --no-save --force @anthropic-ai/claude-code@2.1.112 @agentclientprotocol/claude-agent-acp@0.64.2 && test -f \"$HOME/.local/share/zdroid/claude-code/node_modules/@anthropic-ai/claude-code/cli.js\" && ln -sf \"$PREFIX/.zed/bin/claude\" \"$PREFIX/bin/claude\" && \"$PREFIX/.zed/bin/claude\" --version"),
             ))
             .child(command(
                 "agent-command-claude-login",
-                "Sign in to Claude",
-                "claude",
-                Some("claude"),
+                "Login to Claude",
+                "\"$PREFIX/.zed/bin/claude\"",
+                Some("\"$PREFIX/.zed/bin/claude\""),
             ))
             .child(Label::new("Gemini CLI").size(LabelSize::Small))
             .child(command(
                 "agent-command-gemini-install",
                 "Install Gemini",
-                "npm install -g @google/gemini-cli",
-                Some("npm install -g @google/gemini-cli"),
+                "\"$PREFIX/bin/npm\" install -g @google/gemini-cli",
+                Some("\"$PREFIX/bin/npm\" install -g @google/gemini-cli"),
             ))
             .child(command(
                 "agent-command-gemini-login",
-                "Sign in to Gemini",
-                "gemini",
-                Some("gemini"),
+                "Login to Gemini",
+                "\"$PREFIX/bin/gemini\"",
+                Some("\"$PREFIX/bin/gemini\""),
             ))
             .child(Label::new("Grok Build").size(LabelSize::Small))
             .child(command(
