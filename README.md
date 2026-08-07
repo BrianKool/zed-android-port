@@ -30,6 +30,10 @@ Zdroid-B is BrianKool's independent fork of the [Zed Android port](https://githu
 - **Background execution:** one foreground session notification keeps terminal and agent tasks alive, supports wake lock control, reports running task count, and notifies when all tasks finish.
 - **Safer bootstrap setup:** first-run runtime selection, download progress, package repair, package snapshots, and command actions for installing or signing in to popular agent CLIs.
 
+For the complete implementation architecture, dependency stack, Android/Rust
+boundaries, security decisions, and a commit-by-commit map of the Zdroid-B
+feature branch, see [**Zdroid-B technology stack and engineering techniques**](docs/ZDROID_B_TECH_STACK.md).
+
 ---
 
 <p align="center">
