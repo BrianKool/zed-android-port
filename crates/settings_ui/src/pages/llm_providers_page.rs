@@ -32,7 +32,8 @@ pub(crate) fn render_llm_providers_page(
     v_flex()
         .id("llm-providers-page")
         .size_full()
-        .px_8()
+        .when(cfg!(target_os = "android"), |this| this.px_3())
+        .when(!cfg!(target_os = "android"), |this| this.px_8())
         .pb_16()
         .track_scroll(scroll_handle)
         .overflow_y_scroll()
@@ -251,73 +252,74 @@ fn render_api_key_providers_item(
 
     let input_id = format!("{}-api-key-input", provider_id.0);
     let aria_label = format!("{provider_name} API Key");
-
-    v_flex()
-        .gap_2()
+    let description = v_flex()
+        .w_full()
+        .min_w_0()
+        .gap_0p5()
+        .child(Label::new("API Key"))
         .child(
             h_flex()
-                .pt_2p5()
                 .w_full()
                 .min_w_0()
-                .gap_4()
-                .justify_between()
+                .flex_wrap()
+                .gap_0p5()
                 .child(
-                    v_flex()
-                        .w_full()
-                        .min_w_0()
-                        .max_w_1_2()
-                        .gap_0p5()
-                        .child(Label::new("API Key"))
-                        .child(
-                            h_flex()
-                                .w_full()
-                                .min_w_0()
-                                .flex_wrap()
-                                .gap_0p5()
-                                .child(
-                                    Label::new("Visit the")
-                                        .size(LabelSize::Small)
-                                        .color(Color::Muted),
-                                )
-                                .child(
-                                    ButtonLink::new(
-                                        format!("{provider_name} dashboard"),
-                                        api_key_url,
-                                    )
-                                    .no_icon(true)
-                                    .label_size(LabelSize::Small)
-                                    .label_color(Color::Muted),
-                                )
-                                .child(
-                                    Label::new("to generate an API key.")
-                                        .size(LabelSize::Small)
-                                        .color(Color::Muted),
-                                ),
-                        )
-                        .child(
-                            Label::new(format!(
-                                "Or set the {env_var_name} env var and restart Zed for it to take effect."
-                            ))
-                            .size(LabelSize::XSmall)
-                            .color(Color::Muted),
-                        ),
+                    Label::new("Visit the")
+                        .size(LabelSize::Small)
+                        .color(Color::Muted),
                 )
                 .child(
-                    SettingsInputField::new(input_id)
-                        .tab_index(0)
-                        .with_placeholder("xxxxxxxxxxxxxxxxxxxx")
-                        .aria_label(aria_label)
-                        .on_confirm({
-                            let provider = provider.clone();
-                            move |api_key, _window, cx| {
-                                if let Some(key) = api_key.filter(|key| !key.is_empty()) {
-                                    provider.set_api_key(Some(key), cx).detach_and_log_err(cx);
-                                }
-                            }
-                        }),
+                    ButtonLink::new(format!("{provider_name} dashboard"), api_key_url)
+                        .no_icon(true)
+                        .label_size(LabelSize::Small)
+                        .label_color(Color::Muted),
+                )
+                .child(
+                    Label::new("to generate an API key.")
+                        .size(LabelSize::Small)
+                        .color(Color::Muted),
                 ),
         )
-        .into_any_element()
+        .child(
+            Label::new(format!(
+                "Or set the {env_var_name} env var and restart Zed for it to take effect."
+            ))
+            .size(LabelSize::XSmall)
+            .color(Color::Muted),
+        );
+    let input = SettingsInputField::new(input_id)
+        .tab_index(0)
+        .with_placeholder("xxxxxxxxxxxxxxxxxxxx")
+        .aria_label(aria_label)
+        .on_confirm({
+            let provider = provider.clone();
+            move |api_key, _window, cx| {
+                if let Some(key) = api_key.filter(|key| !key.is_empty()) {
+                    provider.set_api_key(Some(key), cx).detach_and_log_err(cx);
+                }
+            }
+        });
+
+    if cfg!(target_os = "android") {
+        v_flex()
+            .w_full()
+            .min_w_0()
+            .pt_2p5()
+            .gap_2()
+            .child(description)
+            .child(div().w_full().min_w_0().child(input))
+            .into_any_element()
+    } else {
+        h_flex()
+            .pt_2p5()
+            .w_full()
+            .min_w_0()
+            .gap_4()
+            .justify_between()
+            .child(description.max_w_1_2())
+            .child(input)
+            .into_any_element()
+    }
 }
 
 fn render_inline_body(
@@ -335,24 +337,34 @@ fn render_inline_body(
             .into_any_element();
     }
 
-    h_flex()
-        .pt_2p5()
+    let description = v_flex()
         .w_full()
         .min_w_0()
-        .gap_4()
-        .justify_between()
-        .child(
-            v_flex()
-                .w_full()
-                .min_w_0()
-                .max_w_1_2()
-                .when_some(title, |this, title| this.child(Label::new(title)))
-                .when_some(description, |this, description| {
-                    this.child(render_inline_description(provider_name, description))
-                }),
-        )
-        .child(h_flex().flex_none().child(view))
-        .into_any_element()
+        .when_some(title, |this, title| this.child(Label::new(title)))
+        .when_some(description, |this, description| {
+            this.child(render_inline_description(provider_name, description))
+        });
+
+    if cfg!(target_os = "android") {
+        v_flex()
+            .pt_2p5()
+            .w_full()
+            .min_w_0()
+            .gap_2()
+            .child(description)
+            .child(div().w_full().min_w_0().child(view))
+            .into_any_element()
+    } else {
+        h_flex()
+            .pt_2p5()
+            .w_full()
+            .min_w_0()
+            .gap_4()
+            .justify_between()
+            .child(description.max_w_1_2())
+            .child(h_flex().flex_none().child(view))
+            .into_any_element()
+    }
 }
 
 fn render_subpage_item(
@@ -363,38 +375,47 @@ fn render_subpage_item(
     let provider_id = provider.id();
     let provider_name = provider.name().0;
 
-    h_flex()
-        .pt_2p5()
+    let description = v_flex()
         .w_full()
         .min_w_0()
-        .gap_4()
-        .justify_between()
-        .child(
-            v_flex()
-                .w_full()
-                .min_w_0()
-                .max_w_1_2()
-                .gap_0p5()
-                .child(Label::new("Configure Provider"))
-                .when_some(description, |this, description| {
-                    this.child(render_inline_description(provider_name, description))
-                }),
+        .gap_0p5()
+        .child(Label::new("Configure Provider"))
+        .when_some(description, |this, description| {
+            this.child(render_inline_description(provider_name, description))
+        });
+    let button = Button::new(format!("configure-{}", provider_id.0), "Configure")
+        .style(ButtonStyle::OutlinedGhost)
+        .size(ButtonSize::Medium)
+        .end_icon(
+            Icon::new(IconName::ChevronRight)
+                .size(IconSize::Small)
+                .color(Color::Muted),
         )
-        .child(
-            Button::new(format!("configure-{}", provider_id.0), "Configure")
-                .style(ButtonStyle::OutlinedGhost)
-                .size(ButtonSize::Medium)
-                .end_icon(
-                    Icon::new(IconName::ChevronRight)
-                        .size(IconSize::Small)
-                        .color(Color::Muted),
-                )
-                .tab_index(0isize)
-                .on_click(cx.listener(move |this, _, window, cx| {
-                    open_provider_configuration(this, provider_id.clone(), window, cx);
-                })),
-        )
-        .into_any_element()
+        .tab_index(0isize)
+        .on_click(cx.listener(move |this, _, window, cx| {
+            open_provider_configuration(this, provider_id.clone(), window, cx);
+        }));
+
+    if cfg!(target_os = "android") {
+        v_flex()
+            .pt_2p5()
+            .w_full()
+            .min_w_0()
+            .gap_2()
+            .child(description)
+            .child(h_flex().w_full().justify_end().child(button))
+            .into_any_element()
+    } else {
+        h_flex()
+            .pt_2p5()
+            .w_full()
+            .min_w_0()
+            .gap_4()
+            .justify_between()
+            .child(description.max_w_1_2())
+            .child(button)
+            .into_any_element()
+    }
 }
 
 fn render_inline_description(
@@ -515,7 +536,8 @@ fn render_provider_configuration(
         .id("provider-config-sub-page")
         .size_full()
         .pt_2p5()
-        .px_8()
+        .when(cfg!(target_os = "android"), |this| this.px_3())
+        .when(!cfg!(target_os = "android"), |this| this.px_8())
         .pb_16()
         .track_scroll(scroll_handle)
         .overflow_y_scroll()

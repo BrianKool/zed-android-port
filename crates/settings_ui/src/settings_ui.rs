@@ -3998,71 +3998,81 @@ impl SettingsWindow {
             let is_external_agents_page = current_sub_page.link.json_path == Some("agent_servers");
             let is_mcp_servers_page = current_sub_page.link.json_path == Some("context_servers");
 
-            page_header = h_flex()
+            let breadcrumbs = h_flex()
                 .w_full()
                 .min_w_0()
-                .justify_between()
+                .ml_neg_1p5()
+                .gap_1()
                 .child(
-                    h_flex()
-                        .min_w_0()
-                        .ml_neg_1p5()
-                        .gap_1()
-                        .child(
-                            IconButton::new("back-btn", IconName::ArrowLeft)
-                                .icon_size(IconSize::Small)
-                                .shape(IconButtonShape::Square)
+                    IconButton::new("back-btn", IconName::ArrowLeft)
+                        .icon_size(IconSize::Small)
+                        .shape(IconButtonShape::Square)
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.pop_sub_page(window, cx);
+                        })),
+                )
+                .child(self.render_sub_page_breadcrumbs(window, cx));
+            let actions = div()
+                .flex_shrink_0()
+                .when(
+                    current_sub_page.link.in_json && !cfg!(target_os = "android"),
+                    |this| {
+                        this.child(
+                            Button::new("open-in-settings-file", "Edit in settings.json")
+                                .tab_index(0_isize)
+                                .style(ButtonStyle::OutlinedGhost)
+                                .tooltip(Tooltip::for_action_title_in(
+                                    "Edit in settings.json",
+                                    &OpenCurrentFile,
+                                    &self.focus_handle,
+                                ))
                                 .on_click(cx.listener(|this, _, window, cx| {
-                                    this.pop_sub_page(window, cx);
+                                    this.open_current_settings_file(window, cx);
                                 })),
                         )
-                        .child(self.render_sub_page_breadcrumbs(window, cx)),
+                    },
                 )
-                .child(
-                    div()
-                        .flex_shrink_0()
-                        .when(
-                            current_sub_page.link.in_json && !cfg!(target_os = "android"),
-                            |this| {
-                            this.child(
-                                Button::new("open-in-settings-file", "Edit in settings.json")
-                                    .tab_index(0_isize)
-                                    .style(ButtonStyle::OutlinedGhost)
-                                    .tooltip(Tooltip::for_action_title_in(
-                                        "Edit in settings.json",
-                                        &OpenCurrentFile,
-                                        &self.focus_handle,
-                                    ))
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        this.open_current_settings_file(window, cx);
-                                    })),
-                            )
-                            },
-                        )
-                        .when(is_llm_providers_page, |this| {
-                            this.child(pages::render_add_llm_provider_popover(self, window, cx))
-                        })
-                        .when(is_skills_page, |this| {
-                            this.child(
-                                Button::new("open-skill-creator", "Create Skill")
-                                    .tab_index(0_isize)
-                                    .style(ButtonStyle::OutlinedGhost)
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        this.open_skill_creator_sub_page(
-                                            pages::SkillCreatorOpenMode::Form,
-                                            window,
-                                            cx,
-                                        );
-                                    })),
-                            )
-                        })
-                        .when(is_external_agents_page, |this| {
-                            this.child(pages::render_add_agent_popover(self, window, cx))
-                        })
-                        .when(is_mcp_servers_page, |this| {
-                            this.child(pages::render_add_server_popover(self, window, cx))
-                        }),
-                )
-                .into_any_element();
+                .when(is_llm_providers_page, |this| {
+                    this.child(pages::render_add_llm_provider_popover(self, window, cx))
+                })
+                .when(is_skills_page, |this| {
+                    this.child(
+                        Button::new("open-skill-creator", "Create Skill")
+                            .tab_index(0_isize)
+                            .style(ButtonStyle::OutlinedGhost)
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.open_skill_creator_sub_page(
+                                    pages::SkillCreatorOpenMode::Form,
+                                    window,
+                                    cx,
+                                );
+                            })),
+                    )
+                })
+                .when(is_external_agents_page, |this| {
+                    this.child(pages::render_add_agent_popover(self, window, cx))
+                })
+                .when(is_mcp_servers_page, |this| {
+                    this.child(pages::render_add_server_popover(self, window, cx))
+                });
+
+            page_header = if cfg!(target_os = "android") {
+                v_flex()
+                    .w_full()
+                    .min_w_0()
+                    .gap_2()
+                    .child(breadcrumbs)
+                    .child(h_flex().w_full().justify_end().child(actions))
+                    .into_any_element()
+            } else {
+                h_flex()
+                    .w_full()
+                    .min_w_0()
+                    .justify_between()
+                    .child(breadcrumbs)
+                    .child(actions)
+                    .into_any_element()
+            };
 
             let active_page_render_fn = &current_sub_page.link.render;
             page_content =
