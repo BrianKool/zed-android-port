@@ -42,6 +42,12 @@ impl Editor {
             cx.emit(EditorEvent::InputIgnored { text: text.into() });
             return;
         }
+
+        cx.emit(EditorEvent::InputHandled {
+            utf16_range_to_replace: relative_utf16_range.clone(),
+            text: text.into(),
+        });
+
         if let Some(relative_utf16_range) = relative_utf16_range {
             let selections = self
                 .selections
@@ -525,7 +531,13 @@ impl Editor {
             }
             this.trigger_completion_on_input(&text, trigger_in_words, window, cx);
             refresh_linked_ranges(this, window, cx);
-            this.refresh_edit_prediction(true, false, window, cx);
+            this.refresh_edit_prediction(
+                true,
+                false,
+                EditPredictionRequestTrigger::BufferEdit,
+                window,
+                cx,
+            );
             jsx_tag_auto_close::handle_from(this, initial_buffer_versions, window, cx);
         });
     }
@@ -574,8 +586,9 @@ impl Editor {
                                 },
                                 prevent_auto_indent: false,
                             };
+                            let mut delimiter = None;
 
-                            let comment_delimiter = maybe!({
+                            if let Some(comment_delimiter) = maybe!({
                                 if !selection_is_empty {
                                     return None;
                                 }
@@ -589,9 +602,16 @@ impl Editor {
                                     &buffer,
                                     language,
                                 );
-                            });
-
-                            let doc_delimiter = maybe!({
+                            }) {
+                                delimiter = Some(comment_delimiter);
+                                if let NewlineConfig::Newline {
+                                    extra_line_additional_indent,
+                                    ..
+                                } = &mut newline_config
+                                {
+                                    *extra_line_additional_indent = None;
+                                }
+                            } else if let Some(doc_delimiter) = maybe!({
                                 if !selection_is_empty {
                                     return None;
                                 }
@@ -606,9 +626,9 @@ impl Editor {
                                     language,
                                     &mut newline_config,
                                 );
-                            });
-
-                            let list_delimiter = maybe!({
+                            }) {
+                                delimiter = Some(doc_delimiter);
+                            } else if let Some(list_delimiter) = maybe!({
                                 if !selection_is_empty {
                                     return None;
                                 }
@@ -623,12 +643,11 @@ impl Editor {
                                     language,
                                     &mut newline_config,
                                 );
-                            });
+                            }) {
+                                delimiter = Some(list_delimiter);
+                            }
 
-                            (
-                                comment_delimiter.or(doc_delimiter).or(list_delimiter),
-                                newline_config,
-                            )
+                            (delimiter, newline_config)
                         } else {
                             (
                                 None,
@@ -650,11 +669,11 @@ impl Editor {
                                 let row_start =
                                     buffer.point_to_offset(Point::new(start_point.row, 0));
                                 let tab_size = buffer.language_settings_at(start, cx).tab_size;
-                                let tab_size_indent = IndentSize::spaces(tab_size.get());
-                                let reduced_indent =
-                                    existing_indent.with_delta(Ordering::Less, tab_size_indent);
+                                existing_indent.len = existing_indent
+                                    .len
+                                    .saturating_sub(existing_indent.outdent_len(tab_size));
                                 let mut new_text = String::new();
-                                new_text.extend(reduced_indent.chars());
+                                new_text.extend(existing_indent.chars());
                                 new_text.push_str(continuation);
                                 (row_start, new_text, true)
                             }
@@ -761,7 +780,13 @@ impl Editor {
                 .collect();
 
             this.change_selections(Default::default(), window, cx, |s| s.select(new_selections));
-            this.refresh_edit_prediction(true, false, window, cx);
+            this.refresh_edit_prediction(
+                true,
+                false,
+                EditPredictionRequestTrigger::BufferEdit,
+                window,
+                cx,
+            );
             if let Some(task) = this.trigger_on_type_formatting("\n".to_owned(), window, cx) {
                 task.detach_and_log_err(cx);
             }
@@ -843,7 +868,7 @@ impl Editor {
         }
 
         let mut buffer_edits: HashMap<EntityId, (Entity<Buffer>, Vec<Point>)> = HashMap::default();
-        let mut rows = Vec::new();
+        let mut rows: Vec<Option<u32>> = Vec::new();
         let mut rows_inserted = 0;
 
         for selection in self.selections.all_adjusted(&self.display_snapshot(cx)) {
@@ -854,6 +879,7 @@ impl Editor {
             let Some((buffer_handle, buffer_point)) =
                 self.buffer.read(cx).point_to_buffer_point(point, cx)
             else {
+                rows.push(None);
                 continue;
             };
 
@@ -864,7 +890,7 @@ impl Editor {
                 .push(buffer_point);
 
             rows_inserted += 1;
-            rows.push(row + rows_inserted);
+            rows.push(Some(row + rows_inserted));
         }
 
         self.transact(window, cx, |editor, window, cx| {
@@ -884,21 +910,21 @@ impl Editor {
 
             editor.change_selections(Default::default(), window, cx, |s| {
                 let mut index = 0;
-                s.move_cursors_with(&mut |map, _, _| {
-                    let row = rows[index];
+                s.maybe_move_cursors_with(&mut |map, _, _| {
+                    let row = rows.get(index).copied().flatten();
                     index += 1;
 
-                    let point = Point::new(row, 0);
+                    let point = Point::new(row?, 0);
                     let boundary = map.next_line_boundary(point).1;
                     let clipped = map.clip_point(boundary, Bias::Left);
 
-                    (clipped, SelectionGoal::None)
+                    Some((clipped, SelectionGoal::None))
                 });
             });
 
             let mut indent_edits = Vec::new();
             let multibuffer_snapshot = editor.buffer.read(cx).snapshot(cx);
-            for row in rows {
+            for row in rows.into_iter().flatten() {
                 let indents = multibuffer_snapshot.suggested_indents(row..row + 1, cx);
                 for (row, indent) in indents {
                     if indent.len == 0 {
@@ -970,7 +996,7 @@ impl Editor {
                 s.move_with(&mut |map, selection| {
                     if selection.is_empty() {
                         let mut cursor = if action.ignore_newlines {
-                            movement::previous_word_start(map, selection.head())
+                            movement::previous_word_start(map, selection.head(), true)
                         } else {
                             movement::previous_word_start_or_newline(map, selection.head())
                         };
@@ -1035,7 +1061,7 @@ impl Editor {
                 s.move_with(&mut |map, selection| {
                     if selection.is_empty() {
                         let mut cursor = if action.ignore_newlines {
-                            movement::next_word_end(map, selection.head())
+                            movement::next_word_end(map, selection.head(), true)
                         } else {
                             movement::next_word_end_or_newline(map, selection.head())
                         };
@@ -1123,6 +1149,12 @@ impl Editor {
             return;
         }
         self.transact(window, cx, |this, window, cx| {
+            this.change_selections(Default::default(), window, cx, |s| {
+                s.move_with(&mut |_, selection| {
+                    selection.reversed = false;
+                });
+            });
+
             this.select_to_end_of_line(
                 &SelectToEndOfLine {
                     stop_at_soft_wraps: false,
@@ -1144,6 +1176,12 @@ impl Editor {
             return;
         }
         self.transact(window, cx, |this, window, cx| {
+            this.change_selections(Default::default(), window, cx, |s| {
+                s.move_with(&mut |_, selection| {
+                    selection.reversed = false;
+                });
+            });
+
             this.select_to_end_of_line(
                 &SelectToEndOfLine {
                     stop_at_soft_wraps: false,
@@ -1636,10 +1674,8 @@ impl Editor {
             this.change_selections(Default::default(), window, cx, |s| s.select(selections));
 
             let selections = this.selections.all::<Point>(&this.display_snapshot(cx));
-            let selections_on_single_row = selections.windows(2).all(|selections| {
-                selections[0].start.row == selections[1].start.row
-                    && selections[0].end.row == selections[1].end.row
-                    && selections[0].start.row == selections[0].end.row
+            let selections_on_single_row = selections.array_windows::<2>().all(|[a, b]| {
+                a.start.row == b.start.row && a.end.row == b.end.row && a.start.row == a.end.row
             });
             let selections_selecting = selections
                 .iter()
@@ -2365,11 +2401,11 @@ impl NewlineConfig {
             .range_to_buffer_ranges(range.start..range.end)
             .as_slice()
         {
-            [(buffer_snapshot, range, _)] => (buffer_snapshot.clone(), range.clone()),
+            [(buffer_snapshot, range, _)] => (*buffer_snapshot, range.clone()),
             _ => return false,
         };
         let pair = {
-            let mut result: Option<BracketMatch<usize>> = None;
+            let mut result: Option<BracketMatch> = None;
 
             for pair in buffer
                 .all_bracket_ranges(range.start.0..range.end.0)

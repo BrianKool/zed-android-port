@@ -24,8 +24,7 @@ use std::sync::{
 
 use gpui::{
     AnyElement, App, AppContext as _, Context, DismissEvent, Entity, EventEmitter, FocusHandle,
-    Focusable, Render, ScrollHandle, StatefulInteractiveElement, Tiling, Window, actions,
-    prelude::*,
+    Focusable, Render, ScrollHandle, StatefulInteractiveElement, Window, actions, prelude::*,
 };
 use platform_title_bar::PlatformTitleBar;
 use theme::ActiveTheme;
@@ -523,7 +522,7 @@ impl Render for RuntimePicker {
                     .vertical_scrollbar_for(&self.scroll_handle, window, cx),
             );
 
-        client_side_decorations(picker, window, cx, Tiling::default())
+        client_side_decorations(picker, window, cx)
     }
 }
 

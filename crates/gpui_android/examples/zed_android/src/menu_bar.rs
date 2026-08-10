@@ -253,14 +253,14 @@ fn file_menu_items() -> Vec<MenuEntry> {
         MenuEntry::Action(
             "Open Recent…",
             Box::new(zed_actions::OpenRecent {
-                create_new_window: false,
+                create_new_window: Some(false),
             }),
         ),
         MenuEntry::Action(
             "Open Remote…",
             Box::new(zed_actions::OpenRemote {
                 from_existing_connection: false,
-                create_new_window: false,
+                create_new_window: Some(false),
             }),
         ),
         MenuEntry::Separator,
@@ -425,7 +425,7 @@ fn go_menu_items() -> Vec<MenuEntry> {
         MenuEntry::Separator,
         MenuEntry::Action(
             "Go to Definition",
-            Box::new(editor::actions::GoToDefinition),
+            Box::new(editor::actions::GoToDefinition::default()),
         ),
         MenuEntry::Action(
             "Go to Declaration",

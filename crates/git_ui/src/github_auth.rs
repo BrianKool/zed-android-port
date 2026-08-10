@@ -1,5 +1,5 @@
 use std::{
-    fs::OpenOptions,
+    process::Command,
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -54,23 +54,29 @@ impl GithubUser {
 }
 
 pub(crate) fn ensure_git_identity(user: &GithubUser) -> Result<()> {
-    let config_path = paths::home_dir().join(".gitconfig");
-    if let Some(parent) = config_path.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("create Git config directory {}", parent.display()))?;
-    }
-    OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&config_path)
-        .with_context(|| format!("create Git config {}", config_path.display()))?;
+    let global_config_value = |key: &str| -> Option<String> {
+        let output = Command::new("git")
+            .args(["config", "--global", "--get", key])
+            .output()
+            .ok()?;
+        output
+            .status
+            .success()
+            .then(|| String::from_utf8_lossy(&output.stdout).trim().to_owned())
+            .filter(|value| !value.is_empty())
+    };
+    let set_global_config = |key: &str, value: &str| -> Result<()> {
+        let status = Command::new("git")
+            .args(["config", "--global", key, value])
+            .status()
+            .with_context(|| format!("run git config --global {key}"))?;
+        if !status.success() {
+            bail!("git config --global {key} exited with {status}");
+        }
+        Ok(())
+    };
 
-    let mut config = git2::Config::open(&config_path)
-        .with_context(|| format!("open Git config {}", config_path.display()))?;
-    let has_name = config
-        .get_string("user.name")
-        .ok()
-        .is_some_and(|value| !value.trim().is_empty());
+    let has_name = global_config_value("user.name").is_some();
     if !has_name {
         let name = user
             .name
@@ -78,15 +84,10 @@ pub(crate) fn ensure_git_identity(user: &GithubUser) -> Result<()> {
             .map(str::trim)
             .filter(|name| !name.is_empty())
             .unwrap_or(&user.login);
-        config
-            .set_str("user.name", name)
-            .context("set Git user.name")?;
+        set_global_config("user.name", name)?;
     }
 
-    let has_email = config
-        .get_string("user.email")
-        .ok()
-        .is_some_and(|value| !value.trim().is_empty());
+    let has_email = global_config_value("user.email").is_some();
     if !has_email {
         let email = user
             .email
@@ -95,9 +96,7 @@ pub(crate) fn ensure_git_identity(user: &GithubUser) -> Result<()> {
             .filter(|email| !email.is_empty())
             .map(ToOwned::to_owned)
             .unwrap_or_else(|| format!("{}+{}@users.noreply.github.com", user.id, user.login));
-        config
-            .set_str("user.email", &email)
-            .context("set Git user.email")?;
+        set_global_config("user.email", &email)?;
     }
 
     Ok(())

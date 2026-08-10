@@ -68,3 +68,8 @@ release-notes-draft*.md
 # Local Zdroid build transcripts.
 /crates/gpui_android/examples/zed_android/*.log
 /crates/gpui_android/examples/zed_android/android/*.log
+
+# NixOS integration test state
+.nixos-test-history
+
+.local*

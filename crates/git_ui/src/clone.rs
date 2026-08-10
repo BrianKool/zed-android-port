@@ -1,5 +1,5 @@
 use askpass::{AskPassDelegate, AskPassSession};
-use gpui::{App, AppContext, Context, DismissEvent, WeakEntity, Window};
+use gpui::{App, Context, DismissEvent, WeakEntity, Window};
 use notifications::status_toast::StatusToast;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -8,10 +8,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use ui::{Color, Icon, IconName, IconSize, SharedString};
 use util::ResultExt;
-use workspace::{
-    self, Workspace,
-    notifications::{ErrorMessagePrompt, NotificationId},
-};
+use workspace::{self, Workspace};
 
 /// Outcome of a single `git clone` invocation.
 enum CloneOutcome {
@@ -19,14 +16,13 @@ enum CloneOutcome {
     Cancelled,
 }
 
-struct GitCloneErrorNotification;
-
 fn show_clone_error(workspace: &mut Workspace, message: String, cx: &mut Context<Workspace>) {
-    workspace.show_notification(
-        NotificationId::unique::<GitCloneErrorNotification>(),
-        cx,
-        |cx| cx.new(|cx| ErrorMessagePrompt::new(format!("Git Clone failed: {message}"), cx)),
-    );
+    let toast = StatusToast::new(format!("Git Clone failed: {message}"), cx, |this, _| {
+        this.icon(Icon::new(IconName::XCircle).color(Color::Error))
+            .dismiss_button(true)
+            .auto_dismiss(false)
+    });
+    workspace.toggle_status_toast(toast, cx);
 }
 
 fn redacted_repo_url(url: &str) -> String {

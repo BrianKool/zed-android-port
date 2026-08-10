@@ -4,16 +4,16 @@ use credentials_provider::CredentialsProvider;
 use futures::{AsyncReadExt as _, FutureExt, StreamExt, future::BoxFuture};
 use fuzzy::StringMatch;
 use gpui::{
-    AnyElement, AnyView, App, AsyncApp, Context, DismissEvent, Entity, PromptLevel, SharedString,
+    AnyElement, App, AsyncApp, Context, DismissEvent, Entity, PromptLevel, SharedString,
     Task, TaskExt, Window, px,
 };
-use http_client::{AsyncBody, HttpClient, Method, Request as HttpRequest};
+use http_client::{AsyncBody, CustomHeaders, HttpClient, Method, Request as HttpRequest};
 use language_model::{
     ApiKeyState, AuthenticateError, EnvVar, IconOrSvg, InferencePhase, InferenceProgress,
     LanguageModel, LanguageModelCompletionError, LanguageModelCompletionEvent, LanguageModelId,
     LanguageModelName, LanguageModelProvider, LanguageModelProviderId, LanguageModelProviderName,
     LanguageModelProviderState, LanguageModelRequest, LanguageModelToolChoice,
-    LanguageModelToolSchemaFormat, RateLimiter,
+    LanguageModelToolSchemaFormat, ProviderSettingsView, RateLimiter, SubPageProviderSettings,
 };
 use menu;
 use open_ai::{
@@ -40,7 +40,8 @@ use ui_input::InputField;
 use util::ResultExt;
 
 use crate::provider::open_ai::{
-    OpenAiEventMapper, OpenAiResponseEventMapper, into_open_ai, into_open_ai_response,
+    ChatCompletionMaxTokensParameter, OpenAiEventMapper, OpenAiResponseEventMapper, into_open_ai,
+    into_open_ai_response,
 };
 pub use settings::OpenAiCompatibleAvailableModel as AvailableModel;
 pub use settings::OpenAiCompatibleModelCapabilities as ModelCapabilities;
@@ -49,6 +50,7 @@ pub use settings::OpenAiCompatibleModelCapabilities as ModelCapabilities;
 pub struct OpenAiCompatibleSettings {
     pub api_url: String,
     pub available_models: Vec<AvailableModel>,
+    pub custom_headers: CustomHeaders,
 }
 
 pub struct OpenAiCompatibleLanguageModelProvider {
@@ -212,6 +214,7 @@ fn mobile_model_guidance(spec: &LocalModelSpec) -> &'static str {
 pub fn zdroid_local_settings() -> OpenAiCompatibleSettings {
     OpenAiCompatibleSettings {
         api_url: "http://127.0.0.1:8080/v1".into(),
+        custom_headers: CustomHeaders::default(),
         available_models: local_model_catalog()
             .into_iter()
             .map(|model| AvailableModel {
@@ -228,6 +231,7 @@ pub fn zdroid_local_settings() -> OpenAiCompatibleSettings {
                     prompt_cache_key: false,
                     chat_completions: true,
                     interleaved_reasoning: false,
+                    max_tokens_parameter: false,
                 },
             })
             .collect(),
@@ -663,6 +667,7 @@ fn local_model_available(spec: &LocalModelSpec, runtime: &LocalRuntimeConfig) ->
             prompt_cache_key: false,
             chat_completions: true,
             interleaved_reasoning: false,
+            max_tokens_parameter: false,
         },
     }
 }
@@ -1285,19 +1290,19 @@ impl LanguageModelProvider for OpenAiCompatibleLanguageModelProvider {
         self.state.update(cx, |state, cx| state.authenticate(cx))
     }
 
-    fn configuration_view(
-        &self,
-        _target_agent: language_model::ConfigurationViewTargetAgent,
-        window: &mut Window,
-        cx: &mut App,
-    ) -> AnyView {
-        cx.new(|cx| ConfigurationView::new(self.state.clone(), window, cx))
-            .into()
+    fn settings_view(&self, _cx: &mut App) -> Option<ProviderSettingsView> {
+        let state = self.state.clone();
+        Some(ProviderSettingsView::SubPage(SubPageProviderSettings::new(
+            move |window, cx| {
+                cx.new(|cx| ConfigurationView::new(state.clone(), window, cx))
+                    .into()
+            },
+        )))
     }
 
-    fn reset_credentials(&self, cx: &mut App) -> Task<Result<()>> {
+    fn set_api_key(&self, api_key: Option<String>, cx: &mut App) -> Task<Result<()>> {
         self.state
-            .update(cx, |state, cx| state.set_api_key(None, cx))
+            .update(cx, |state, cx| state.set_api_key(api_key, cx))
     }
 }
 
@@ -1483,7 +1488,7 @@ impl OpenAiCompatibleLanguageModel {
     > {
         let http_client = self.http_client.clone();
 
-        let (api_key, local_api_key, api_url, requires_api_key) =
+        let (api_key, local_api_key, api_url, requires_api_key, custom_headers) =
             self.state.read_with(cx, |state, _cx| {
                 let api_url = &state.settings.api_url;
                 (
@@ -1491,6 +1496,7 @@ impl OpenAiCompatibleLanguageModel {
                     state.local_api_key.clone(),
                     state.settings.api_url.clone(),
                     state.requires_api_key,
+                    state.settings.custom_headers.clone(),
                 )
             });
 
@@ -1512,6 +1518,7 @@ impl OpenAiCompatibleLanguageModel {
                 &api_url,
                 &api_key,
                 request,
+                &custom_headers,
             );
             let response = request.await?;
             Ok(response)
@@ -1528,7 +1535,7 @@ impl OpenAiCompatibleLanguageModel {
     {
         let http_client = self.http_client.clone();
 
-        let (api_key, local_api_key, api_url, requires_api_key) =
+        let (api_key, local_api_key, api_url, requires_api_key, custom_headers) =
             self.state.read_with(cx, |state, _cx| {
                 let api_url = &state.settings.api_url;
                 (
@@ -1536,6 +1543,7 @@ impl OpenAiCompatibleLanguageModel {
                     state.local_api_key.clone(),
                     state.settings.api_url.clone(),
                     state.requires_api_key,
+                    state.settings.custom_headers.clone(),
                 )
             });
 
@@ -1557,13 +1565,66 @@ impl OpenAiCompatibleLanguageModel {
                 &api_url,
                 &api_key,
                 request,
-                vec![],
+                &custom_headers,
             );
             let response = request.await?;
             Ok(response)
         });
 
         async move { Ok(future.await?.boxed()) }.boxed()
+    }
+}
+
+fn default_thinking_reasoning_effort(model: &AvailableModel) -> Option<open_ai::ReasoningEffort> {
+    model
+        .reasoning_effort
+        .filter(|effort| *effort != open_ai::ReasoningEffort::None)
+}
+
+fn chat_completion_max_tokens_parameter(
+    model: &AvailableModel,
+) -> ChatCompletionMaxTokensParameter {
+    if model.capabilities.max_tokens_parameter {
+        ChatCompletionMaxTokensParameter::MaxTokens
+    } else {
+        ChatCompletionMaxTokensParameter::MaxCompletionTokens
+    }
+}
+
+fn selected_thinking_reasoning_effort(
+    request: &LanguageModelRequest,
+) -> Option<open_ai::ReasoningEffort> {
+    request
+        .thinking_effort
+        .as_deref()
+        .and_then(|effort| effort.parse::<open_ai::ReasoningEffort>().ok())
+        .filter(|effort| *effort != open_ai::ReasoningEffort::None)
+}
+
+fn chat_completion_reasoning_effort(
+    request: &LanguageModelRequest,
+    model: &AvailableModel,
+) -> Option<open_ai::ReasoningEffort> {
+    if model.reasoning_effort == Some(open_ai::ReasoningEffort::None) {
+        return Some(open_ai::ReasoningEffort::None);
+    }
+    if request.thinking_allowed {
+        selected_thinking_reasoning_effort(request)
+            .or_else(|| default_thinking_reasoning_effort(model))
+    } else if model.reasoning_effort.is_some() {
+        Some(open_ai::ReasoningEffort::None)
+    } else {
+        None
+    }
+}
+
+fn disable_response_thinking_for_none_effort(
+    request: &mut LanguageModelRequest,
+    model: &AvailableModel,
+) {
+    if model.reasoning_effort == Some(open_ai::ReasoningEffort::None) {
+        request.thinking_allowed = false;
+        request.thinking_effort = None;
     }
 }
 
@@ -1631,7 +1692,7 @@ impl LanguageModel for OpenAiCompatibleLanguageModel {
 
     fn stream_completion(
         &self,
-        request: LanguageModelRequest,
+        mut request: LanguageModelRequest,
         cx: &AsyncApp,
     ) -> BoxFuture<
         'static,
@@ -1643,6 +1704,10 @@ impl LanguageModel for OpenAiCompatibleLanguageModel {
             LanguageModelCompletionError,
         >,
     > {
+        if !self.supports_fast_mode() {
+            request.speed = None;
+        }
+
         if self.model.capabilities.chat_completions {
             let local_metrics = (self.provider_id.0.as_ref() == "zdroid-local").then(|| {
                 self.state.read_with(cx, |state, _cx| {
@@ -1653,15 +1718,20 @@ impl LanguageModel for OpenAiCompatibleLanguageModel {
                     )
                 })
             });
-            let request = into_open_ai(
+            let reasoning_effort = chat_completion_reasoning_effort(&request, &self.model);
+            let request = match into_open_ai(
                 request,
                 &self.model.name,
                 self.model.capabilities.parallel_tool_calls,
                 self.model.capabilities.prompt_cache_key,
                 self.max_output_tokens(),
-                self.model.reasoning_effort,
+                chat_completion_max_tokens_parameter(&self.model),
+                reasoning_effort,
                 self.model.capabilities.interleaved_reasoning,
-            );
+            ) {
+                Ok(request) => request,
+                Err(error) => return async move { Err(error.into()) }.boxed(),
+            };
             let completions = self.stream_completion(request, cx);
             async move {
                 let mapper = OpenAiEventMapper::new();
@@ -1679,20 +1749,24 @@ impl LanguageModel for OpenAiCompatibleLanguageModel {
             }
             .boxed()
         } else {
-            let request = into_open_ai_response(
+            disable_response_thinking_for_none_effort(&mut request, &self.model);
+            let request = match into_open_ai_response(
                 request,
                 &self.model.name,
                 self.model.capabilities.parallel_tool_calls,
                 self.model.capabilities.prompt_cache_key,
                 self.max_output_tokens(),
-                self.model
-                    .reasoning_effort
-                    .filter(|effort| *effort != open_ai::ReasoningEffort::None),
-                self.model.reasoning_effort == Some(open_ai::ReasoningEffort::None),
-            );
+                default_thinking_reasoning_effort(&self.model),
+                self.model.reasoning_effort.is_some(),
+                &self.provider_id,
+            ) {
+                Ok(request) => request,
+                Err(error) => return async move { Err(error.into()) }.boxed(),
+            };
             let completions = self.stream_response(request, cx);
+            let compaction_state_owner = self.provider_id.clone();
             async move {
-                let mapper = OpenAiResponseEventMapper::new();
+                let mapper = OpenAiResponseEventMapper::new(compaction_state_owner);
                 Ok(mapper.map_stream(completions.await?).boxed())
             }
             .boxed()
@@ -1746,6 +1820,10 @@ impl LocalModelPickerDelegate {
 
 impl PickerDelegate for LocalModelPickerDelegate {
     type ListItem = AnyElement;
+
+    fn name() -> &'static str {
+        "LocalModelPicker"
+    }
 
     fn match_count(&self) -> usize {
         self.filtered_models.len()
@@ -2413,8 +2491,8 @@ impl Render for ConfigurationView {
                             );
                             Picker::uniform_list(delegate, window, cx)
                                 .show_scrollbar(true)
-                                .width(rems(22.))
-                                .max_height(Some(rems(22.).into()))
+                                .initial_width(rems(22.))
+                                .max_height(rems(22.))
                         }))
                     })
                     .anchor(gpui::Anchor::TopLeft)
