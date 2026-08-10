@@ -9,6 +9,8 @@ use strum::{EnumMessage, IntoDiscriminant as _, VariantArray};
 use theme::SystemAppearance;
 use ui::IntoElement;
 
+#[cfg(target_os = "android")]
+use crate::pages::render_local_llm_page;
 use crate::{
     ActionLink, DynamicItem, PROJECT, SettingField, SettingItem, SettingsFieldMetadata,
     SettingsPage, SettingsPageItem, StaticInfo, SubPageLink, USER, active_language,
@@ -8365,8 +8367,8 @@ fn collaboration_page() -> SettingsPage {
 }
 
 fn ai_page(cx: &App) -> SettingsPage {
-    fn general_section() -> [SettingsPageItem; 6] {
-        [
+    fn general_section() -> Vec<SettingsPageItem> {
+        let mut items = vec![
             SettingsPageItem::SectionHeader("General"),
             SettingsPageItem::SettingItem(SettingItem {
                 title: "Disable AI",
@@ -8396,6 +8398,34 @@ fn ai_page(cx: &App) -> SettingsPage {
                 metadata: None,
                 files: USER,
             }),
+        ];
+
+        #[cfg(target_os = "android")]
+        items.push(SettingsPageItem::SubPageLink(SubPageLink {
+            title: "Local LLM".into(),
+            r#type: Default::default(),
+            json_path: Some("local_llm"),
+            description: Some(
+                "Download, import, configure, run, and remove local GGUF models on this device."
+                    .into(),
+            ),
+            search_aliases: &[
+                "gguf",
+                "llama.cpp",
+                "local ai",
+                "local model",
+                "offline ai",
+                "qwen",
+                "gemma",
+                "deepseek",
+                "vulkan",
+            ],
+            in_json: false,
+            files: USER,
+            render: render_local_llm_page,
+        }));
+
+        items.extend([
             SettingsPageItem::SubPageLink(SubPageLink {
                 title: "LLM Providers".into(),
                 r#type: Default::default(),
@@ -8471,7 +8501,9 @@ fn ai_page(cx: &App) -> SettingsPage {
                 files: USER,
                 render: render_mcp_servers_page,
             }),
-        ]
+        ]);
+
+        items
     }
 
     fn agent_configuration_section(_cx: &App) -> Box<[SettingsPageItem]> {

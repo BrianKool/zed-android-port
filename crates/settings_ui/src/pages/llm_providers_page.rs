@@ -454,8 +454,42 @@ fn render_provider_config_sub_page(
     let Some(provider_id) = settings_window.configuring_provider.clone() else {
         return div().into_any_element();
     };
+
+    render_provider_configuration(settings_window, provider_id, scroll_handle, window, cx)
+}
+
+#[cfg(target_os = "android")]
+pub(crate) fn render_local_llm_page(
+    settings_window: &SettingsWindow,
+    scroll_handle: &ScrollHandle,
+    window: &mut Window,
+    cx: &mut Context<SettingsWindow>,
+) -> AnyElement {
+    render_provider_configuration(
+        settings_window,
+        LanguageModelProviderId("zdroid-local".into()),
+        scroll_handle,
+        window,
+        cx,
+    )
+}
+
+fn render_provider_configuration(
+    settings_window: &SettingsWindow,
+    provider_id: LanguageModelProviderId,
+    scroll_handle: &ScrollHandle,
+    window: &mut Window,
+    cx: &mut Context<SettingsWindow>,
+) -> AnyElement {
     let Some(provider) = LanguageModelRegistry::read_global(cx).provider(&provider_id) else {
-        return div().into_any_element();
+        return v_flex()
+            .size_full()
+            .px_8()
+            .pt_2p5()
+            .child(Label::new(
+                "This provider is not available in the current runtime.",
+            ))
+            .into_any_element();
     };
 
     let Some(create_view) =
@@ -467,7 +501,12 @@ fn render_provider_config_sub_page(
                 ProviderSettingsView::ApiKey(_) => None,
             })
     else {
-        return div().into_any_element();
+        return v_flex()
+            .size_full()
+            .px_8()
+            .pt_2p5()
+            .child(Label::new("This provider has no configurable settings."))
+            .into_any_element();
     };
     let view =
         get_or_create_configuration_view(settings_window, &provider_id, create_view, window, cx);
