@@ -6235,6 +6235,67 @@ impl Sidebar {
         .detach();
     }
 
+    fn confirm_delete_thread(
+        &mut self,
+        title: SharedString,
+        metadata: ThreadMetadata,
+        workspace: Option<Entity<Workspace>>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        cx.spawn_in(window, async move |this, cx| {
+            let answer = cx
+                .prompt(
+                    gpui::PromptLevel::Warning,
+                    "Delete this conversation?",
+                    Some(&format!(
+                        "\"{title}\" will be removed from this device. Project files will not be changed."
+                    )),
+                    &["Delete", "Cancel"],
+                )
+                .await
+                .ok();
+
+            if answer != Some(0) {
+                return;
+            }
+
+            this.update_in(cx, |this, window, cx| {
+                let thread_id = metadata.thread_id;
+                let removed_from_panel = workspace.as_ref().is_some_and(|workspace| {
+                    workspace.update(cx, |workspace, cx| {
+                        if let Some(panel) = workspace.panel::<AgentPanel>(cx) {
+                            panel.update(cx, |panel, cx| {
+                                panel.remove_thread(thread_id, window, cx);
+                            });
+                            true
+                        } else {
+                            false
+                        }
+                    })
+                });
+
+                if !removed_from_panel {
+                    ThreadMetadataStore::global(cx).update(cx, |store, cx| {
+                        store.delete(thread_id, cx);
+                    });
+                }
+
+                if matches!(
+                    &this.active_entry,
+                    Some(ActiveEntry::Thread { thread_id: active_id, .. }) if *active_id == thread_id
+                ) {
+                    this.active_entry = None;
+                }
+                this.selection = None;
+                this.thread_last_accessed.remove(&thread_id);
+                this.update_entries(cx);
+            })
+            .ok();
+        })
+        .detach();
+    }
+
     fn render_thread(
         &self,
         ix: usize,
@@ -6261,6 +6322,11 @@ impl Sidebar {
 
         let thread_id_for_actions = thread.metadata.thread_id;
         let session_id_for_delete = thread.metadata.session_id.clone();
+        let metadata_for_delete = thread.metadata.clone();
+        let workspace_for_delete = match &thread.workspace {
+            ThreadEntryWorkspace::Open(workspace) => Some(workspace.clone()),
+            ThreadEntryWorkspace::Closed { .. } => None,
+        };
         let focus_handle = self.focus_handle.clone();
         let title_editor = self.thread_rename_editor.clone();
 
@@ -6350,102 +6416,133 @@ impl Sidebar {
                         .child(title_editor),
                 )
             })
-            .when(is_hovered && !is_renaming, |this| {
-                let rename_button = IconButton::new(("rename-thread", ix), IconName::Pencil)
-                    .icon_size(IconSize::Small)
-                    .tooltip({
-                        let focus_handle = focus_handle.clone();
-                        move |_window, cx| {
-                            Tooltip::for_action_in(
-                                "Rename Thread",
-                                &RenameSelectedThread,
-                                &focus_handle,
-                                cx,
-                            )
-                        }
-                    })
-                    .on_click({
-                        let title = title.clone();
-                        cx.listener(move |this, _, window, cx| {
-                            this.start_renaming_thread(
-                                ix,
-                                thread_id_for_actions,
-                                title.clone(),
-                                window,
-                                cx,
-                            );
+            .when(
+                (is_hovered || (cfg!(target_os = "android") && is_focused)) && !is_renaming,
+                |this| {
+                    let rename_button = IconButton::new(("rename-thread", ix), IconName::Pencil)
+                        .icon_size(IconSize::Small)
+                        .tooltip({
+                            let focus_handle = focus_handle.clone();
+                            move |_window, cx| {
+                                Tooltip::for_action_in(
+                                    "Rename Thread",
+                                    &RenameSelectedThread,
+                                    &focus_handle,
+                                    cx,
+                                )
+                            }
                         })
-                    });
+                        .on_click({
+                            let title = title.clone();
+                            cx.listener(move |this, _, window, cx| {
+                                this.start_renaming_thread(
+                                    ix,
+                                    thread_id_for_actions,
+                                    title.clone(),
+                                    window,
+                                    cx,
+                                );
+                            })
+                        });
 
-                let contextual_action: Option<AnyElement> = if is_running {
-                    Some(
-                        IconButton::new("stop-thread", IconName::Stop)
-                            .icon_size(IconSize::Small)
-                            .icon_color(Color::Error)
-                            .style(ButtonStyle::Tinted(TintColor::Error))
-                            .tooltip(Tooltip::text("Stop Generation"))
-                            .on_click(cx.listener(move |this, _, _window, cx| {
-                                this.stop_thread(&thread_id_for_actions, cx);
-                            }))
-                            .into_any_element(),
-                    )
-                } else {
-                    match thread.draft {
-                        Some(DraftKind::Empty) => None,
-                        Some(DraftKind::WithContent) => Some(
-                            IconButton::new("discard_thread", IconName::Close)
+                    let contextual_action: Option<AnyElement> = if is_running {
+                        Some(
+                            IconButton::new("stop-thread", IconName::Stop)
                                 .icon_size(IconSize::Small)
-                                .tooltip(Tooltip::text("Discard Draft"))
-                                .on_click({
-                                    let thread_workspace = thread_workspace.clone();
-                                    cx.listener(move |this, _, window, cx| {
-                                        this.remove_draft(
-                                            thread_id_for_actions,
-                                            &thread_workspace,
-                                            window,
-                                            cx,
-                                        );
-                                    })
-                                })
+                                .icon_color(Color::Error)
+                                .style(ButtonStyle::Tinted(TintColor::Error))
+                                .tooltip(Tooltip::text("Stop Generation"))
+                                .on_click(cx.listener(move |this, _, _window, cx| {
+                                    this.stop_thread(&thread_id_for_actions, cx);
+                                }))
                                 .into_any_element(),
-                        ),
-                        None => Some(
-                            IconButton::new("archive-thread", IconName::Archive)
-                                .icon_size(IconSize::Small)
-                                .tooltip({
-                                    let focus_handle = focus_handle.clone();
-                                    move |_window, cx| {
-                                        Tooltip::for_action_in(
-                                            "Archive Thread",
-                                            &ArchiveSelectedThread,
-                                            &focus_handle,
-                                            cx,
-                                        )
-                                    }
-                                })
-                                .on_click({
-                                    let session_id = session_id_for_delete.clone();
-                                    cx.listener(move |this, _, window, cx| {
-                                        if let Some(ref session_id) = session_id {
-                                            this.archive_thread(session_id, window, cx);
+                        )
+                    } else {
+                        match thread.draft {
+                            Some(DraftKind::Empty) => None,
+                            Some(DraftKind::WithContent) => Some(
+                                IconButton::new("discard_thread", IconName::Close)
+                                    .icon_size(IconSize::Small)
+                                    .tooltip(Tooltip::text("Discard Draft"))
+                                    .on_click({
+                                        let thread_workspace = thread_workspace.clone();
+                                        cx.listener(move |this, _, window, cx| {
+                                            this.remove_draft(
+                                                thread_id_for_actions,
+                                                &thread_workspace,
+                                                window,
+                                                cx,
+                                            );
+                                        })
+                                    })
+                                    .into_any_element(),
+                            ),
+                            None => Some(
+                                IconButton::new("archive-thread", IconName::Archive)
+                                    .icon_size(IconSize::Small)
+                                    .tooltip({
+                                        let focus_handle = focus_handle.clone();
+                                        move |_window, cx| {
+                                            Tooltip::for_action_in(
+                                                "Archive Thread",
+                                                &ArchiveSelectedThread,
+                                                &focus_handle,
+                                                cx,
+                                            )
                                         }
                                     })
-                                })
-                                .into_any_element(),
-                        ),
-                    }
-                };
+                                    .on_click({
+                                        let session_id = session_id_for_delete.clone();
+                                        cx.listener(move |this, _, window, cx| {
+                                            if let Some(ref session_id) = session_id {
+                                                this.archive_thread(session_id, window, cx);
+                                            }
+                                        })
+                                    })
+                                    .into_any_element(),
+                            ),
+                        }
+                    };
 
-                this.action_slot(
-                    h_flex()
-                        .gap_0p5()
-                        .child(rename_button)
-                        .when_some(contextual_action, |this, action| this.child(action)),
-                )
-            })
+                    let delete_button = (!is_running && !is_draft).then(|| {
+                        IconButton::new(("delete-thread", ix), IconName::Trash)
+                            .icon_size(IconSize::Small)
+                            .icon_color(Color::Muted)
+                            .tooltip(Tooltip::text("Delete Thread"))
+                            .on_click({
+                                let title = title.clone();
+                                let metadata = metadata_for_delete.clone();
+                                let workspace = workspace_for_delete.clone();
+                                cx.listener(move |this, _, window, cx| {
+                                    this.confirm_delete_thread(
+                                        title.clone(),
+                                        metadata.clone(),
+                                        workspace.clone(),
+                                        window,
+                                        cx,
+                                    );
+                                })
+                            })
+                    });
+
+                    this.action_slot(
+                        h_flex()
+                            .gap_0p5()
+                            .child(rename_button)
+                            .when_some(contextual_action, |this, action| this.child(action))
+                            .when_some(delete_button, |this, action| this.child(action)),
+                    )
+                },
+            )
             .on_click({
                 let thread_workspace = thread_workspace.clone();
                 cx.listener(move |this, _, window, cx| {
+                    if window.last_input_was_touch() && this.selection != Some(ix) {
+                        this.selection = Some(ix);
+                        this.focus_handle.focus(window, cx);
+                        cx.notify();
+                        return;
+                    }
                     this.selection = None;
                     match &thread_workspace {
                         ThreadEntryWorkspace::Open(workspace) => {
@@ -6502,6 +6599,8 @@ impl Sidebar {
                     let markdown_title = markdown_title.clone();
                     let rename_title = rename_title.clone();
                     let folder_paths = folder_paths.clone();
+                    let metadata_for_delete = metadata_for_delete.clone();
+                    let workspace_for_delete = workspace_for_delete.clone();
                     ContextMenu::build(_window, cx, move |mut menu, _window, _cx| {
                         menu = menu.entry("Rename Title", None, {
                             let sidebar = sidebar.clone();
@@ -6581,12 +6680,33 @@ impl Sidebar {
                             });
                         }
 
-                        menu.separator().entry("Archive Thread", None, {
+                        menu = menu.separator().entry("Archive Thread", None, {
                             let session_id = session_id.clone();
+                            let sidebar = sidebar.clone();
                             move |window, cx| {
                                 sidebar
                                     .update(cx, |sidebar, cx| {
                                         sidebar.archive_thread(&session_id, window, cx);
+                                    })
+                                    .ok();
+                            }
+                        });
+
+                        let delete_metadata = metadata_for_delete.clone();
+                        let delete_workspace = workspace_for_delete.clone();
+                        menu.entry("Delete Thread", None, {
+                            let sidebar = sidebar.clone();
+                            let delete_title = rename_title.clone();
+                            move |window, cx| {
+                                sidebar
+                                    .update(cx, |sidebar, cx| {
+                                        sidebar.confirm_delete_thread(
+                                            delete_title.clone(),
+                                            delete_metadata.clone(),
+                                            delete_workspace.clone(),
+                                            window,
+                                            cx,
+                                        );
                                     })
                                     .ok();
                             }
