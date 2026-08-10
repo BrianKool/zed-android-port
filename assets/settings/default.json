@@ -1114,7 +1114,7 @@
     "default_profile": "write",
     "profiles": {
       "write": {
-        "name": "Write",
+        "name": "Agent",
         "enable_all_context_servers": true,
         "tools": {
           "copy_path": true,

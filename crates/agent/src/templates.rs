@@ -49,6 +49,21 @@ impl Template for SystemPromptTemplate<'_> {
     const TEMPLATE_NAME: &'static str = "system_prompt.hbs";
 }
 
+#[derive(Serialize)]
+pub struct MobileLocalSystemPromptTemplate<'a> {
+    #[serde(flatten)]
+    pub project: &'a prompt_store::ProjectContext,
+    pub available_tools: Vec<SharedString>,
+    pub model_name: Option<String>,
+    pub date: String,
+    pub user_agents_md: Option<SharedString>,
+    pub minimal: bool,
+}
+
+impl Template for MobileLocalSystemPromptTemplate<'_> {
+    const TEMPLATE_NAME: &'static str = "mobile_local_system_prompt.hbs";
+}
+
 /// Handlebars helper for checking if an item is in a list
 fn contains(
     h: &handlebars::Helper,
@@ -149,5 +164,23 @@ mod tests {
         let templates = Templates::new();
         let rendered = template.render(&templates).unwrap();
         assert!(!rendered.contains("### Personal `AGENTS.md`"));
+    }
+
+    #[test]
+    fn test_mobile_local_minimal_prompt_stays_compact() {
+        let project = prompt_store::ProjectContext::default();
+        let template = MobileLocalSystemPromptTemplate {
+            project: &project,
+            available_tools: Vec::new(),
+            model_name: Some("local-model".to_string()),
+            date: "2026-01-01".to_string(),
+            user_agents_md: None,
+            minimal: true,
+        };
+        let rendered = template.render(&Templates::new()).unwrap();
+
+        assert!(rendered.contains("lightweight local assistant"));
+        assert!(!rendered.contains("Project Rules"));
+        assert!(rendered.len() < 600);
     }
 }

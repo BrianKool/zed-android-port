@@ -3910,6 +3910,9 @@ impl ThreadView {
         let max = crate::humanize_token_count(usage.max_tokens);
         let input_tokens_label = crate::humanize_token_count(usage.input_tokens);
         let output_tokens_label = crate::humanize_token_count(usage.output_tokens);
+        let visible_input_tokens_label = input_tokens_label.clone();
+        let visible_output_tokens_label = output_tokens_label.clone();
+        let visible_total_tokens_label = format!("{used} / {max}");
 
         let progress_ratio = if usage.max_tokens > 0 {
             usage.used_tokens as f32 / usage.max_tokens as f32
@@ -4024,6 +4027,11 @@ impl ThreadView {
                                 )
                                 .stroke_width(stroke_width)
                                 .progress_color(progress_color(input_ratio)),
+                            )
+                            .child(
+                                Label::new(visible_input_tokens_label)
+                                    .size(LabelSize::XSmall)
+                                    .color(Color::Muted),
                             ),
                     )
                     .child(
@@ -4043,6 +4051,11 @@ impl ThreadView {
                                 )
                                 .stroke_width(stroke_width)
                                 .progress_color(progress_color(output_ratio)),
+                            )
+                            .child(
+                                Label::new(visible_output_tokens_label)
+                                    .size(LabelSize::XSmall)
+                                    .color(Color::Muted),
                             ),
                     )
                     .hoverable_tooltip(build_tooltip)
@@ -4063,6 +4076,11 @@ impl ThreadView {
                         )
                         .stroke_width(stroke_width)
                         .progress_color(progress_color(progress_ratio)),
+                    )
+                    .child(
+                        Label::new(visible_total_tokens_label)
+                            .size(LabelSize::XSmall)
+                            .color(Color::Muted),
                     )
                     .hoverable_tooltip(build_tooltip)
                     .into_any_element(),
@@ -5085,7 +5103,16 @@ impl ThreadView {
                 is_subagent_output: _,
             }) => {
                 let mut is_blank = true;
-                let is_last = entry_ix + 1 == total_entries;
+                let markdown_blocks = chunks
+                    .iter()
+                    .filter_map(|chunk| match chunk {
+                        AssistantMessageChunk::Message { block } => block.markdown().cloned(),
+                        AssistantMessageChunk::Thought { block } => block.markdown().cloned(),
+                    })
+                    .collect::<Vec<_>>();
+                let copy_fallback =
+                    Self::get_agent_message_content(self.thread.read(cx).entries(), entry_ix, cx)
+                        .unwrap_or_default();
 
                 let style = MarkdownStyle::themed(MarkdownFont::Agent, window, cx);
                 let message_body = v_flex()
@@ -5135,11 +5162,31 @@ impl ThreadView {
                 } else {
                     v_flex()
                         .px_5()
-                        .py_1p5()
-                        .when(is_last, |this| this.pb_4())
+                        .pt_3()
+                        .pb_4()
                         .w_full()
                         .text_ui(cx)
                         .child(self.render_message_context_menu(entry_ix, message_body, cx))
+                        .child(
+                            h_flex().w_full().justify_end().child(
+                                CopyButton::new(
+                                    ("copy-agent-response", entry_ix),
+                                    copy_fallback.clone(),
+                                )
+                                .icon_size(IconSize::XSmall)
+                                .tooltip_label("Copy selection or response")
+                                .custom_on_click(
+                                    move |_window, cx| {
+                                        let text = markdown_blocks
+                                            .iter()
+                                            .find_map(|markdown| markdown.read(cx).selected_text())
+                                            .unwrap_or_else(|| copy_fallback.clone());
+                                        cx.stop_propagation();
+                                        cx.write_to_clipboard(ClipboardItem::new_string(text));
+                                    },
+                                ),
+                            ),
+                        )
                         .when_some(
                             self.entry_view_state
                                 .read(cx)
@@ -5338,14 +5385,14 @@ impl ThreadView {
             return Empty.into_any_element();
         }
 
-        let open_as_markdown = IconButton::new("open-as-markdown", IconName::FileMarkdown)
+        let open_as_markdown = IconButton::new("export-conversation", IconName::Download)
             .shape(ui::IconButtonShape::Square)
             .icon_size(IconSize::Small)
             .icon_color(Color::Ignored)
-            .tooltip(Tooltip::text("Open Thread as Markdown"))
+            .tooltip(Tooltip::text("Export Conversation as Markdown"))
             .on_click(cx.listener(move |this, _, window, cx| {
                 if let Some(workspace) = this.workspace.upgrade() {
-                    this.open_thread_as_markdown(workspace, window, cx)
+                    this.export_thread_as_markdown(workspace, window, cx)
                         .detach_and_log_err(cx);
                 }
             }));
@@ -5370,6 +5417,30 @@ impl ThreadView {
             }));
 
         let show_stats = AgentSettings::get_global(cx).show_turn_stats;
+        let local_usage_label = self
+            .as_native_thread(cx)
+            .and_then(|thread| {
+                let thread = thread.read(cx);
+                let is_local = thread
+                    .model()
+                    .is_some_and(|model| model.provider_id().0.as_ref() == "zdroid-local");
+                is_local
+                    .then(|| thread.latest_inference_progress())
+                    .flatten()
+            })
+            .filter(|progress| matches!(progress.phase, language_model::InferencePhase::Complete))
+            .map(|progress| {
+                Label::new(format!(
+                    "Prompt {} · Output {} · Total {}",
+                    progress.prompt_tokens,
+                    progress.output_tokens,
+                    progress
+                        .prompt_tokens
+                        .saturating_add(progress.output_tokens)
+                ))
+                .size(LabelSize::Small)
+                .color(Color::Muted)
+            });
         let last_turn_clock = show_stats
             .then(|| {
                 self.turn_fields
@@ -5406,12 +5477,15 @@ impl ThreadView {
             .hover(|s| s.opacity(1.))
             .justify_end()
             .when(
-                last_turn_tokens_label.is_some() || last_turn_clock.is_some(),
+                local_usage_label.is_some()
+                    || last_turn_tokens_label.is_some()
+                    || last_turn_clock.is_some(),
                 |this| {
                     this.child(
                         h_flex()
                             .gap_1()
                             .px_1()
+                            .when_some(local_usage_label, |this, label| this.child(label))
                             .when_some(last_turn_tokens_label, |this, label| this.child(label))
                             .when_some(last_turn_clock, |this, label| this.child(label)),
                     )
@@ -5729,6 +5803,22 @@ impl ThreadView {
         })
     }
 
+    fn export_thread_as_markdown(
+        &self,
+        workspace: Entity<Workspace>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Task<Result<()>> {
+        let open_task = self.open_thread_as_markdown(workspace.clone(), window, cx);
+        window.spawn(cx, async move |cx| {
+            open_task.await?;
+            workspace.update_in(cx, |_workspace, window, cx| {
+                window.dispatch_action(Box::new(workspace::SaveAs), cx);
+            })?;
+            anyhow::Ok(())
+        })
+    }
+
     pub(crate) fn sync_editor_mode_for_empty_state(&mut self, cx: &mut Context<Self>) {
         let has_messages = self.list_state.item_count() > 0;
         let v2_empty_state = !has_messages;
@@ -5767,7 +5857,47 @@ impl ThreadView {
 
     fn render_generating(&self, confirmation: bool, cx: &App) -> impl IntoElement {
         let show_stats = AgentSettings::get_global(cx).show_turn_stats;
-        let elapsed_label = show_stats
+        let native_thread = self.as_native_thread(cx);
+        let is_local_model = native_thread.as_ref().is_some_and(|thread| {
+            thread
+                .read(cx)
+                .model()
+                .is_some_and(|model| model.provider_id().0.as_ref() == "zdroid-local")
+        });
+        let local_progress_label = native_thread
+            .as_ref()
+            .and_then(|thread| thread.read(cx).latest_inference_progress())
+            .map(|progress| {
+                let rate = progress
+                    .tokens_per_second
+                    .map(|rate| format!(" · {rate:.1} tok/s"))
+                    .unwrap_or_default();
+                match progress.phase {
+                    language_model::InferencePhase::Prefilling => format!(
+                        "Loading Zed Agent context · Prefill {} / {} · Limit {}{}",
+                        progress.prompt_tokens,
+                        progress.context_tokens,
+                        progress.context_limit,
+                        rate
+                    ),
+                    language_model::InferencePhase::Generating => format!(
+                        "Context {} / {} · Output {}{}",
+                        progress.context_tokens,
+                        progress.context_limit,
+                        progress.output_tokens,
+                        rate
+                    ),
+                    language_model::InferencePhase::Complete => format!(
+                        "Prompt {} · Output {} · Total {}",
+                        progress.prompt_tokens,
+                        progress.output_tokens,
+                        progress
+                            .prompt_tokens
+                            .saturating_add(progress.output_tokens)
+                    ),
+                }
+            });
+        let elapsed_label = (show_stats || is_local_model)
             .then(|| {
                 self.turn_fields.turn_started_at.and_then(|started_at| {
                     let elapsed = started_at.elapsed();
@@ -5825,6 +5955,17 @@ impl ThreadView {
                             .justify_center()
                             .child(GeneratingSpinnerElement::new(SpinnerVariant::Dots)),
                     )
+                    .when(is_local_model, |this| {
+                        this.child(
+                            Label::new(
+                                local_progress_label.unwrap_or_else(|| {
+                                    "Local model is preparing context".to_string()
+                                }),
+                            )
+                            .size(LabelSize::Small)
+                            .color(Color::Muted),
+                        )
+                    })
                 }
             })
             .when_some(elapsed_label, |this, elapsed| {

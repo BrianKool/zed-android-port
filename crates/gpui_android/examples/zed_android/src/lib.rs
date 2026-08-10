@@ -61,44 +61,57 @@ impl AndroidDnsResolver {
         let mut env = vm
             .attach_current_thread()
             .context("attach thread for Android DNS")?;
-        let host = env.new_string(hostname).context("create DNS hostname")?;
-        let result = env
-            .call_static_method(
-                "java/net/InetAddress",
-                "getAllByName",
-                "(Ljava/lang/String;)[Ljava/net/InetAddress;",
-                &[JValue::Object(&JObject::from(host))],
-            )
-            .context("InetAddress.getAllByName")?
-            .l()
-            .context("DNS result is not an object")?;
-        let addresses = JObjectArray::from(result);
-        let length = env
-            .get_array_length(&addresses)
-            .context("DNS result length")?;
-        let mut resolved = Vec::with_capacity(length as usize);
-        for index in 0..length {
-            let address = env
-                .get_object_array_element(&addresses, index)
-                .context("read DNS result")?;
-            let value = env
-                .call_method(&address, "getHostAddress", "()Ljava/lang/String;", &[])
-                .context("InetAddress.getHostAddress")?
+        let result = (|| -> Result<Vec<SocketAddr>> {
+            let host = env.new_string(hostname).context("create DNS hostname")?;
+            let result = env
+                .call_static_method(
+                    "java/net/InetAddress",
+                    "getAllByName",
+                    "(Ljava/lang/String;)[Ljava/net/InetAddress;",
+                    &[JValue::Object(&JObject::from(host))],
+                )
+                .context("InetAddress.getAllByName")?
                 .l()
-                .context("DNS address is not a string")?;
-            let value: String = env
-                .get_string(&JString::from(value))
-                .context("decode DNS address")?
-                .into();
-            if let Ok(ip) = value.parse::<IpAddr>() {
-                resolved.push(SocketAddr::new(ip, 0));
+                .context("DNS result is not an object")?;
+            let addresses = JObjectArray::from(result);
+            let length = env
+                .get_array_length(&addresses)
+                .context("DNS result length")?;
+            let mut resolved = Vec::with_capacity(length as usize);
+            for index in 0..length {
+                let address = env
+                    .get_object_array_element(&addresses, index)
+                    .context("read DNS result")?;
+                let value = env
+                    .call_method(&address, "getHostAddress", "()Ljava/lang/String;", &[])
+                    .context("InetAddress.getHostAddress")?
+                    .l()
+                    .context("DNS address is not a string")?;
+                let value: String = env
+                    .get_string(&JString::from(value))
+                    .context("decode DNS address")?
+                    .into();
+                if let Ok(ip) = value.parse::<IpAddr>() {
+                    resolved.push(SocketAddr::new(ip, 0));
+                }
             }
+            anyhow::ensure!(
+                !resolved.is_empty(),
+                "Android returned no addresses for {hostname}"
+            );
+            Ok(resolved)
+        })();
+
+        // JNI leaves Java exceptions pending after calls such as
+        // InetAddress.getAllByName. Detaching a thread with an uncleared
+        // UnknownHostException makes Android treat it as uncaught and kills
+        // the whole app. DNS failures are ordinary request errors, especially
+        // while offline, so always clear the Java exception before returning.
+        if result.is_err() && env.exception_check().unwrap_or(false) {
+            let _ = env.exception_clear();
         }
-        anyhow::ensure!(
-            !resolved.is_empty(),
-            "Android returned no addresses for {hostname}"
-        );
-        Ok(resolved)
+
+        result
     }
 }
 
@@ -380,7 +393,9 @@ fn ensure_managed_npm_acp_launcher(
 ) -> Result<PathBuf> {
     let (_, home) = zdroid_bootstrap_paths()?;
     let launcher = home.join(format!(".local/bin/zdroid-{id}"));
-    let parent = launcher.parent().context("managed ACP launcher has no parent")?;
+    let parent = launcher
+        .parent()
+        .context("managed ACP launcher has no parent")?;
     std::fs::create_dir_all(parent).context("create managed ACP launcher directory")?;
     let script = format!(
         r#"#!/system/bin/sh
@@ -462,7 +477,9 @@ exec "$resolved_bin" "$@"
 fn ensure_detected_acp_launcher(id: &str, label: &str, command: &str) -> Result<PathBuf> {
     let (_, home) = zdroid_bootstrap_paths()?;
     let launcher = home.join(format!(".local/bin/zdroid-{id}"));
-    let parent = launcher.parent().context("detected ACP launcher has no parent")?;
+    let parent = launcher
+        .parent()
+        .context("detected ACP launcher has no parent")?;
     std::fs::create_dir_all(parent).context("create detected ACP launcher directory")?;
     let script = format!(
         r#"#!/system/bin/sh
@@ -1022,14 +1039,12 @@ fn ensure_cli_subscription_agents(fs: Arc<dyn Fs>, cx: &mut App) {
             None
         }
     };
-    let gemini_launcher = ensure_managed_npm_acp_launcher(
-        "gemini",
-        "Gemini CLI",
-        "gemini",
-        "@google/gemini-cli",
-    )
-    .inspect_err(|err| log::error!("zed_android: failed to create Gemini launcher: {err:#}"))
-    .ok();
+    let gemini_launcher =
+        ensure_managed_npm_acp_launcher("gemini", "Gemini CLI", "gemini", "@google/gemini-cli")
+            .inspect_err(|err| {
+                log::error!("zed_android: failed to create Gemini launcher: {err:#}")
+            })
+            .ok();
     let copilot_launcher = ensure_managed_npm_acp_launcher(
         "github-copilot-cli",
         "GitHub Copilot CLI",

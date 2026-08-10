@@ -56,6 +56,27 @@ pub enum LanguageModelCompletionEvent {
     },
     ReasoningDetails(serde_json::Value),
     UsageUpdate(TokenUsage),
+    InferenceProgress(InferenceProgress),
+}
+
+#[derive(Debug, PartialEq, Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InferencePhase {
+    Prefilling,
+    Generating,
+    Complete,
+}
+
+/// Live inference counters reported by a local model runtime.
+#[derive(Debug, PartialEq, Clone, Copy, Serialize, Deserialize)]
+pub struct InferenceProgress {
+    pub phase: InferencePhase,
+    pub context_tokens: u64,
+    pub context_limit: u64,
+    pub prompt_tokens: u64,
+    pub output_tokens: u64,
+    pub cached_tokens: u64,
+    pub tokens_per_second: Option<f64>,
 }
 
 impl LanguageModelCompletionEvent {
@@ -229,6 +250,16 @@ impl LanguageModelCompletionError {
         message: String,
         retry_after: Option<Duration>,
     ) -> Self {
+        if matches!(
+            status_code,
+            StatusCode::BAD_REQUEST | StatusCode::PAYLOAD_TOO_LARGE
+        ) && let Some(tokens) = parse_prompt_too_long(&message)
+        {
+            return Self::PromptTooLarge {
+                tokens: Some(tokens),
+            };
+        }
+
         match status_code {
             StatusCode::BAD_REQUEST => Self::BadRequestFormat { provider, message },
             StatusCode::UNAUTHORIZED => Self::AuthenticationError { provider, message },

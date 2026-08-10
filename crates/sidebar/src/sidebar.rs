@@ -5388,6 +5388,9 @@ impl Sidebar {
                 ThreadSwitcherEvent::Confirmed(selection) => {
                     this.confirm_switcher_selection(selection, window, cx);
                 }
+                ThreadSwitcherEvent::DeleteRequested(entry) => {
+                    this.confirm_delete_switcher_thread(entry.clone(), window, cx);
+                }
                 ThreadSwitcherEvent::Dismissed => {
                     if let Some(mw) = weak_multi_workspace.upgrade() {
                         if let Some(original_ws) = &original_workspace {
@@ -5473,6 +5476,68 @@ impl Sidebar {
         }
 
         window.focus(&focus, cx);
+    }
+
+    fn confirm_delete_switcher_thread(
+        &mut self,
+        entry: ThreadSwitcherThreadEntry,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let title = entry.title.clone();
+        let metadata = entry.metadata.clone();
+        let workspace = entry.workspace.clone();
+
+        cx.spawn_in(window, async move |this, cx| {
+            let answer = cx
+                .prompt(
+                    gpui::PromptLevel::Warning,
+                    "Delete this conversation?",
+                    Some(&format!(
+                        "\"{title}\" will be removed from this device. Project files will not be changed."
+                    )),
+                    &["Delete", "Cancel"],
+                )
+                .await
+                .ok();
+
+            if answer != Some(0) {
+                return;
+            }
+
+            this.update_in(cx, |this, window, cx| {
+                let thread_id = metadata.thread_id;
+                this.dismiss_thread_switcher(cx);
+
+                let removed_from_panel = workspace.update(cx, |workspace, cx| {
+                    if let Some(panel) = workspace.panel::<AgentPanel>(cx) {
+                        panel.update(cx, |panel, cx| {
+                            panel.remove_thread(thread_id, window, cx);
+                        });
+                        true
+                    } else {
+                        false
+                    }
+                });
+
+                if !removed_from_panel {
+                    ThreadMetadataStore::global(cx).update(cx, |store, cx| {
+                        store.delete(thread_id, cx);
+                    });
+                }
+
+                if matches!(
+                    &this.active_entry,
+                    Some(ActiveEntry::Thread { thread_id: active_id, .. }) if *active_id == thread_id
+                ) {
+                    this.active_entry = None;
+                }
+                this.thread_last_accessed.remove(&thread_id);
+                this.update_entries(cx);
+            })
+            .ok();
+        })
+        .detach();
     }
 
     fn render_thread(

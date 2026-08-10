@@ -2,10 +2,10 @@ use crate::{
     ApplyCodeActionTool, CodeActionStore, ContextServerRegistry, CopyPathTool, CreateDirectoryTool,
     DbLanguageModel, DbThread, DeletePathTool, DiagnosticsTool, EditFileTool, FetchTool,
     FindPathTool, FindReferencesTool, GetCodeActionsTool, GoToDefinitionTool, GrepTool,
-    ListDirectoryTool, MovePathTool, ProjectSnapshot, ReadFileTool, RenameTool, SpawnAgentTool,
-    SystemPromptTemplate, Template, Templates, TerminalTool, ToolPermissionDecision,
-    UpdatePlanTool, UpdateTitleTool, UserAgentsMd, WebSearchTool, WriteFileTool,
-    decide_permission_from_settings,
+    ListDirectoryTool, MobileLocalSystemPromptTemplate, MovePathTool, ProjectSnapshot,
+    ReadFileTool, RenameTool, SpawnAgentTool, SystemPromptTemplate, Template, Templates,
+    TerminalTool, ToolPermissionDecision, UpdatePlanTool, UpdateTitleTool, UserAgentsMd,
+    WebSearchTool, WriteFileTool, decide_permission_from_settings,
 };
 use acp_thread::{MentionUri, UserMessageId};
 use action_log::ActionLog;
@@ -67,6 +67,40 @@ use uuid::Uuid;
 const TOOL_CANCELED_MESSAGE: &str = "Tool canceled by user";
 pub const MAX_TOOL_NAME_LENGTH: usize = 64;
 pub const MAX_SUBAGENT_DEPTH: u8 = 1;
+const ZDROID_LOCAL_PROVIDER_ID: &str = "zdroid-local";
+
+fn is_mobile_local_tool(tool_name: &str) -> bool {
+    matches!(
+        tool_name,
+        ReadFileTool::NAME
+            | FindPathTool::NAME
+            | GrepTool::NAME
+            | ListDirectoryTool::NAME
+            | EditFileTool::NAME
+            | WriteFileTool::NAME
+            | TerminalTool::NAME
+            | DiagnosticsTool::NAME
+            | FetchTool::NAME
+            | WebSearchTool::NAME
+            | UpdatePlanTool::NAME
+            | UpdateTitleTool::NAME
+    )
+}
+
+#[cfg(test)]
+mod mobile_local_tool_tests {
+    use super::*;
+
+    #[test]
+    fn keeps_core_tools_and_excludes_expensive_optional_tools() {
+        assert!(is_mobile_local_tool(ReadFileTool::NAME));
+        assert!(is_mobile_local_tool(EditFileTool::NAME));
+        assert!(is_mobile_local_tool(TerminalTool::NAME));
+        assert!(is_mobile_local_tool(WebSearchTool::NAME));
+        assert!(!is_mobile_local_tool(SpawnAgentTool::NAME));
+        assert!(!is_mobile_local_tool(FindReferencesTool::NAME));
+    }
+}
 
 /// Returned when a turn is attempted but no language model has been selected.
 #[derive(Debug)]
@@ -975,6 +1009,7 @@ pub struct Thread {
     pending_message: Option<AgentMessage>,
     pub(crate) tools: BTreeMap<SharedString, Arc<dyn AnyAgentTool>>,
     request_token_usage: HashMap<UserMessageId, language_model::TokenUsage>,
+    latest_inference_progress: Option<language_model::InferenceProgress>,
     #[allow(unused)]
     cumulative_token_usage: TokenUsage,
     #[allow(unused)]
@@ -1102,6 +1137,7 @@ impl Thread {
             pending_message: None,
             tools: BTreeMap::default(),
             request_token_usage: HashMap::default(),
+            latest_inference_progress: None,
             cumulative_token_usage: TokenUsage::default(),
             initial_project_snapshot: {
                 let project_snapshot = Self::project_snapshot(project.clone(), cx);
@@ -1421,6 +1457,7 @@ impl Thread {
             pending_message: None,
             tools: BTreeMap::default(),
             request_token_usage: db_thread.request_token_usage.clone(),
+            latest_inference_progress: None,
             cumulative_token_usage: db_thread.cumulative_token_usage,
             initial_project_snapshot: Task::ready(db_thread.initial_project_snapshot).shared(),
             context_server_registry,
@@ -1826,6 +1863,10 @@ impl Thread {
         Some(*tokens)
     }
 
+    pub fn latest_inference_progress(&self) -> Option<language_model::InferenceProgress> {
+        self.latest_inference_progress
+    }
+
     pub fn latest_token_usage(&self) -> Option<acp_thread::TokenUsage> {
         let usage = self.latest_request_token_usage()?;
         let model = self.model.clone()?;
@@ -1990,6 +2031,7 @@ impl Thread {
         let event_stream = ThreadEventStream(events_tx);
         let message_ix = self.messages.len().saturating_sub(1);
         self.clear_summary();
+        self.latest_inference_progress = None;
         let (cancellation_tx, mut cancellation_rx) = watch::channel(false);
         self.running_turn = Some(RunningTurn {
             event_stream: event_stream.clone(),
@@ -2397,7 +2439,14 @@ impl Thread {
                     cache_read_input_tokens = usage.cache_read_input_tokens,
                 );
                 self.update_token_usage(usage, cx);
+                if let Some(progress) = &mut self.latest_inference_progress {
+                    progress.phase = language_model::InferencePhase::Complete;
+                    progress.prompt_tokens = usage.input_tokens;
+                    progress.output_tokens = usage.output_tokens;
+                    progress.context_tokens = usage.total_tokens();
+                }
             }
+            InferenceProgress(progress) => self.latest_inference_progress = Some(progress),
             Stop(StopReason::Refusal) => return Err(CompletionError::Refusal.into()),
             Stop(StopReason::MaxTokens) => return Err(CompletionError::MaxTokens.into()),
             Stop(StopReason::ToolUse | StopReason::EndTurn) => {}
@@ -3012,6 +3061,7 @@ impl Thread {
         let Some(profile) = AgentSettings::get_global(cx).profiles.get(&self.profile_id) else {
             return BTreeMap::new();
         };
+        let use_mobile_local_profile = model.provider_id().0.as_ref() == ZDROID_LOCAL_PROVIDER_ID;
         fn truncate(tool_name: &SharedString) -> SharedString {
             if tool_name.len() > MAX_TOOL_NAME_LENGTH {
                 let mut truncated = tool_name.to_string();
@@ -3028,6 +3078,7 @@ impl Thread {
             .filter_map(|(tool_name, tool)| {
                 if tool.supports_provider(&model.provider_id())
                     && profile.is_tool_enabled(tool_name)
+                    && (!use_mobile_local_profile || is_mobile_local_tool(tool_name))
                 {
                     Some((truncate(tool_name), tool.clone()))
                 } else {
@@ -3043,6 +3094,10 @@ impl Thread {
                 _ => true,
             })
             .collect::<BTreeMap<_, _>>();
+
+        if use_mobile_local_profile {
+            return tools;
+        }
 
         let mut context_server_tools = Vec::new();
         let mut seen_tools = tools.keys().cloned().collect::<HashSet<_>>();
@@ -3162,14 +3217,33 @@ impl Thread {
         );
 
         let user_agents_md = UserAgentsMd::global(cx).and_then(|s| s.content().cloned());
-        let system_prompt = SystemPromptTemplate {
-            project: self.project_context.read(cx),
-            available_tools,
-            model_name: self.model.as_ref().map(|m| m.name().0.to_string()),
-            date: Local::now().format("%Y-%m-%d").to_string(),
-            user_agents_md,
+        let project = self.project_context.read(cx);
+        let model_name = self.model.as_ref().map(|m| m.name().0.to_string());
+        let date = Local::now().format("%Y-%m-%d").to_string();
+        let use_mobile_local_prompt = self
+            .model
+            .as_ref()
+            .is_some_and(|model| model.provider_id().0.as_ref() == ZDROID_LOCAL_PROVIDER_ID);
+        let system_prompt = if use_mobile_local_prompt {
+            MobileLocalSystemPromptTemplate {
+                project,
+                available_tools,
+                model_name,
+                date,
+                user_agents_md,
+                minimal: self.profile_id.as_str() == agent_settings::builtin_profiles::MINIMAL,
+            }
+            .render(&self.templates)
+        } else {
+            SystemPromptTemplate {
+                project,
+                available_tools,
+                model_name,
+                date,
+                user_agents_md,
+            }
+            .render(&self.templates)
         }
-        .render(&self.templates)
         .context("failed to build system prompt")
         .expect("Invalid template");
         let mut messages = vec![LanguageModelRequestMessage {

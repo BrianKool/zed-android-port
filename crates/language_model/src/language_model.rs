@@ -182,6 +182,7 @@ pub trait LanguageModel: Send + Sync {
                                     *last_token_usage.lock() = token_usage;
                                     None
                                 }
+                                Ok(LanguageModelCompletionEvent::InferenceProgress(_)) => None,
                                 Err(err) => Some(Err(err)),
                             }
                         }

@@ -11,7 +11,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/release-1.0.0-2ea44f" alt="Release 1.0.0" />
+  <img src="https://img.shields.io/badge/release-1.0.1-2ea44f" alt="Release 1.0.1" />
   <img src="https://img.shields.io/badge/platform-Android-3DDC84?logo=android" alt="Android" />
   <a href="https://github.com/BrianKool/zed-android-port/releases/latest"><img src="https://img.shields.io/github/downloads/BrianKool/zed-android-port/total?label=downloads" alt="Total downloads" /></a>
 </p>
@@ -48,7 +48,7 @@ Termux userland rebuilt under `com.zdroid` (applicationId byte-length pinned to 
 
 ## <img src="https://api.iconify.design/lucide:download.svg?color=%23999999&height=22" valign="middle" /> &nbsp;Install
 
-Download [`Zdroid-B-1.0.0.apk`](https://github.com/BrianKool/zed-android-port/releases/latest) from the latest release and open it in your file manager. Android prompts for permission to install unknown apps the first time. Later Zdroid-B releases can upgrade in place because they use the same release signing certificate.
+Download [`Zdroid-B-1.0.1.apk`](https://github.com/BrianKool/zed-android-port/releases/latest) from the latest release and open it in your file manager. Android prompts for permission to install unknown apps the first time. Later Zdroid-B releases can upgrade in place because they use the same release signing certificate.
 
 > [!NOTE]
 > Android may show a "built for an older version of Android" warning before you tap Install. Proceed anyway. `targetSdk` is pinned at 28 on purpose: the bundled Termux userland depends on the `untrusted_app_27` SELinux domain, which permits `execve` on app-private files. Bumping `targetSdk` to 29+ lands the process in a stricter domain that denies exec, and the entire runtime stops working. See [`docs/workarounds/targetsdk-28-execve.md`](crates/gpui_android/docs/workarounds/targetsdk-28-execve.md) for the receipts.

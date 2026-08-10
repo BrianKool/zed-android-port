@@ -1658,50 +1658,12 @@ impl AgentPanel {
 
         let agent = Agent::from(action.agent.clone());
 
-        // Selecting the active agent asks for a fresh thread. Switching
-        // agents restores that agent's most recent local thread and draft.
-        if self.selected_agent == agent {
-            self.activate_new_thread(true, AgentThreadSource::AgentPanel, window, cx);
-            return;
-        }
-
-        self.selected_agent = agent.clone();
-        let (worktree_paths, remote_connection) = {
-            let project = self.project.read(cx);
-            (
-                project.worktree_paths(cx),
-                project.remote_connection_options(cx),
-            )
-        };
-
-        let recent_thread = ThreadMetadataStore::try_global(cx).and_then(|store| {
-            store
-                .read(cx)
-                .entries()
-                .filter(|entry| {
-                    !entry.archived
-                        && entry.agent_id == action.agent
-                        && entry.worktree_paths == worktree_paths
-                        && entry.matches_remote_connection(remote_connection.as_ref())
-                })
-                .max_by_key(|entry| entry.updated_at)
-                .cloned()
-        });
-
-        if let Some(thread) = recent_thread {
-            self.load_agent_thread(
-                agent,
-                thread.thread_id,
-                Some(thread.folder_paths().clone()),
-                thread.title(),
-                true,
-                AgentThreadSource::AgentPanel,
-                window,
-                cx,
-            );
-        } else {
-            self.activate_new_thread(true, AgentThreadSource::AgentPanel, window, cx);
-        }
+        // This action is dispatched by the `+` menu, so it must always
+        // produce a blank conversation. Existing conversations are restored
+        // exclusively through History; restoring one here makes `+` appear
+        // to reopen an old Codex or Claude session.
+        self.selected_agent = agent;
+        self.activate_new_thread(true, AgentThreadSource::AgentPanel, window, cx);
     }
 
     pub fn new_terminal(

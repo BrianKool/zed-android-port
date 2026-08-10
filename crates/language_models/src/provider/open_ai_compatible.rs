@@ -7,12 +7,13 @@ use gpui::{
     AnyElement, AnyView, App, AsyncApp, Context, DismissEvent, Entity, PromptLevel, SharedString,
     Task, TaskExt, Window, px,
 };
-use http_client::HttpClient;
+use http_client::{AsyncBody, HttpClient, Method, Request as HttpRequest};
 use language_model::{
-    ApiKeyState, AuthenticateError, EnvVar, IconOrSvg, LanguageModel, LanguageModelCompletionError,
-    LanguageModelCompletionEvent, LanguageModelId, LanguageModelName, LanguageModelProvider,
-    LanguageModelProviderId, LanguageModelProviderName, LanguageModelProviderState,
-    LanguageModelRequest, LanguageModelToolChoice, LanguageModelToolSchemaFormat, RateLimiter,
+    ApiKeyState, AuthenticateError, EnvVar, IconOrSvg, InferencePhase, InferenceProgress,
+    LanguageModel, LanguageModelCompletionError, LanguageModelCompletionEvent, LanguageModelId,
+    LanguageModelName, LanguageModelProvider, LanguageModelProviderId, LanguageModelProviderName,
+    LanguageModelProviderState, LanguageModelRequest, LanguageModelToolChoice,
+    LanguageModelToolSchemaFormat, RateLimiter,
 };
 use menu;
 use open_ai::{
@@ -29,7 +30,7 @@ use std::{
     path::{Path, PathBuf},
     process::Stdio,
     sync::Arc,
-    time::Duration,
+    time::{Duration, Instant},
 };
 use ui::{
     ElevationIndex, ListItem, ListItemSpacing, PopoverMenu, PopoverMenuHandle, ProgressBar,
@@ -200,6 +201,14 @@ fn local_model_catalog() -> Vec<LocalModelSpec> {
     ]
 }
 
+fn mobile_model_guidance(spec: &LocalModelSpec) -> &'static str {
+    match spec.download_size {
+        0..=1_300_000_000 => "Recommended for mobile Agent use",
+        1_300_000_001..=2_300_000_000 => "Balanced; expect a slower first response",
+        _ => "Experimental on phones; high heat and long first response",
+    }
+}
+
 pub fn zdroid_local_settings() -> OpenAiCompatibleSettings {
     OpenAiCompatibleSettings {
         api_url: "http://127.0.0.1:8080/v1".into(),
@@ -257,6 +266,16 @@ struct LocalRuntimeConfig {
     output_tokens: u32,
     batch_size: u32,
     vulkan: bool,
+}
+
+const MIN_AGENT_CONTEXT_TOKENS: u32 = 4_096;
+
+impl LocalRuntimeConfig {
+    fn normalized(mut self) -> Self {
+        self.context_tokens = self.context_tokens.max(MIN_AGENT_CONTEXT_TOKENS);
+        self.output_tokens = self.output_tokens.min(self.context_tokens);
+        self
+    }
 }
 
 impl Default for LocalRuntimeConfig {
@@ -469,7 +488,7 @@ impl State {
                 .iter()
                 .any(|model| model.spec.id == *active_id && model.server.is_some())
         });
-        manager.runtime = runtime;
+        manager.runtime = runtime.normalized();
         for model in &mut manager.models {
             if let Some(mut server) = model.server.take() {
                 server.kill().ok();
@@ -587,8 +606,13 @@ fn load_runtime_config() -> Result<LocalRuntimeConfig> {
     if !path.is_file() {
         return Ok(LocalRuntimeConfig::default());
     }
-    serde_json::from_slice(&std::fs::read(&path)?)
-        .with_context(|| format!("read {}", path.display()))
+    let stored: LocalRuntimeConfig = serde_json::from_slice(&std::fs::read(&path)?)
+        .with_context(|| format!("read {}", path.display()))?;
+    let normalized = stored.clone().normalized();
+    if normalized != stored {
+        save_runtime_config(&normalized)?;
+    }
+    Ok(normalized)
 }
 
 fn save_runtime_config(config: &LocalRuntimeConfig) -> Result<()> {
@@ -862,9 +886,7 @@ async fn install_local_model(
     let vulkan_backend_path = prefix.join("lib/libggml-vulkan.so");
     let android_vulkan_loader_installed =
         dpkg_package_is_installed(&prefix, "vulkan-loader-android");
-    if !server_path.is_file()
-        || !vulkan_backend_path.is_file()
-        || !android_vulkan_loader_installed
+    if !server_path.is_file() || !vulkan_backend_path.is_file() || !android_vulkan_loader_installed
     {
         let package_manager = prefix.join(".zed/bin/pkg");
         let status = smol::process::Command::new(&package_manager)
@@ -916,7 +938,18 @@ async fn install_local_model(
                 "--api-key",
                 api_key.as_ref(),
                 "--no-webui",
-                "--no-slots",
+                "--slots",
+                "--cache-prompt",
+                "--cache-reuse",
+                "256",
+                "--cache-ram",
+                "128",
+                "--cache-type-k",
+                "q8_0",
+                "--cache-type-v",
+                "q8_0",
+                "--flash-attn",
+                "auto",
                 "-c",
                 &runtime.context_tokens.to_string(),
                 "-np",
@@ -1278,6 +1311,164 @@ pub struct OpenAiCompatibleLanguageModel {
     request_limiter: RateLimiter,
 }
 
+#[derive(Debug, Deserialize)]
+struct LocalSlotState {
+    n_ctx: u64,
+    #[serde(default)]
+    n_prompt_tokens: u64,
+    #[serde(default)]
+    n_prompt_tokens_processed: u64,
+    #[serde(default)]
+    n_prompt_tokens_cache: u64,
+    #[serde(default)]
+    next_token: LocalSlotNextToken,
+    #[serde(default)]
+    is_processing: bool,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct LocalSlotNextToken {
+    #[serde(default)]
+    n_decoded: u64,
+}
+
+#[derive(Clone, Copy)]
+struct TimedLocalSlotState {
+    observed_at: Instant,
+    prompt_tokens_processed: u64,
+    output_tokens: u64,
+}
+
+async fn fetch_local_slot_state(
+    http_client: &dyn HttpClient,
+    api_url: &str,
+    api_key: &str,
+) -> Option<LocalSlotState> {
+    let server_url = api_url.trim_end_matches('/').trim_end_matches("/v1");
+    let request = HttpRequest::builder()
+        .method(Method::GET)
+        .uri(format!("{server_url}/slots"))
+        .header("Authorization", format!("Bearer {}", api_key.trim()))
+        .body(AsyncBody::default())
+        .ok()?;
+    let mut response = http_client.send(request).await.ok()?;
+    if !response.status().is_success() {
+        return None;
+    }
+
+    let mut body = String::new();
+    response.body_mut().read_to_string(&mut body).await.ok()?;
+    serde_json::from_str::<Vec<LocalSlotState>>(&body)
+        .ok()?
+        .into_iter()
+        .find(|slot| slot.is_processing)
+}
+
+fn stream_with_local_inference_progress(
+    completions: futures::stream::BoxStream<
+        'static,
+        Result<LanguageModelCompletionEvent, LanguageModelCompletionError>,
+    >,
+    http_client: Arc<dyn HttpClient>,
+    api_url: String,
+    api_key: Arc<str>,
+) -> futures::stream::BoxStream<
+    'static,
+    Result<LanguageModelCompletionEvent, LanguageModelCompletionError>,
+> {
+    struct ProgressStreamState {
+        completions: futures::stream::BoxStream<
+            'static,
+            Result<LanguageModelCompletionEvent, LanguageModelCompletionError>,
+        >,
+        http_client: Arc<dyn HttpClient>,
+        api_url: String,
+        api_key: Arc<str>,
+        next_poll: Instant,
+        previous: Option<TimedLocalSlotState>,
+    }
+
+    futures::stream::unfold(
+        ProgressStreamState {
+            completions,
+            http_client,
+            api_url,
+            api_key,
+            next_poll: Instant::now(),
+            previous: None,
+        },
+        |mut state| async move {
+            loop {
+                let completion = FutureExt::fuse(state.completions.next());
+                let timer = FutureExt::fuse(smol::Timer::at(state.next_poll));
+                futures::pin_mut!(completion, timer);
+
+                futures::select_biased! {
+                    _ = timer => {
+                        state.next_poll = Instant::now() + Duration::from_millis(750);
+                        let Some(slot) = fetch_local_slot_state(
+                            state.http_client.as_ref(),
+                            &state.api_url,
+                            &state.api_key,
+                        ).await else {
+                            continue;
+                        };
+
+                        let observed_at = Instant::now();
+                        let prompt_tokens = slot
+                            .n_prompt_tokens_processed
+                            .saturating_add(slot.n_prompt_tokens_cache);
+                        let output_tokens = slot.next_token.n_decoded;
+                        let phase = if output_tokens > 0 {
+                            InferencePhase::Generating
+                        } else {
+                            InferencePhase::Prefilling
+                        };
+                        let tokens_per_second = state.previous.and_then(|previous| {
+                            let elapsed = observed_at.duration_since(previous.observed_at).as_secs_f64();
+                            if elapsed <= 0.0 {
+                                return None;
+                            }
+                            let tokens = match phase {
+                                InferencePhase::Generating => output_tokens
+                                    .saturating_sub(previous.output_tokens),
+                                InferencePhase::Prefilling => slot
+                                    .n_prompt_tokens_processed
+                                    .saturating_sub(previous.prompt_tokens_processed),
+                                InferencePhase::Complete => 0,
+                            };
+                            (tokens > 0).then_some(tokens as f64 / elapsed)
+                        });
+                        state.previous = Some(TimedLocalSlotState {
+                            observed_at,
+                            prompt_tokens_processed: slot.n_prompt_tokens_processed,
+                            output_tokens,
+                        });
+
+                        let progress = InferenceProgress {
+                            phase,
+                            context_tokens: slot
+                                .n_prompt_tokens
+                                .max(prompt_tokens.saturating_add(output_tokens)),
+                            context_limit: slot.n_ctx,
+                            prompt_tokens,
+                            output_tokens,
+                            cached_tokens: slot.n_prompt_tokens_cache,
+                            tokens_per_second,
+                        };
+                        return Some((
+                            Ok(LanguageModelCompletionEvent::InferenceProgress(progress)),
+                            state,
+                        ));
+                    }
+                    event = completion => return event.map(|event| (event, state)),
+                }
+            }
+        },
+    )
+    .boxed()
+}
+
 impl OpenAiCompatibleLanguageModel {
     fn stream_completion(
         &self,
@@ -1453,6 +1644,15 @@ impl LanguageModel for OpenAiCompatibleLanguageModel {
         >,
     > {
         if self.model.capabilities.chat_completions {
+            let local_metrics = (self.provider_id.0.as_ref() == "zdroid-local").then(|| {
+                self.state.read_with(cx, |state, _cx| {
+                    (
+                        self.http_client.clone(),
+                        state.settings.api_url.clone(),
+                        state.local_api_key.clone(),
+                    )
+                })
+            });
             let request = into_open_ai(
                 request,
                 &self.model.name,
@@ -1465,7 +1665,17 @@ impl LanguageModel for OpenAiCompatibleLanguageModel {
             let completions = self.stream_completion(request, cx);
             async move {
                 let mapper = OpenAiEventMapper::new();
-                Ok(mapper.map_stream(completions.await?).boxed())
+                let completions = mapper.map_stream(completions.await?).boxed();
+                if let Some((http_client, api_url, Some(api_key))) = local_metrics {
+                    Ok(stream_with_local_inference_progress(
+                        completions,
+                        http_client,
+                        api_url,
+                        api_key,
+                    ))
+                } else {
+                    Ok(completions)
+                }
             }
             .boxed()
         } else {
@@ -2048,14 +2258,15 @@ impl ConfigurationView {
             .child(Label::new(spec.display_name.clone()))
             .child(
                 Label::new(format!(
-                    "{:.2} GB | {} | {}",
+                    "{:.2} GB | {} | {} | {}",
                     spec.download_size as f64 / 1e9,
                     spec.source_label,
                     if spec.built_in {
                         "max 7B mobile catalog"
                     } else {
                         "custom model"
-                    }
+                    },
+                    mobile_model_guidance(&spec),
                 ))
                 .size(LabelSize::Small)
                 .color(Color::Muted),
@@ -2160,9 +2371,10 @@ impl Render for ConfigurationView {
                     id: model.spec.id.clone(),
                     name: model.spec.display_name.clone().into(),
                     details: format!(
-                        "{:.2} GB | {}",
+                        "{:.2} GB | {} | {}",
                         model.spec.download_size as f64 / 1e9,
-                        model.spec.source_label
+                        model.spec.source_label,
+                        mobile_model_guidance(&model.spec),
                     )
                     .into(),
                 })
@@ -2277,15 +2489,17 @@ impl Render for ConfigurationView {
             });
             return v_flex().w_full().gap_3()
                 .child(Label::new("Local LLM runtime"))
+                .child(Label::new("For full Zed Agent tools, 1B-1.5B models are recommended on phones. Larger models may take several minutes before the first response under memory or thermal pressure.").size(LabelSize::Small).color(Color::Muted))
                 .child(v_flex().w_full().gap_2().p_3().rounded_sm().border_1().border_color(cx.theme().colors().border_variant)
                     .child(h_flex().flex_wrap().gap_2()
                         .child(Label::new(format!("CPU cores: {}", if runtime.threads == 0 { "Auto".into() } else { runtime.threads.to_string() })))
                         .child(Button::new("cpu-auto", "Auto").style(ButtonStyle::Outlined).on_click(cx.listener(|this, _, _, cx| this.update_pending_runtime(|config| config.threads = 0, cx))))
                         .child(Button::new("cpu-minus", "-").style(ButtonStyle::Outlined).on_click(cx.listener(|this, _, _, cx| this.update_pending_runtime(|config| config.threads = config.threads.max(2) - 1, cx))))
                         .child(Button::new("cpu-plus", "+").style(ButtonStyle::Outlined).on_click(cx.listener(|this, _, _, cx| this.update_pending_runtime(|config| config.threads = (config.threads.max(1) + 1).min(16), cx)))))
-                    .child(h_flex().flex_wrap().gap_2().child(Label::new(format!("Context: {}K", runtime.context_tokens / 1024))).children([2048_u32, 4096, 8192].into_iter().map(|value| {
+                    .child(h_flex().flex_wrap().gap_2().child(Label::new(format!("Context: {}K", runtime.context_tokens / 1024))).children([4096_u32, 8192].into_iter().map(|value| {
                         Button::new(format!("context-{value}"), format!("{}K", value / 1024)).style(ButtonStyle::Outlined).on_click(cx.listener(move |this, _, _, cx| this.update_pending_runtime(|config| config.context_tokens = value, cx)))
                     })))
+                    .child(Label::new("4K is the minimum for Zed Agent prompts and tools. Use 8K for larger project context if your device has enough memory.").size(LabelSize::Small).color(Color::Muted))
                     .child(h_flex().flex_wrap().gap_2().child(Label::new(format!("Batch: {}", runtime.batch_size))).children([128_u32, 256, 512].into_iter().map(|value| {
                         Button::new(format!("batch-{value}"), value.to_string()).style(ButtonStyle::Outlined).on_click(cx.listener(move |this, _, _, cx| this.update_pending_runtime(|config| config.batch_size = value, cx)))
                     })))
@@ -2415,5 +2629,60 @@ mod local_model_tests {
         let mut model = local_model_catalog().remove(0);
         model.file_name = "../../outside.gguf".into();
         assert!(validate_local_model_spec(&model).is_err());
+    }
+
+    #[test]
+    fn local_runtime_is_normalized_for_agent_use() {
+        let runtime = LocalRuntimeConfig {
+            context_tokens: 2_048,
+            output_tokens: 8_192,
+            ..Default::default()
+        }
+        .normalized();
+
+        assert_eq!(runtime.context_tokens, MIN_AGENT_CONTEXT_TOKENS);
+        assert_eq!(runtime.output_tokens, MIN_AGENT_CONTEXT_TOKENS);
+    }
+
+    #[test]
+    fn mobile_guidance_distinguishes_model_cost() {
+        let catalog = local_model_catalog();
+        let qwen_1_5b = catalog
+            .iter()
+            .find(|model| model.id == "qwen2.5-coder-1.5b-q4-k-m")
+            .unwrap();
+        let gemma_4b = catalog
+            .iter()
+            .find(|model| model.id == "gemma-3-4b-it-q4-k-m")
+            .unwrap();
+
+        assert_eq!(
+            mobile_model_guidance(qwen_1_5b),
+            "Recommended for mobile Agent use"
+        );
+        assert_eq!(
+            mobile_model_guidance(gemma_4b),
+            "Experimental on phones; high heat and long first response"
+        );
+    }
+
+    #[test]
+    fn parses_live_llama_slot_counters() {
+        let slots: Vec<LocalSlotState> = serde_json::from_str(
+            r#"[{
+                "n_ctx": 4096,
+                "n_prompt_tokens": 1305,
+                "n_prompt_tokens_processed": 1024,
+                "n_prompt_tokens_cache": 256,
+                "is_processing": true,
+                "next_token": { "n_decoded": 25 }
+            }]"#,
+        )
+        .unwrap();
+        let slot = &slots[0];
+        assert_eq!(slot.n_ctx, 4096);
+        assert_eq!(slot.n_prompt_tokens_processed, 1024);
+        assert_eq!(slot.n_prompt_tokens_cache, 256);
+        assert_eq!(slot.next_token.n_decoded, 25);
     }
 }

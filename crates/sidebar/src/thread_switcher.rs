@@ -8,7 +8,9 @@ use gpui::{
     Action as _, DismissEvent, Entity, EventEmitter, FocusHandle, Focusable, Modifiers,
     ModifiersChangedEvent, Render, ScrollHandle, SharedString, prelude::*,
 };
-use ui::{AgentThreadStatus, ThreadItem, ThreadItemWorktreeInfo, WithScrollbar, prelude::*};
+use ui::{
+    AgentThreadStatus, ThreadItem, ThreadItemWorktreeInfo, Tooltip, WithScrollbar, prelude::*,
+};
 use workspace::{ModalView, Workspace};
 use zed_actions::agents_sidebar::ToggleThreadSwitcher;
 
@@ -185,6 +187,7 @@ impl ThreadSwitcherEntry {
 pub(super) enum ThreadSwitcherEvent {
     Preview(ThreadSwitcherSelection),
     Confirmed(ThreadSwitcherSelection),
+    DeleteRequested(ThreadSwitcherThreadEntry),
     Dismissed,
 }
 
@@ -212,7 +215,9 @@ impl ThreadSwitcher {
             1.min(entries.len().saturating_sub(1))
         };
 
-        if let Some(entry) = entries.get(selected_index) {
+        if !cfg!(target_os = "android")
+            && let Some(entry) = entries.get(selected_index)
+        {
             cx.emit(ThreadSwitcherEvent::Preview(entry.selection()));
         }
 
@@ -271,7 +276,9 @@ impl ThreadSwitcher {
 
     fn emit_preview(&mut self, cx: &mut Context<Self>) {
         self.scroll_handle.scroll_to_item(self.selected_index);
-        if let Some(entry) = self.entries.get(self.selected_index) {
+        if !cfg!(target_os = "android")
+            && let Some(entry) = self.entries.get(self.selected_index)
+        {
             cx.emit(ThreadSwitcherEvent::Preview(entry.selection()));
         }
     }
@@ -381,6 +388,11 @@ impl Render for ThreadSwitcher {
                     .children(self.entries.iter().enumerate().map(|(ix, entry)| {
                         let diff_stats = entry.diff_stats();
 
+                        let delete_entry = match entry {
+                            ThreadSwitcherEntry::Thread(entry) => Some(entry.clone()),
+                            ThreadSwitcherEntry::Terminal(_) => None,
+                        };
+
                         ThreadItem::new(entry.element_id(), entry.title())
                             .rounded(true)
                             .icon(entry.icon())
@@ -406,11 +418,37 @@ impl Render for ThreadSwitcher {
                             })
                             .selected(ix == selected_index)
                             .base_bg(cx.theme().colors().elevated_surface_background)
-                            .on_hover(cx.listener(move |this, hovered: &bool, _window, cx| {
-                                if *hovered {
-                                    this.select_index(ix, cx);
-                                }
-                            }))
+                            .when(!cfg!(target_os = "android"), |this| {
+                                this.on_hover(cx.listener(
+                                    move |this, hovered: &bool, _window, cx| {
+                                        if *hovered {
+                                            this.select_index(ix, cx);
+                                        }
+                                    },
+                                ))
+                            })
+                            .when_some(delete_entry, |this, entry| {
+                                this.action_slot(
+                                    IconButton::new(
+                                        SharedString::from(format!(
+                                            "delete-thread-history-{:?}",
+                                            entry.metadata.thread_id
+                                        )),
+                                        IconName::Trash,
+                                    )
+                                    .icon_size(IconSize::Small)
+                                    .icon_color(Color::Muted)
+                                    .tooltip(Tooltip::text("Delete Conversation"))
+                                    .on_click(cx.listener(
+                                        move |_this, _, _, cx| {
+                                            cx.emit(ThreadSwitcherEvent::DeleteRequested(
+                                                entry.clone(),
+                                            ));
+                                            cx.stop_propagation();
+                                        },
+                                    )),
+                                )
+                            })
                             // TODO: This is not properly propagating to the tread item.
                             .on_click(cx.listener(
                                 move |this, _event: &gpui::ClickEvent, _window, cx| {

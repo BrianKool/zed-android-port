@@ -38,14 +38,22 @@ fn strip_trailing_incomplete_escape(json: &str) -> &str {
     }
 }
 
-/// Parses a "prompt is too long: N tokens ..." message and extracts the token count.
+/// Extracts the token count from common provider and llama.cpp context-limit errors.
 pub fn parse_prompt_too_long(message: &str) -> Option<u64> {
-    message
-        .strip_prefix("prompt is too long: ")?
-        .split_once(" tokens")?
-        .0
-        .parse()
-        .ok()
+    if let Some(tokens) = message
+        .strip_prefix("prompt is too long: ")
+        .and_then(|message| message.split_once(" tokens"))
+        .and_then(|(tokens, _)| tokens.parse().ok())
+    {
+        return Some(tokens);
+    }
+
+    let (_, llama_message) = message.split_once("request (")?;
+    let (tokens, remainder) = llama_message.split_once(" tokens)")?;
+    remainder
+        .contains("exceeds the available context size")
+        .then(|| tokens.parse().ok())
+        .flatten()
 }
 
 #[cfg(test)]
@@ -57,6 +65,12 @@ mod tests {
         let fixed = fix_streamed_json(r#"{"text": "hello\"#);
         let parsed: serde_json::Value = serde_json::from_str(&fixed).expect("valid json");
         assert_eq!(parsed["text"], "hello");
+    }
+
+    #[test]
+    fn parses_llama_cpp_context_limit_error() {
+        let error = r#"{"error":{"code":400,"message":"request (2939 tokens) exceeds the available context size (2048 tokens), try increasing it","type":"exceed_context_size_error"}}"#;
+        assert_eq!(parse_prompt_too_long(error), Some(2939));
     }
 
     #[test]
