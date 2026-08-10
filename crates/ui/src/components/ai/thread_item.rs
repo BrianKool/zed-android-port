@@ -460,28 +460,31 @@ impl RenderOnce for ThreadItem {
                     .when(self.is_truncated && opaque_window, |this| {
                         this.child(gradient_overlay)
                     })
-                    .when(self.hovered, |this| {
-                        this.when_some(self.action_slot, |this, slot| {
-                            this.child(
-                                h_flex()
-                                    .relative()
-                                    .pr_1p5()
-                                    .when(opaque_window, |this| {
-                                        this.child(
-                                            GradientFade::new(base_bg, hover_bg, hover_bg)
-                                                .width(px(120.0))
-                                                .right(px(8.))
-                                                .gradient_stop(0.90)
-                                                .group_name("thread-item"),
-                                        )
-                                    })
-                                    .child(slot)
-                                    .on_mouse_down(MouseButton::Left, |_, _, cx| {
-                                        cx.stop_propagation()
-                                    }),
-                            )
-                        })
-                    }),
+                    .when(
+                        self.hovered || (cfg!(target_os = "android") && self.focused),
+                        |this| {
+                            this.when_some(self.action_slot, |this, slot| {
+                                this.child(
+                                    h_flex()
+                                        .relative()
+                                        .pr_1p5()
+                                        .when(opaque_window, |this| {
+                                            this.child(
+                                                GradientFade::new(base_bg, hover_bg, hover_bg)
+                                                    .width(px(120.0))
+                                                    .right(px(8.))
+                                                    .gradient_stop(0.90)
+                                                    .group_name("thread-item"),
+                                            )
+                                        })
+                                        .child(slot)
+                                        .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                                            cx.stop_propagation()
+                                        }),
+                                )
+                            })
+                        },
+                    ),
             )
             .when(has_metadata, |this| {
                 this.child(

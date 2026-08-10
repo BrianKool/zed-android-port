@@ -19,8 +19,8 @@ use fs::Fs;
 use fuzzy::{StringMatch, StringMatchCandidate};
 use gpui::{
     AnyElement, App, Context, Decorations, DismissEvent, Entity, EventEmitter, FocusHandle,
-    Focusable, ListState, Render, SharedString, Subscription, Task, TaskExt, WeakEntity, Window,
-    list, prelude::*, px,
+    Focusable, ListState, PromptLevel, Render, SharedString, Subscription, Task, TaskExt,
+    WeakEntity, Window, list, prelude::*, px,
 };
 use itertools::Itertools as _;
 use menu::{Confirm, SelectFirst, SelectLast, SelectNext, SelectPrevious};
@@ -725,12 +725,12 @@ impl ThreadsArchiveView {
                                 let agent = thread.agent_id.clone();
                                 let thread_id = thread.thread_id;
                                 let session_id = thread.session_id.clone();
-                                cx.listener(move |this, _, _, cx| {
-                                    this.preserve_selection_on_next_update = true;
-                                    this.delete_thread(
+                                cx.listener(move |this, _, window, cx| {
+                                    this.request_delete_thread(
                                         thread_id,
                                         session_id.clone(),
                                         agent.clone(),
+                                        window,
                                         cx,
                                     );
                                     cx.stop_propagation();
@@ -740,36 +740,71 @@ impl ThreadsArchiveView {
                     .on_click({
                         let thread = thread.clone();
                         cx.listener(move |this, _, window, cx| {
+                            if cfg!(target_os = "android") && this.selection != Some(ix) {
+                                this.selection = Some(ix);
+                                cx.notify();
+                                return;
+                            }
                             this.unarchive_thread(thread.clone(), window, cx);
                         })
                     })
                     .into_any_element()
                 } else {
                     base.action_slot(
-                        IconButton::new("archive-thread", IconName::Archive)
-                            .icon_size(IconSize::Small)
-                            .icon_color(Color::Muted)
-                            .tooltip({
-                                move |_window, cx| {
-                                    Tooltip::for_action_in(
-                                        "Archive Thread",
-                                        &ArchiveSelectedThread,
-                                        &focus_handle,
-                                        cx,
-                                    )
-                                }
-                            })
-                            .on_click({
-                                let thread_id = thread.thread_id;
-                                cx.listener(move |this, _, _, cx| {
-                                    this.archive_thread(thread_id, cx);
-                                    cx.stop_propagation();
-                                })
-                            }),
+                        h_flex()
+                            .gap_0p5()
+                            .child(
+                                IconButton::new("archive-thread", IconName::Archive)
+                                    .icon_size(IconSize::Small)
+                                    .icon_color(Color::Muted)
+                                    .tooltip({
+                                        move |_window, cx| {
+                                            Tooltip::for_action_in(
+                                                "Archive Thread",
+                                                &ArchiveSelectedThread,
+                                                &focus_handle,
+                                                cx,
+                                            )
+                                        }
+                                    })
+                                    .on_click({
+                                        let thread_id = thread.thread_id;
+                                        cx.listener(move |this, _, _, cx| {
+                                            this.archive_thread(thread_id, cx);
+                                            cx.stop_propagation();
+                                        })
+                                    }),
+                            )
+                            .child(
+                                IconButton::new("delete-thread", IconName::Trash)
+                                    .icon_size(IconSize::Small)
+                                    .icon_color(Color::Muted)
+                                    .tooltip(Tooltip::text("Delete Thread"))
+                                    .on_click({
+                                        let agent = thread.agent_id.clone();
+                                        let thread_id = thread.thread_id;
+                                        let session_id = thread.session_id.clone();
+                                        cx.listener(move |this, _, window, cx| {
+                                            this.request_delete_thread(
+                                                thread_id,
+                                                session_id.clone(),
+                                                agent.clone(),
+                                                window,
+                                                cx,
+                                            );
+                                            cx.stop_propagation();
+                                        })
+                                    }),
+                            ),
                     )
                     .on_click({
                         let thread = thread.clone();
                         cx.listener(move |this, _, window, cx| {
+                            if cfg!(target_os = "android") && this.selection != Some(ix) {
+                                this.selection = Some(ix);
+                                cx.notify();
+                                return;
+                            }
                             telemetry::event!(
                                 "Archived Thread Opened",
                                 agent = thread.agent_id.as_ref(),
@@ -787,7 +822,7 @@ impl ThreadsArchiveView {
     fn remove_selected_thread(
         &mut self,
         _: &RemoveSelectedThread,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let Some(ix) = self.selection else { return };
@@ -795,13 +830,41 @@ impl ThreadsArchiveView {
             return;
         };
 
-        self.preserve_selection_on_next_update = true;
-        self.delete_thread(
+        self.request_delete_thread(
             thread.thread_id,
             thread.session_id.clone(),
             thread.agent_id.clone(),
+            window,
             cx,
         );
+    }
+
+    fn request_delete_thread(
+        &mut self,
+        thread_id: ThreadId,
+        session_id: Option<acp::SessionId>,
+        agent: AgentId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let prompt = window.prompt(
+            PromptLevel::Critical,
+            "Delete this conversation?",
+            Some("This removes the local conversation history and cannot be undone."),
+            &["Delete", "Cancel"],
+            cx,
+        );
+
+        cx.spawn_in(window, async move |this, cx| {
+            if prompt.await == Ok(0) {
+                this.update(cx, |this, cx| {
+                    this.preserve_selection_on_next_update = true;
+                    this.delete_thread(thread_id, session_id, agent, cx);
+                })?;
+            }
+            anyhow::Ok(())
+        })
+        .detach_and_log_err(cx);
     }
 
     fn delete_thread(

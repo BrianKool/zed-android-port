@@ -2306,6 +2306,12 @@ impl MarkdownElement {
                     }
                 } else if markdown.selection.pending {
                     markdown.selection.pending = false;
+                    if window.last_input_was_touch()
+                        && event.click_count == 2
+                        && event.modifiers.function
+                    {
+                        markdown.capture_for_context_menu(None, Some(&rendered_text));
+                    }
                     #[cfg(any(target_os = "linux", target_os = "freebsd"))]
                     {
                         let text = rendered_text

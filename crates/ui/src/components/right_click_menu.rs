@@ -3,8 +3,8 @@ use std::{cell::RefCell, rc::Rc};
 use gpui::{
     Anchor, AnyElement, App, Bounds, DismissEvent, DispatchPhase, Element, ElementId, Entity,
     Focusable as _, GlobalElementId, Hitbox, HitboxBehavior, InteractiveElement, IntoElement,
-    LayoutId, ManagedView, MouseButton, MouseDownEvent, ParentElement, Pixels, Point, Window,
-    anchored, deferred, div, px,
+    LayoutId, ManagedView, MouseButton, MouseDownEvent, MouseUpEvent, ParentElement, Pixels, Point,
+    Window, anchored, deferred, div, px,
 };
 
 pub struct RightClickMenu<M: ManagedView> {
@@ -243,56 +243,73 @@ impl<M: ManagedView> Element for RightClickMenu<M> {
                 let child_bounds = prepaint_state.child_bounds;
 
                 let hitbox_id = prepaint_state.hitbox.id;
+                let open_menu = Rc::new(move |window: &mut Window, cx: &mut App| {
+                    cx.stop_propagation();
+                    window.prevent_default();
+
+                    let Some(new_menu) = (builder)(window, cx) else {
+                        return;
+                    };
+                    let menu2 = menu.clone();
+                    let previous_focus_handle = window.focused(cx);
+
+                    window
+                        .subscribe(&new_menu, cx, move |modal, _: &DismissEvent, window, cx| {
+                            if modal.focus_handle(cx).contains_focused(window, cx)
+                                && let Some(previous_focus_handle) = previous_focus_handle.as_ref()
+                            {
+                                window.focus(previous_focus_handle, cx);
+                            }
+                            *menu2.borrow_mut() = None;
+                            window.refresh();
+                        })
+                        .detach();
+
+                    // Since menus are rendered in a deferred fashion, their focus handles are
+                    // not linked in the dispatch tree until after the deferred draw callback
+                    // runs. We need to wait for that to happen before focusing it, so that
+                    // calling `contains_focused` on the parent's focus handle returns `true`
+                    // when the menu is focused. This prevents the pane's tab bar buttons from
+                    // flickering when opening menus.
+                    let focus_handle = new_menu.focus_handle(cx);
+                    window.on_next_frame(move |window, _cx| {
+                        window.on_next_frame(move |window, cx| {
+                            window.focus(&focus_handle, cx);
+                        });
+                    });
+                    *menu.borrow_mut() = Some(new_menu);
+                    *position.borrow_mut() = if let Some(child_bounds) = child_bounds {
+                        if let Some(attach) = attach {
+                            child_bounds.corner(attach)
+                        } else {
+                            window.mouse_position()
+                        }
+                    } else {
+                        window.mouse_position()
+                    };
+                    window.refresh();
+                });
+
+                let open_mouse_menu = open_menu.clone();
                 window.on_mouse_event(move |event: &MouseDownEvent, phase, window, cx| {
                     if phase == DispatchPhase::Bubble
                         && event.button == MouseButton::Right
                         && hitbox_id.is_hovered(window)
                     {
-                        cx.stop_propagation();
-                        window.prevent_default();
+                        open_mouse_menu(window, cx);
+                    }
+                });
 
-                        let Some(new_menu) = (builder)(window, cx) else {
-                            return;
-                        };
-                        let menu2 = menu.clone();
-                        let previous_focus_handle = window.focused(cx);
-
-                        window
-                            .subscribe(&new_menu, cx, move |modal, _: &DismissEvent, window, cx| {
-                                if modal.focus_handle(cx).contains_focused(window, cx)
-                                    && let Some(previous_focus_handle) =
-                                        previous_focus_handle.as_ref()
-                                {
-                                    window.focus(previous_focus_handle, cx);
-                                }
-                                *menu2.borrow_mut() = None;
-                                window.refresh();
-                            })
-                            .detach();
-
-                        // Since menus are rendered in a deferred fashion, their focus handles are
-                        // not linked in the dispatch tree until after the deferred draw callback
-                        // runs. We need to wait for that to happen before focusing it, so that
-                        // calling `contains_focused` on the parent's focus handle returns `true`
-                        // when the menu is focused. This prevents the pane's tab bar buttons from
-                        // flickering when opening menus.
-                        let focus_handle = new_menu.focus_handle(cx);
-                        window.on_next_frame(move |window, _cx| {
-                            window.on_next_frame(move |window, cx| {
-                                window.focus(&focus_handle, cx);
-                            });
-                        });
-                        *menu.borrow_mut() = Some(new_menu);
-                        *position.borrow_mut() = if let Some(child_bounds) = child_bounds {
-                            if let Some(attach) = attach {
-                                child_bounds.corner(attach)
-                            } else {
-                                window.mouse_position()
-                            }
-                        } else {
-                            window.mouse_position()
-                        };
-                        window.refresh();
+                let hitbox_id = prepaint_state.hitbox.id;
+                window.on_mouse_event(move |event: &MouseUpEvent, phase, window, cx| {
+                    if phase == DispatchPhase::Bubble
+                        && event.button == MouseButton::Left
+                        && event.click_count == 2
+                        && event.modifiers.function
+                        && window.last_input_was_touch()
+                        && hitbox_id.is_hovered(window)
+                    {
+                        open_menu(window, cx);
                     }
                 });
             },
