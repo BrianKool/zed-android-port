@@ -792,6 +792,28 @@ pub struct Sidebar {
 }
 
 impl Sidebar {
+    fn uses_single_panel_mobile_layout(window: &Window) -> bool {
+        cfg!(target_os = "android") && window.viewport_size().width.as_f32() < 600.0
+    }
+
+    fn defer_hide_mobile_sidebar_after_thread_activation(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !Self::uses_single_panel_mobile_layout(window) {
+            return;
+        }
+
+        cx.defer_in(window, |this, _window, cx| {
+            if let Some(multi_workspace) = this.multi_workspace.upgrade() {
+                multi_workspace.update(cx, |multi_workspace, cx| {
+                    multi_workspace.hide_sidebar_preserving_focus(cx);
+                });
+            }
+        });
+    }
+
     pub fn new(
         multi_workspace: Entity<MultiWorkspace>,
         window: &mut Window,
@@ -6561,6 +6583,7 @@ impl Sidebar {
                             );
                         }
                     }
+                    this.defer_hide_mobile_sidebar_after_thread_activation(window, cx);
                 })
             });
 

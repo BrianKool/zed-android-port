@@ -70,9 +70,9 @@ pub fn ensure_installed(android_app: &AndroidApp, data_path: &Path) -> Result<()
 
     let asset_manager = android_app.asset_manager();
     let asset_name = CString::new(ASSET_NAME)?;
-    let mut asset = asset_manager
-        .open(&asset_name)
-        .ok_or_else(|| anyhow!("{ASSET_NAME} asset not present in APK; check `buildZdExec` Gradle task ran"))?;
+    let mut asset = asset_manager.open(&asset_name).ok_or_else(|| {
+        anyhow!("{ASSET_NAME} asset not present in APK; check `buildZdExec` Gradle task ran")
+    })?;
     let expected_len = asset.length();
 
     // Skip re-extraction when the destination already matches the
@@ -89,6 +89,7 @@ pub fn ensure_installed(android_app: &AndroidApp, data_path: &Path) -> Result<()
             target.display(),
             expected_len,
         );
+        ensure_management_launchers(data_path, &target)?;
         return Ok(());
     }
 
@@ -103,8 +104,7 @@ pub fn ensure_installed(android_app: &AndroidApp, data_path: &Path) -> Result<()
     // intermediate name avoids leaving a half-written zd-exec if we
     // crash mid-write.
     let staging = target.with_extension("new");
-    fs::write(&staging, &buf)
-        .with_context(|| format!("write staging {}", staging.display()))?;
+    fs::write(&staging, &buf).with_context(|| format!("write staging {}", staging.display()))?;
     let mut perms = fs::metadata(&staging)?.permissions();
     perms.set_mode(0o755);
     fs::set_permissions(&staging, perms)
@@ -118,6 +118,33 @@ pub fn ensure_installed(android_app: &AndroidApp, data_path: &Path) -> Result<()
         expected_len,
         target.display(),
     );
+    ensure_management_launchers(data_path, &target)?;
+    Ok(())
+}
+
+fn ensure_management_launchers(data_path: &Path, zd_exec: &Path) -> Result<()> {
+    for name in ["zd-run", "zd-service"] {
+        let launcher = data_path.join("usr/.zed/bin").join(name);
+        if let Some(parent) = launcher.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        if let Ok(metadata) = fs::symlink_metadata(&launcher) {
+            if metadata.file_type().is_symlink()
+                && fs::read_link(&launcher).ok().as_deref() == Some(zd_exec)
+            {
+                continue;
+            }
+            if metadata.file_type().is_dir() {
+                return Err(anyhow!(
+                    "{} is a directory; cannot install {name}",
+                    launcher.display()
+                ));
+            }
+            fs::remove_file(&launcher)?;
+        }
+        std::os::unix::fs::symlink(zd_exec, &launcher)
+            .with_context(|| format!("symlink {} -> {}", launcher.display(), zd_exec.display()))?;
+    }
     Ok(())
 }
 
@@ -184,10 +211,15 @@ pub fn ensure_runtime_symlinks(data_path: &Path, binaries: &[String]) -> Result<
     if !binaries.iter().any(|n| n == "zd-exec") {
         binaries.push("zd-exec".to_string());
     }
+    if !binaries.iter().any(|n| n == "zd-run") {
+        binaries.push("zd-run".to_string());
+    }
+    if !binaries.iter().any(|n| n == "zd-service") {
+        binaries.push("zd-service".to_string());
+    }
     let binaries = &binaries;
 
-    let wanted: std::collections::HashSet<&str> =
-        binaries.iter().map(String::as_str).collect();
+    let wanted: std::collections::HashSet<&str> = binaries.iter().map(String::as_str).collect();
 
     // Sweep stale: remove zd-exec-shaped symlinks whose name isn't
     // wanted anymore (typical after an adapter switch).
@@ -232,9 +264,8 @@ pub fn ensure_runtime_symlinks(data_path: &Path, binaries: &[String]) -> Result<
                     continue;
                 }
                 // Symlink exists but points somewhere unexpected. Replace.
-                fs::remove_file(&link).with_context(|| {
-                    format!("removing wrong-target symlink {}", link.display())
-                })?;
+                fs::remove_file(&link)
+                    .with_context(|| format!("removing wrong-target symlink {}", link.display()))?;
             }
             Ok(_) => {
                 // Real file / directory at this name. Don't overwrite.
@@ -244,9 +275,8 @@ pub fn ensure_runtime_symlinks(data_path: &Path, binaries: &[String]) -> Result<
             Err(_) => {} // Doesn't exist yet, create.
         }
 
-        std::os::unix::fs::symlink(target, &link).with_context(|| {
-            format!("symlink {} -> {}", link.display(), target.display())
-        })?;
+        std::os::unix::fs::symlink(target, &link)
+            .with_context(|| format!("symlink {} -> {}", link.display(), target.display()))?;
         created += 1;
     }
 

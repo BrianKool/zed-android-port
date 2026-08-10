@@ -38,7 +38,9 @@ use workspace::{DismissDecision, ModalView, MultiWorkspace, Workspace, client_si
 use zdroid_runtime::{
     HealthStatus, RuntimeId, RuntimeProvider, adapters,
     adapters::chroot::SPAWND_RELEASE_URL,
-    config::{BootstrapConfig, ChrootConfig, ExternalTermuxConfig, RuntimeFile},
+    config::{
+        BootstrapConfig, ChrootConfig, ExternalTermuxConfig, ManagedLinuxConfig, RuntimeFile,
+    },
     health::ProgressSink,
 };
 
@@ -187,8 +189,9 @@ pub struct RuntimePicker {
     /// them here + calls `cx.notify()` so the install button's
     /// label re-renders without the user having to interact.
     install_status: Option<String>,
+    installing_runtime: Option<RuntimeId>,
     /// Last bootstrap install error. Kept visible after the task exits.
-    install_error: Option<String>,
+    install_error: Option<(RuntimeId, String)>,
     /// True once an adapter selection has been saved to
     /// `runtime.toml` and the user needs to fully close and reopen
     /// the app for the change to take effect. Drives the inline
@@ -214,6 +217,7 @@ impl RuntimePicker {
             entries: build_entries(),
             current: detect_current(),
             install_status: None,
+            installing_runtime: None,
             install_error: None,
             restart_required: false,
         }
@@ -225,12 +229,13 @@ impl RuntimePicker {
     /// and extracts to `$PREFIX`. Refreshes adapter health on
     /// completion so the card flips from NotInstalled â†’ Healthy
     /// without the user having to re-open the picker.
-    fn install_bootstrap(&mut self, cx: &mut Context<Self>) {
+    fn install_runtime(&mut self, id: RuntimeId, cx: &mut Context<Self>) {
         if self.install_status.is_some() {
             return; // already in progress
         }
         let (tx, mut rx) = futures::channel::mpsc::unbounded::<String>();
         self.install_status = Some("Starting install".into());
+        self.installing_runtime = Some(id);
         self.install_error = None;
         cx.notify();
 
@@ -239,11 +244,21 @@ impl RuntimePicker {
         // channel; the foreground poller below picks them up.
         cx.background_executor()
             .spawn(async move {
-                let config = default_bootstrap_config();
-                let adapter = match adapters::bootstrap::BootstrapAdapter::new(config) {
-                    Ok(a) => a,
+                let adapter_result: anyhow::Result<Box<dyn RuntimeProvider>> = match id {
+                    RuntimeId::Bootstrap => adapters::bootstrap::BootstrapAdapter::new(
+                        default_bootstrap_config(),
+                    )
+                    .map(|adapter| Box::new(adapter) as Box<dyn RuntimeProvider>),
+                    RuntimeId::ManagedLinux => adapters::managed_linux::ManagedLinuxAdapter::new(
+                        default_managed_linux_config(),
+                    )
+                    .map(|adapter| Box::new(adapter) as Box<dyn RuntimeProvider>),
+                    _ => Err(anyhow::anyhow!("{id:?} has no in-app installer")),
+                };
+                let adapter = match adapter_result {
+                    Ok(adapter) => adapter,
                     Err(err) => {
-                        log::error!("zdroid_runtime_picker: BootstrapAdapter::new failed: {err:#}");
+                        log::error!("zdroid_runtime_picker: adapter creation failed: {err:#}");
                         let _ = tx.unbounded_send(format!("ERROR: {err:#}"));
                         return;
                     }
@@ -254,7 +269,9 @@ impl RuntimePicker {
                 };
                 match adapter.install(&mut sink) {
                     Ok(()) => {
-                        if let Err(err) = super::ensure_agent_cli_launchers() {
+                        if id == RuntimeId::Bootstrap
+                            && let Err(err) = super::ensure_agent_cli_launchers()
+                        {
                             log::error!(
                                 "zdroid_runtime_picker: Agent launcher repair failed: {err:#}"
                             );
@@ -283,7 +300,7 @@ impl RuntimePicker {
             while let Some(msg) = rx.next().await {
                 let _ = this.update(cx, |this, cx| {
                     if let Some(error) = msg.strip_prefix("ERROR: ") {
-                        this.install_error = Some(error.to_string());
+                        this.install_error = Some((id, error.to_string()));
                     } else {
                         this.install_status = Some(msg);
                     }
@@ -292,12 +309,21 @@ impl RuntimePicker {
             }
             let _ = this.update(cx, |this, cx| {
                 this.install_status = None;
+                this.installing_runtime = None;
                 this.entries = build_entries();
                 let bootstrap_ready = this.entries.iter().any(|entry| {
                     entry.id == RuntimeId::Bootstrap
                         && matches!(entry.health, HealthStatus::Healthy)
                 });
-                if this.install_error.is_none() && this.current.is_none() && bootstrap_ready {
+                let install_failed = this
+                    .install_error
+                    .as_ref()
+                    .is_some_and(|(runtime, _)| *runtime == id);
+                if !install_failed
+                    && id == RuntimeId::Bootstrap
+                    && this.current.is_none()
+                    && bootstrap_ready
+                {
                     let path = std::path::PathBuf::from(RUNTIME_TOML_PATH);
                     match RuntimeFile::with_defaults(RuntimeId::Bootstrap).save(&path) {
                         Ok(()) => {
@@ -311,8 +337,11 @@ impl RuntimePicker {
                             cx.emit(DismissEvent);
                         }
                         Err(err) => {
-                            this.install_error = Some(format!(
-                                "Bootstrap installed, but its runtime selection could not be saved: {err:#}"
+                            this.install_error = Some((
+                                RuntimeId::Bootstrap,
+                                format!(
+                                    "Bootstrap installed, but its runtime selection could not be saved: {err:#}"
+                                ),
                             ));
                         }
                     }
@@ -427,7 +456,8 @@ impl Render for RuntimePicker {
                     entry,
                     self.current,
                     self.install_status.as_deref(),
-                    self.install_error.as_deref(),
+                    self.installing_runtime,
+                    self.install_error.as_ref(),
                     compact,
                     cx,
                 )
@@ -531,7 +561,8 @@ fn render_card(
     entry: &AdapterEntry,
     current: Option<RuntimeId>,
     install_status: Option<&str>,
-    install_error: Option<&str>,
+    installing_runtime: Option<RuntimeId>,
+    install_error: Option<&(RuntimeId, String)>,
     compact: bool,
     cx: &mut Context<RuntimePicker>,
 ) -> AnyElement {
@@ -554,14 +585,15 @@ fn render_card(
         HealthStatus::Misconfigured { reason } => Some(reason.clone()),
         HealthStatus::Failed { error } => Some(error.clone()),
     };
-    let detail = if id == RuntimeId::Bootstrap {
+    let detail = if matches!(id, RuntimeId::Bootstrap | RuntimeId::ManagedLinux) {
         install_error
-            .map(|error| format!("Install failed: {error}"))
+            .filter(|(runtime, _)| *runtime == id)
+            .map(|(_, error)| format!("Install failed: {error}"))
             .or(detail)
     } else {
         detail
     };
-    let detail_color = if id == RuntimeId::Bootstrap && install_error.is_some() {
+    let detail_color = if install_error.is_some_and(|(runtime, _)| *runtime == id) {
         Color::Error
     } else {
         Color::Muted
@@ -668,8 +700,11 @@ fn render_card(
                         cx.open_url(SPAWND_RELEASE_URL);
                     }))
                     .into_any_element()
-            } else if id == RuntimeId::Bootstrap
-                && matches!(entry.health, HealthStatus::NotInstalled { .. })
+            } else if matches!(id, RuntimeId::Bootstrap | RuntimeId::ManagedLinux)
+                && matches!(
+                    entry.health,
+                    HealthStatus::NotInstalled { .. } | HealthStatus::Misconfigured { .. }
+                )
             {
                 // Bootstrap adapter has its 240 MB userland in a separate
                 // GitHub repo (`<release_repo>`); Phase 6 of the Termux-
@@ -679,16 +714,24 @@ fn render_card(
                 // button label switches to the live `install_status` for
                 // the duration. After completion the card flips to
                 // Healthy â†’ normal Select.
-                if let Some(status) = install_status {
+                if installing_runtime == Some(id)
+                    && let Some(status) = install_status
+                {
                     Button::new(("installing", idx), status.to_string())
                         .when(compact, |this| this.full_width())
                         .disabled(true)
                         .into_any_element()
                 } else {
-                    Button::new(("install", idx), "Install")
+                    let action_label = if matches!(entry.health, HealthStatus::Misconfigured { .. })
+                    {
+                        "Repair"
+                    } else {
+                        "Install"
+                    };
+                    Button::new(("install", idx), action_label)
                         .when(compact, |this| this.full_width())
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.install_bootstrap(cx);
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.install_runtime(id, cx);
                         }))
                         .into_any_element()
                 }
@@ -732,6 +775,12 @@ fn build_entries() -> Vec<AdapterEntry> {
         .unwrap_or_else(|err| HealthStatus::Failed {
             error: err.to_string(),
         });
+    let managed_linux_health =
+        adapters::managed_linux::ManagedLinuxAdapter::new(default_managed_linux_config())
+            .map(|adapter| adapter.health_check())
+            .unwrap_or_else(|err| HealthStatus::Failed {
+                error: err.to_string(),
+            });
     let termux_health =
         adapters::external_termux::ExternalTermuxAdapter::new(default_termux_config())
             .map(|a| a.health_check())
@@ -749,6 +798,11 @@ fn build_entries() -> Vec<AdapterEntry> {
             id: RuntimeId::Bootstrap,
             tagline: "Self-contained Termux-flavored userland inside Zdroid's sandbox. Bare or proot-wrapped. No root, no external app.",
             health: bootstrap_health,
+        },
+        AdapterEntry {
+            id: RuntimeId::ManagedLinux,
+            tagline: "ARM64 glibc and musl Linux through PRoot-Distro. Use apt/apk or add any compatible OCI image. No root required.",
+            health: managed_linux_health,
         },
         AdapterEntry {
             id: RuntimeId::ExternalTermux,
@@ -772,6 +826,16 @@ fn default_bootstrap_config() -> BootstrapConfig {
         prefix: PathBuf::from("/data/data/com.zdroid/files/usr"),
         proot_rootfs: None,
         release_repo: "Dylanmurzello/zdroid-bootstrap".into(),
+    }
+}
+
+fn default_managed_linux_config() -> ManagedLinuxConfig {
+    ManagedLinuxConfig {
+        bootstrap_prefix: PathBuf::from("/data/data/com.zdroid/files/usr"),
+        container: "zdroid-linux".into(),
+        image: "ubuntu:24.04".into(),
+        musl_container: "zdroid-musl".into(),
+        musl_image: "alpine:3.21".into(),
     }
 }
 

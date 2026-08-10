@@ -3,7 +3,7 @@
 //! On disk the file looks like:
 //!
 //! ```toml
-//! # Active adapter. One of: "chroot", "bootstrap", "external_termux"
+//! # Active adapter. One of: "chroot", "bootstrap", "managed_linux", "external_termux"
 //! [runtime]
 //! type = "chroot"
 //!
@@ -18,6 +18,13 @@
 //! prefix = "/data/data/com.zdroid/files/usr"
 //! proot_rootfs = ""  # empty = bare mode
 //! release_repo = "Dylanmurzello/zdroid-bootstrap"
+//!
+//! [managed_linux]
+//! bootstrap_prefix = "/data/data/com.zdroid/files/usr"
+//! container = "zdroid-linux"
+//! image = "ubuntu:24.04"
+//! musl_container = "zdroid-musl"
+//! musl_image = "alpine:3.21"
 //!
 //! [external_termux]
 //! package = "com.termux"
@@ -45,6 +52,7 @@ use serde::{Deserialize, Serialize};
 pub enum RuntimeId {
     Chroot,
     Bootstrap,
+    ManagedLinux,
     ExternalTermux,
 }
 
@@ -56,6 +64,7 @@ impl RuntimeId {
         match self {
             Self::Chroot => "Chroot rootfs",
             Self::Bootstrap => "Zdroid Bootstrap",
+            Self::ManagedLinux => "Managed Linux",
             Self::ExternalTermux => "Existing Termux app",
         }
     }
@@ -70,6 +79,8 @@ pub struct RuntimeFile {
     pub chroot: Option<ChrootConfig>,
     #[serde(default)]
     pub bootstrap: Option<BootstrapConfig>,
+    #[serde(default)]
+    pub managed_linux: Option<ManagedLinuxConfig>,
     #[serde(default)]
     pub external_termux: Option<ExternalTermuxConfig>,
 }
@@ -116,6 +127,31 @@ pub struct BootstrapConfig {
     pub release_repo: String,
 }
 
+/// Non-root Linux userland managed through PRoot-Distro.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ManagedLinuxConfig {
+    /// Host Bionic prefix containing `proot`, `proot-distro`, and Python.
+    pub bootstrap_prefix: PathBuf,
+    /// Local PRoot-Distro container name.
+    pub container: String,
+    /// OCI image installed when the container does not exist yet.
+    pub image: String,
+    /// Companion musl container used by the compatibility launcher.
+    #[serde(default = "default_musl_container")]
+    pub musl_container: String,
+    /// OCI image installed for ARM64 musl executables.
+    #[serde(default = "default_musl_image")]
+    pub musl_image: String,
+}
+
+fn default_musl_container() -> String {
+    "zdroid-musl".into()
+}
+
+fn default_musl_image() -> String {
+    "alpine:3.21".into()
+}
+
 /// External-Termux-adapter config. Deserialized from `[external_termux]`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExternalTermuxConfig {
@@ -134,6 +170,7 @@ pub struct ExternalTermuxConfig {
 pub enum ResolvedConfig {
     Chroot(ChrootConfig),
     Bootstrap(BootstrapConfig),
+    ManagedLinux(ManagedLinuxConfig),
     ExternalTermux(ExternalTermuxConfig),
 }
 
@@ -143,6 +180,7 @@ impl ResolvedConfig {
         match self {
             Self::Chroot(_) => RuntimeId::Chroot,
             Self::Bootstrap(_) => RuntimeId::Bootstrap,
+            Self::ManagedLinux(_) => RuntimeId::ManagedLinux,
             Self::ExternalTermux(_) => RuntimeId::ExternalTermux,
         }
     }
@@ -154,6 +192,7 @@ impl ResolvedConfig {
 pub enum AdapterConfig {
     Chroot(ChrootConfig),
     Bootstrap(BootstrapConfig),
+    ManagedLinux(ManagedLinuxConfig),
     ExternalTermux(ExternalTermuxConfig),
 }
 
@@ -175,6 +214,7 @@ impl RuntimeFile {
                     su_path: PathBuf::from("/product/bin/su"),
                 }),
                 bootstrap: None,
+                managed_linux: None,
                 external_termux: None,
             },
             RuntimeId::Bootstrap => Self {
@@ -185,12 +225,27 @@ impl RuntimeFile {
                     proot_rootfs: None,
                     release_repo: "Dylanmurzello/zdroid-bootstrap".into(),
                 }),
+                managed_linux: None,
+                external_termux: None,
+            },
+            RuntimeId::ManagedLinux => Self {
+                runtime,
+                chroot: None,
+                bootstrap: None,
+                managed_linux: Some(ManagedLinuxConfig {
+                    bootstrap_prefix: PathBuf::from("/data/data/com.zdroid/files/usr"),
+                    container: "zdroid-linux".into(),
+                    image: "ubuntu:24.04".into(),
+                    musl_container: default_musl_container(),
+                    musl_image: default_musl_image(),
+                }),
                 external_termux: None,
             },
             RuntimeId::ExternalTermux => Self {
                 runtime,
                 chroot: None,
                 bootstrap: None,
+                managed_linux: None,
                 external_termux: Some(ExternalTermuxConfig {
                     package: "com.termux".into(),
                     prefix: PathBuf::from("/data/data/com.termux/files/usr"),
@@ -242,6 +297,12 @@ impl RuntimeFile {
                         anyhow::anyhow!("runtime.type = bootstrap but no [bootstrap] section")
                     })
             }
+            RuntimeId::ManagedLinux => self
+                .managed_linux
+                .map(ResolvedConfig::ManagedLinux)
+                .ok_or_else(|| {
+                    anyhow::anyhow!("runtime.type = managed_linux but no [managed_linux] section")
+                }),
             RuntimeId::ExternalTermux => self
                 .external_termux
                 .map(ResolvedConfig::ExternalTermux)

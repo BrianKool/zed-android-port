@@ -4354,7 +4354,7 @@ impl Thread {
         let use_mobile_local_prompt = self
             .model()
             .is_some_and(|model| model.provider_id().0.as_ref() == ZDROID_LOCAL_PROVIDER_ID);
-        let system_prompt = if use_mobile_local_prompt {
+        let mut system_prompt = if use_mobile_local_prompt {
             MobileLocalSystemPromptTemplate {
                 project,
                 available_tools,
@@ -4382,6 +4382,17 @@ impl Thread {
         }
         .context("failed to build system prompt")
         .expect("Invalid template");
+        #[cfg(target_os = "android")]
+        system_prompt.push_str(
+            "\n\n## Zdroid-B Runtime\n\
+             - This is Android with a Termux-flavored Bionic bootstrap, not Ubuntu.\n\
+             - Do not install PRoot or modify files outside the project unless the user explicitly confirms it.\n\
+             - Before installing a server, inspect the executable architecture, ELF loader/libc, required ports, and disk usage.\n\
+             - `zd-run PATH [ARGS...]` identifies ARM64 ELF binaries and routes Bionic, glibc, or musl executables to a compatible installed runtime.\n\
+             - Managed Linux is an explicit user-installed PRoot-Distro runtime. Use its normal apt/apk package manager or compatible ARM64 OCI images; do not pretend that creating a connection string installs a server.\n\
+             - If software is incompatible, explain whether it needs Android/Bionic, Linux glibc, Linux musl, a static ARM64 binary, or a Managed Linux container. Do not silently substitute another environment.\n\
+             - Use `zd-service` only for user-requested background services. List tracked sessions before stopping one.\n",
+        );
         let mut messages = vec![LanguageModelRequestMessage {
             role: Role::System,
             content: vec![system_prompt.into()],

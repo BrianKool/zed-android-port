@@ -42,11 +42,13 @@
 
 pub mod adapters;
 pub mod config;
+pub mod elf;
 pub mod health;
 pub mod port;
 pub mod setup;
 
 pub use config::{AdapterConfig, ResolvedConfig, RuntimeId};
+pub use elf::{Architecture, BinaryFormat, ElfInfo, LibcFamily, inspect_binary};
 pub use health::{HealthStatus, ProgressSink};
 pub use port::{RuntimeProvider, SpawnHandle, SpawnRequest};
 pub use setup::{InstallStep, SetupOutcome};

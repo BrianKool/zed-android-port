@@ -515,6 +515,28 @@ impl MultiWorkspace {
     }
 
     pub fn close_sidebar(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.hide_sidebar(window, cx);
+    }
+
+    /// Hides the sidebar while leaving the focus selected by the caller intact.
+    ///
+    /// The compact Android thread picker activates an agent thread before hiding
+    /// itself. Restoring the focus captured when the picker opened would replace
+    /// that newly activated thread's focus with a stale handle.
+    pub fn hide_sidebar_preserving_focus(&mut self, cx: &mut Context<Self>) {
+        self.sidebar_open = false;
+        for workspace in self.workspaces().cloned().collect::<Vec<_>>() {
+            workspace.update(cx, |workspace, _cx| {
+                workspace.set_sidebar_focus_handle(None);
+            });
+        }
+        self.previous_focus_handle.take();
+        self.serialize(cx);
+        cx.notify();
+    }
+
+    /// Hides the sidebar without dropping its view or state.
+    pub fn hide_sidebar(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let side = match self.sidebar_side(cx) {
             SidebarSide::Left => "left",
             SidebarSide::Right => "right",
@@ -2014,6 +2036,8 @@ impl Render for MultiWorkspace {
         let multi_workspace_enabled = self.multi_workspace_enabled(cx);
         let sidebar_side = self.sidebar_side(cx);
         let sidebar_on_right = sidebar_side == SidebarSide::Right;
+        let compact_mobile_sidebar = cfg!(target_os = "android")
+            && window.viewport_size().width.as_f32() < 600.0;
 
         let sidebar: Option<AnyElement> = if multi_workspace_enabled && self.sidebar_open() {
             self.sidebar.as_ref().map(|sidebar_handle| {
@@ -2065,20 +2089,25 @@ impl Render for MultiWorkspace {
                     .id("sidebar-container")
                     .relative()
                     .h_full()
-                    .w(sidebar_width)
+                    .when(!compact_mobile_sidebar, |this| this.w(sidebar_width))
+                    .when(compact_mobile_sidebar, |this| {
+                        this.absolute().inset_0().size_full().occlude()
+                    })
                     .flex_shrink_0()
                     .child(sidebar_handle.to_any())
-                    .child(resize_handle)
+                    .when(!compact_mobile_sidebar, |this| this.child(resize_handle))
                     .into_any_element()
             })
         } else {
             None
         };
 
-        let (left_sidebar, right_sidebar) = if sidebar_on_right {
-            (None, sidebar)
+        let (left_sidebar, right_sidebar, mobile_sidebar) = if compact_mobile_sidebar {
+            (None, None, sidebar)
+        } else if sidebar_on_right {
+            (None, sidebar, None)
         } else {
-            (sidebar, None)
+            (sidebar, None, None)
         };
 
         let ui_font = theme_settings::setup_ui_font(window, cx);
@@ -2183,6 +2212,7 @@ impl Render for MultiWorkspace {
                         .child(self.workspace().clone()),
                 )
                 .children(right_sidebar)
+                .children(mobile_sidebar)
                 .child(self.workspace().read(cx).modal_layer.clone())
                 .children(self.sidebar_overlay.as_ref().map(|view| {
                     if cfg!(target_os = "android") {

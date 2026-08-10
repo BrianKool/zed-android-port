@@ -18,6 +18,7 @@ pub mod bootstrap;
 pub mod bootstrap_install;
 pub mod chroot;
 pub mod external_termux;
+pub mod managed_linux;
 
 use crate::config::ResolvedConfig;
 use crate::port::RuntimeProvider;
@@ -32,6 +33,9 @@ pub fn for_config(config: &ResolvedConfig) -> anyhow::Result<Box<dyn RuntimeProv
     match config {
         ResolvedConfig::Chroot(cfg) => chroot::ChrootAdapter::new(cfg.clone()).map(box_it),
         ResolvedConfig::Bootstrap(cfg) => bootstrap::BootstrapAdapter::new(cfg.clone()).map(box_it),
+        ResolvedConfig::ManagedLinux(cfg) => {
+            managed_linux::ManagedLinuxAdapter::new(cfg.clone()).map(box_it)
+        }
         ResolvedConfig::ExternalTermux(cfg) => {
             external_termux::ExternalTermuxAdapter::new(cfg.clone()).map(box_it)
         }
