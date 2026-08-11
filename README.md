@@ -233,7 +233,7 @@ First build is around 10 minutes. Incremental Rust rebuilds are 20 seconds, Grad
 
 ## <img src="https://api.iconify.design/lucide:tablet-smartphone.svg?color=%23999999&height=22" valign="middle" /> &nbsp;Tested on
 
-Zdroid-B 1.0 has been exercised on a Samsung phone at 360 logical pixels and in Samsung DeX, including touch input, a hardware mouse and keyboard, GitHub login, Codex, Claude, and Vulkan-accelerated Qwen 2.5 Coder 7B inference. It compiles for arm64 Android 9+ with Vulkan 1.1. Other GPU families may require device-specific Vulkan tuning.
+Zdroid-B 1.1.1 targets Samsung phones at 360 logical pixels and Samsung DeX, including touch input, a hardware mouse and keyboard, GitHub login, Codex, Claude, Managed Linux, and Vulkan-accelerated local LLM inference. It compiles for arm64 Android 9+ with Vulkan 1.1. Other GPU families may require device-specific Vulkan tuning.
 
 Touch-only phone use, tablet keyboards, Bluetooth input, and DeX are supported. Local 7B inference needs several gigabytes of free RAM and can heat the device; smaller 1B-3B models are the practical default for longer mobile sessions.
 

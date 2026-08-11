@@ -8,7 +8,7 @@
 use std::collections::BTreeSet;
 use std::ffi::OsString;
 use std::fs::File;
-use std::io::{BufRead, BufReader};
+use std::io::{self, BufRead, BufReader, Read};
 use std::os::fd::BorrowedFd;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -23,6 +23,34 @@ use crate::health::{HealthStatus, ProgressSink};
 use crate::port::{RuntimeProvider, SpawnHandle, SpawnRequest};
 
 const CONTAINER_NAME_MAX: usize = 80;
+const MIN_INSTALL_FREE_BYTES: u64 = 1536 * 1024 * 1024;
+const MAX_INSTALL_OUTPUT_BYTES: usize = 256 * 1024;
+
+fn stream_install_output(
+    mut reader: impl Read + Send + 'static,
+    sender: std::sync::mpsc::SyncSender<io::Result<String>>,
+) {
+    thread::spawn(move || {
+        let mut buffer = [0_u8; 4096];
+        loop {
+            match reader.read(&mut buffer) {
+                Ok(0) => break,
+                Ok(read) => {
+                    if sender
+                        .send(Ok(String::from_utf8_lossy(&buffer[..read]).into_owned()))
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+                Err(error) => {
+                    let _ = sender.send(Err(error));
+                    break;
+                }
+            }
+        }
+    });
+}
 
 pub struct ManagedLinuxAdapter {
     config: ManagedLinuxConfig,
@@ -345,6 +373,7 @@ impl ManagedLinuxAdapter {
         if self.rootfs_for(container).is_some() {
             return Ok(());
         }
+        self.ensure_install_space()?;
         self.remove_incomplete_container_state(container)?;
         progress.step(&format!("Downloading ARM64 Linux image {image}"));
         progress.progress(0, 0);
@@ -363,20 +392,49 @@ impl ManagedLinuxAdapter {
                 command.args(["--override-alias", container, distro]);
             }
         }
-        let output = command
-            .output()
-            .context("install Managed Linux container")?;
-        if !output.status.success() {
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            let details = [stderr.trim(), stdout.trim()]
-                .into_iter()
-                .filter(|text| !text.is_empty())
-                .collect::<Vec<_>>()
-                .join(" ");
+        command.stdout(Stdio::piped()).stderr(Stdio::piped());
+        let mut child = command
+            .spawn()
+            .context("start Managed Linux container installation")?;
+        let stdout = child.stdout.take().context("capture proot-distro stdout")?;
+        let stderr = child.stderr.take().context("capture proot-distro stderr")?;
+        let (sender, receiver) = std::sync::mpsc::sync_channel(32);
+        stream_install_output(stdout, sender.clone());
+        stream_install_output(stderr, sender.clone());
+        drop(sender);
+
+        let mut details = String::new();
+        for line in receiver {
+            match line {
+                Ok(chunk) if !chunk.trim().is_empty() => {
+                    let status = chunk
+                        .lines()
+                        .rev()
+                        .find(|line| !line.trim().is_empty())
+                        .unwrap_or(chunk.trim());
+                    progress.step(&format!("Installing Linux: {}", status.trim()));
+                    progress.progress(0, 0);
+                    if details.len() < MAX_INSTALL_OUTPUT_BYTES {
+                        let remaining = MAX_INSTALL_OUTPUT_BYTES - details.len();
+                        let mut end = chunk.len().min(remaining);
+                        while !chunk.is_char_boundary(end) {
+                            end -= 1;
+                        }
+                        details.push_str(&chunk[..end]);
+                    }
+                }
+                Ok(_) => {}
+                Err(error) => log::warn!("read proot-distro install output: {error}"),
+            }
+        }
+        let status = child
+            .wait()
+            .context("wait for Managed Linux container installation")?;
+        if !status.success() {
+            let details = details.trim();
             bail!(
                 "proot-distro install failed with {}{}",
-                output.status,
+                status,
                 if details.is_empty() {
                     String::new()
                 } else {
@@ -386,6 +444,24 @@ impl ManagedLinuxAdapter {
         }
         if self.rootfs_for(container).is_none() {
             bail!("Managed Linux install completed but container '{container}' has no rootfs");
+        }
+        Ok(())
+    }
+
+    fn ensure_install_space(&self) -> Result<()> {
+        #[cfg(target_os = "android")]
+        {
+            let stats = nix::sys::statvfs::statvfs(&self.config.bootstrap_prefix)
+                .context("check free space for Managed Linux")?;
+            let available = stats
+                .blocks_available()
+                .saturating_mul(stats.fragment_size());
+            if available < MIN_INSTALL_FREE_BYTES {
+                bail!(
+                    "Managed Linux needs at least 1.5 GB free; only {:.1} GB is available",
+                    available as f64 / 1_073_741_824.0
+                );
+            }
         }
         Ok(())
     }

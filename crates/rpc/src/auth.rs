@@ -70,15 +70,15 @@ impl PrivateKey {
         let encrypted_bytes = BASE64_URL_SAFE
             .decode(encrypted_string)
             .context("failed to base64-decode encrypted string")?;
-        let bytes = self
-            .0
-            .decrypt(oaep_sha256_padding(), &encrypted_bytes)
-            .or_else(|_err| {
-                // If we failed to decrypt using the new format, try decrypting with the old
-                // one to handle mismatches between the client and server.
-                self.0.decrypt(Pkcs1v15Encrypt, &encrypted_bytes)
-            })
-            .context("failed to decrypt string with private key")?;
+        let bytes = self.0.decrypt(oaep_sha256_padding(), &encrypted_bytes);
+        #[cfg(not(target_os = "android"))]
+        let bytes = bytes.or_else(|_err| {
+            // Desktop still accepts the historical V0 wire format. Android
+            // release builds disable this timing-sensitive RSA fallback and
+            // require the OAEP format used by current servers.
+            self.0.decrypt(Pkcs1v15Encrypt, &encrypted_bytes)
+        });
+        let bytes = bytes.context("failed to decrypt string with private key")?;
         let string = String::from_utf8(bytes).context("decrypted content was not valid utf8")?;
         Ok(string)
     }

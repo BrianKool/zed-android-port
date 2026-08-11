@@ -3,9 +3,11 @@
 use std::{
     fs,
     io::{Read as _, Write as _},
+    os::unix::fs::PermissionsExt as _,
     os::unix::net::{UnixListener, UnixStream},
     path::{Path, PathBuf},
     sync::OnceLock,
+    time::Duration,
 };
 
 use android_activity::AndroidApp;
@@ -14,6 +16,8 @@ use anyhow::{Context as _, Result};
 const CREDENTIAL_KEY: &str = "https://github.com";
 const SOCKET_NAME: &str = "github-credential.sock";
 const HELPER_NAME: &str = "zed-askpass-helper";
+const MAX_REQUEST_BYTES: u64 = 16 * 1024;
+const IO_TIMEOUT: Duration = Duration::from_secs(5);
 
 static SERVER_STARTED: OnceLock<()> = OnceLock::new();
 
@@ -52,6 +56,8 @@ pub fn start(android_app: &AndroidApp, data_path: &Path) -> Result<()> {
     }
     let listener = UnixListener::bind(&socket_path)
         .with_context(|| format!("bind credential socket {}", socket_path.display()))?;
+    fs::set_permissions(&socket_path, fs::Permissions::from_mode(0o600))
+        .with_context(|| format!("secure credential socket {}", socket_path.display()))?;
     let app = android_app.clone();
     let thread_socket_path = socket_path.clone();
     std::thread::Builder::new()
@@ -73,9 +79,25 @@ fn serve(listener: UnixListener, android_app: AndroidApp, socket_path: PathBuf) 
 }
 
 fn serve_request(mut stream: UnixStream, android_app: &AndroidApp) {
+    if let Err(error) = stream.set_read_timeout(Some(IO_TIMEOUT)) {
+        log::warn!("GitHub credential request timeout setup failed: {error}");
+        return;
+    }
+    if let Err(error) = stream.set_write_timeout(Some(IO_TIMEOUT)) {
+        log::warn!("GitHub credential response timeout setup failed: {error}");
+        return;
+    }
+
     let mut request = String::new();
-    if let Err(error) = stream.read_to_string(&mut request) {
+    if let Err(error) = (&mut stream)
+        .take(MAX_REQUEST_BYTES + 1)
+        .read_to_string(&mut request)
+    {
         log::warn!("GitHub credential request read failed: {error}");
+        return;
+    }
+    if request.len() as u64 > MAX_REQUEST_BYTES {
+        log::warn!("GitHub credential request exceeded {MAX_REQUEST_BYTES} bytes");
         return;
     }
     if !is_github_https_request(&request) {

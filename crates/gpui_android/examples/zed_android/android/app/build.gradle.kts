@@ -20,6 +20,10 @@ val signingProps = Properties().apply {
     }
 }
 val hasReleaseSigning = signingPropsFile.exists()
+val requiredSigningProperties = listOf("storeFile", "storePassword", "keyAlias", "keyPassword")
+val hasCompleteReleaseSigning = hasReleaseSigning && requiredSigningProperties.all {
+    !signingProps.getProperty(it).isNullOrBlank()
+}
 
 // Cargo build scripts (notably wasmtime-c-api-impl) invoke `cmake`
 // directly. Android Studio installs CMake inside the SDK but does not add it
@@ -327,8 +331,8 @@ android {
         // denied â€” the entire L2 plan stops working. Skipping Play Store
         // eligibility is the explicit trade.
         targetSdk = 28
-        versionCode = 132
-        versionName = "1.1"
+        versionCode = 133
+        versionName = "1.1.1"
         ndk {
             abiFilters += listOf("arm64-v8a")
         }
@@ -368,7 +372,7 @@ android {
     }
 
     signingConfigs {
-        if (hasReleaseSigning) {
+        if (hasCompleteReleaseSigning) {
             create("release") {
                 storeFile = file(signingProps.getProperty("storeFile"))
                 storePassword = signingProps.getProperty("storePassword")
@@ -384,11 +388,36 @@ android {
         }
         getByName("release") {
             isMinifyEnabled = false
-            if (hasReleaseSigning) {
+            if (hasCompleteReleaseSigning) {
                 signingConfig = signingConfigs.getByName("release")
             }
         }
     }
+}
+
+val verifyReleaseSigning by tasks.registering {
+    description = "Fail official release builds unless every signing secret is configured."
+    group = "verification"
+    doLast {
+        check(hasCompleteReleaseSigning) {
+            val missing = if (!hasReleaseSigning) {
+                "signing.properties"
+            } else {
+                requiredSigningProperties
+                    .filter { signingProps.getProperty(it).isNullOrBlank() }
+                    .joinToString()
+            }
+            "Release signing is incomplete (missing: $missing). Use assembleDebug for local unsigned work."
+        }
+        val keyStore = file(signingProps.getProperty("storeFile"))
+        check(keyStore.isFile) { "Release keystore does not exist: ${keyStore.path}" }
+    }
+}
+
+tasks.matching {
+    it.name == "assembleRelease" || it.name == "bundleRelease" || it.name == "packageRelease"
+}.configureEach {
+    dependsOn(verifyReleaseSigning)
 }
 
 dependencies {

@@ -145,13 +145,31 @@ pub fn fetch_latest_tag() -> Result<String> {
 /// Uses the `semver` crate so pre-release and build metadata follow the
 /// standard ordering rules.
 pub fn is_newer(current: &str, latest: &str) -> bool {
-    match (
-        semver::Version::parse(current),
-        semver::Version::parse(latest),
-    ) {
+    match (parse_version(current), parse_version(latest)) {
         (Ok(current), Ok(latest)) => latest > current,
         _ => false,
     }
+}
+
+/// Parse release versions emitted by both current and historical Zdroid
+/// builds. Android accepted the old two-component `1.1` versionName, while
+/// semver correctly requires `1.1.0`; normalizing missing numeric components
+/// keeps those installed builds on the update path forever.
+fn parse_version(value: &str) -> Result<semver::Version, semver::Error> {
+    let value = value
+        .trim()
+        .trim_start_matches(|character| matches!(character, 'v' | 'V'));
+    let suffix_start = value
+        .find(|character| matches!(character, '-' | '+'))
+        .unwrap_or(value.len());
+    let (core, suffix) = value.split_at(suffix_start);
+    let component_count = core.split('.').count();
+    let normalized = match component_count {
+        1 => format!("{core}.0.0{suffix}"),
+        2 => format!("{core}.0{suffix}"),
+        _ => value.to_owned(),
+    };
+    semver::Version::parse(&normalized)
 }
 
 /// Returns the currently-installed app `versionName` via JNI to
@@ -395,5 +413,14 @@ mod tests {
         assert!(!is_newer("0.2.1", "0.2.1-pre"));
         assert!(!is_newer("not-a-version", "1.0.1"));
         assert!(!is_newer("1.0.0", "not-a-version"));
+    }
+
+    #[test]
+    fn historical_android_versions_remain_updatable() {
+        assert!(is_newer("1.1", "1.1.1"));
+        assert!(is_newer("v1.1", "v1.2"));
+        assert!(is_newer("1", "1.0.1"));
+        assert!(is_newer("1.1-beta.1", "1.1"));
+        assert!(!is_newer("1.1.1", "1.1"));
     }
 }

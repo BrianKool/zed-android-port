@@ -641,7 +641,7 @@ impl Render for GithubAccountsModal {
                         ModalHeader::new()
                             .headline("GitHub Accounts")
                             .description(
-                                "Use GitHub authentication for HTTPS clone, fetch, pull, and push.",
+                                "Use GitHub authentication for HTTPS clone, fetch, pull, and push. Terminal processes can use this credential, so only run repositories you trust.",
                             )
                             .show_dismiss_button(true),
                     )
