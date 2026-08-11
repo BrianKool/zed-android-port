@@ -513,6 +513,13 @@ impl Render for EssentialSetupModal {
                 .color(Color::Muted),
             )
             .child(
+                Label::new(
+                    "Estimated time: around 10 minutes. Setup continues in the background, so you can leave Zdroid-B and return later.",
+                )
+                .size(LabelSize::XSmall)
+                .color(Color::Muted),
+            )
+            .child(
                 h_flex()
                     .w_full()
                     .justify_between()
@@ -547,7 +554,7 @@ impl Render for EssentialSetupModal {
             .when(is_upgrade && self.state.error.is_none(), |this| {
                 this.child(
                     Label::new(
-                        "The first package upgrade can take around 10 minutes. It will continue in the background and the notification will keep updating.",
+                        "The package upgrade is usually the longest step. The notification will keep showing its current status.",
                     )
                     .size(LabelSize::XSmall)
                     .color(Color::Muted),

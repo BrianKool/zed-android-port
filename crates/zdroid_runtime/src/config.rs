@@ -21,9 +21,9 @@
 //!
 //! [managed_linux]
 //! bootstrap_prefix = "/data/data/com.zdroid/files/usr"
-//! container = "zdroid-linux"
+//! container = "ubuntu"
 //! image = "ubuntu:24.04"
-//! musl_container = "zdroid-musl"
+//! musl_container = "alpine"
 //! musl_image = "alpine:3.21"
 //!
 //! [external_termux]
@@ -145,7 +145,7 @@ pub struct ManagedLinuxConfig {
 }
 
 fn default_musl_container() -> String {
-    "zdroid-musl".into()
+    "alpine".into()
 }
 
 fn default_musl_image() -> String {
@@ -234,7 +234,7 @@ impl RuntimeFile {
                 bootstrap: None,
                 managed_linux: Some(ManagedLinuxConfig {
                     bootstrap_prefix: PathBuf::from("/data/data/com.zdroid/files/usr"),
-                    container: "zdroid-linux".into(),
+                    container: "ubuntu".into(),
                     image: "ubuntu:24.04".into(),
                     musl_container: default_musl_container(),
                     musl_image: default_musl_image(),

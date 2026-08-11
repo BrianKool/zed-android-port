@@ -1,26 +1,18 @@
 //! Runtime adapter picker â€” lets the user pick which userland Zdroid
-//! routes its spawns through (chroot, bootstrap, external Termux).
+//! routes its spawns through. First launch offers Standard (Bootstrap) or
+//! Full Linux (Bootstrap + Ubuntu); Settings also exposes advanced runtimes
+//! and optional Alpine musl compatibility.
 //!
 //! Surfaces as a centered modal triggered by the `zdroid: pick runtime`
 //! action. Mirrors Zed's welcome-page card aesthetic.
 //!
-//! v1 scope (this commit):
-//!   - Render three cards with name, tagline, live health snapshot.
-//!   - Select button per card. Click logs the choice + dismisses.
-//!     Persistence to `runtime.toml` lands once we've nailed down
-//!     where Zdroid stores adapter config (likely `$PREFIX/etc/zd-runtime.toml`)
-//!     and added the file-write helper.
-//!
-//! Future scope (queued in tasks #33/#34):
-//!   - Install / Uninstall buttons backed by adapter `install()` paths.
-//!   - "Restart Zdroid" prompt after a switch.
-//!   - First-launch auto-open when no `runtime.toml` exists yet.
 
 use std::path::PathBuf;
 use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
 };
+use std::time::{Duration, Instant};
 
 use gpui::{
     AnyElement, App, AppContext as _, Context, DismissEvent, Entity, EventEmitter, FocusHandle,
@@ -30,8 +22,8 @@ use platform_title_bar::PlatformTitleBar;
 use theme::ActiveTheme;
 use ui::{
     Button, Chip, Clickable, Color, Disableable, FixedWidth, FluentBuilder, Headline, HeadlineSize,
-    Icon, IconName, IconSize, Label, LabelCommon, LabelSize, ParentElement, Styled, WithScrollbar,
-    div, h_flex, v_flex, vh, vw,
+    Icon, IconName, IconSize, Label, LabelCommon, LabelSize, ParentElement, ProgressBar,
+    SpinnerLabel, Styled, WithScrollbar, div, h_flex, v_flex, vh, vw,
 };
 use util::ResultExt as _;
 use workspace::{DismissDecision, ModalView, MultiWorkspace, Workspace, client_side_decorations};
@@ -50,11 +42,14 @@ use zdroid_runtime::{
 struct ChannelProgressSink {
     tx: futures::channel::mpsc::UnboundedSender<String>,
     last_percent: Option<u64>,
+    current_step: String,
 }
 
 impl ProgressSink for ChannelProgressSink {
     fn step(&mut self, label: &str) {
         log::info!("zdroid_runtime_picker: step: {}", label);
+        self.current_step = label.to_string();
+        self.last_percent = None;
         let _ = self.tx.unbounded_send(label.to_string());
     }
     fn progress(&mut self, done: u64, total: u64) {
@@ -64,9 +59,12 @@ impl ProgressSink for ChannelProgressSink {
                 return;
             }
             self.last_percent = Some(pct);
-            let _ = self
-                .tx
-                .unbounded_send(format!("Downloading bootstrap {pct}%"));
+            let label = if self.current_step.is_empty() {
+                "Installing runtime"
+            } else {
+                &self.current_step
+            };
+            let _ = self.tx.unbounded_send(format!("{label} {pct}%"));
         }
     }
     fn warn(&mut self, message: &str) {
@@ -81,6 +79,7 @@ impl ProgressSink for ChannelProgressSink {
 /// editor APK updates the same way other user state does.
 const RUNTIME_TOML_PATH: &str = "/data/data/com.zdroid/files/usr/etc/zd-runtime.toml";
 static FIRST_RUNTIME_PICKER_OPENED: AtomicBool = AtomicBool::new(false);
+const RUNTIME_INSTALL_TASK_ID: &str = "zdroid-runtime-install";
 
 actions!(
     zdroid_runtime,
@@ -168,8 +167,24 @@ fn open_runtime_picker(cx: &mut App) {
         .log_err();
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum EntryKind {
+    Runtime(RuntimeId),
+    MuslCompatibility,
+}
+
+impl EntryKind {
+    fn runtime_id(self) -> Option<RuntimeId> {
+        match self {
+            Self::Runtime(id) => Some(id),
+            Self::MuslCompatibility => None,
+        }
+    }
+}
+
 struct AdapterEntry {
-    id: RuntimeId,
+    kind: EntryKind,
+    name: &'static str,
     tagline: &'static str,
     health: HealthStatus,
 }
@@ -189,9 +204,10 @@ pub struct RuntimePicker {
     /// them here + calls `cx.notify()` so the install button's
     /// label re-renders without the user having to interact.
     install_status: Option<String>,
-    installing_runtime: Option<RuntimeId>,
+    install_started_at: Option<Instant>,
+    installing_runtime: Option<EntryKind>,
     /// Last bootstrap install error. Kept visible after the task exits.
-    install_error: Option<(RuntimeId, String)>,
+    install_error: Option<(EntryKind, String)>,
     /// True once an adapter selection has been saved to
     /// `runtime.toml` and the user needs to fully close and reopen
     /// the app for the change to take effect. Drives the inline
@@ -201,6 +217,7 @@ pub struct RuntimePicker {
     /// policies); the user closes via Recents and reopens from the
     /// launcher.
     restart_required: bool,
+    first_setup: bool,
 }
 
 impl RuntimePicker {
@@ -210,79 +227,89 @@ impl RuntimePicker {
         } else {
             None
         };
+        let current = detect_current();
+        let first_setup = current.is_none();
         Self {
             title_bar,
             focus_handle: cx.focus_handle(),
             scroll_handle: ScrollHandle::new(),
-            entries: build_entries(),
-            current: detect_current(),
+            entries: build_entries(first_setup),
+            current,
             install_status: None,
+            install_started_at: None,
             installing_runtime: None,
             install_error: None,
             restart_required: false,
+            first_setup,
         }
     }
 
-    /// Trigger an async bootstrap install. Drops the user into a
-    /// "downloading + extracting" state on the Bootstrap card while
-    /// the background task pulls the latest release zip from GitHub
-    /// and extracts to `$PREFIX`. Refreshes adapter health on
+    /// Install a runtime setup or optional compatibility component. Completed
+    /// stages are idempotent, so retries resume instead of redownloading them.
     /// completion so the card flips from NotInstalled â†’ Healthy
-    /// without the user having to re-open the picker.
-    fn install_runtime(&mut self, id: RuntimeId, cx: &mut Context<Self>) {
+    fn install_runtime(&mut self, target: EntryKind, cx: &mut Context<Self>) {
         if self.install_status.is_some() {
             return; // already in progress
         }
         let (tx, mut rx) = futures::channel::mpsc::unbounded::<String>();
         self.install_status = Some("Starting install".into());
-        self.installing_runtime = Some(id);
+        self.install_started_at = Some(Instant::now());
+        self.installing_runtime = Some(target);
         self.install_error = None;
+        cx.start_background_task(RUNTIME_INSTALL_TASK_ID, runtime_install_label(target));
         cx.notify();
+
+        // Keep the elapsed time and spinner visibly alive even while an
+        // external package manager or archive extraction emits no progress.
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(Duration::from_secs(1)).await;
+                let still_installing = this
+                    .update(cx, |this, cx| {
+                        let active = this.installing_runtime == Some(target);
+                        if active {
+                            cx.notify();
+                        }
+                        active
+                    })
+                    .unwrap_or(false);
+                if !still_installing {
+                    break;
+                }
+            }
+        })
+        .detach();
 
         // Background: run the actual install. Blocks on ureq +
         // zip extract. ProgressSink pushes status strings into the
         // channel; the foreground poller below picks them up.
         cx.background_executor()
             .spawn(async move {
-                let adapter_result: anyhow::Result<Box<dyn RuntimeProvider>> = match id {
-                    RuntimeId::Bootstrap => adapters::bootstrap::BootstrapAdapter::new(
-                        default_bootstrap_config(),
-                    )
-                    .map(|adapter| Box::new(adapter) as Box<dyn RuntimeProvider>),
-                    RuntimeId::ManagedLinux => adapters::managed_linux::ManagedLinuxAdapter::new(
-                        default_managed_linux_config(),
-                    )
-                    .map(|adapter| Box::new(adapter) as Box<dyn RuntimeProvider>),
-                    _ => Err(anyhow::anyhow!("{id:?} has no in-app installer")),
-                };
-                let adapter = match adapter_result {
-                    Ok(adapter) => adapter,
-                    Err(err) => {
-                        log::error!("zdroid_runtime_picker: adapter creation failed: {err:#}");
-                        let _ = tx.unbounded_send(format!("ERROR: {err:#}"));
-                        return;
-                    }
-                };
                 let mut sink = ChannelProgressSink {
                     tx: tx.clone(),
                     last_percent: None,
+                    current_step: String::new(),
                 };
-                match adapter.install(&mut sink) {
+                let install_result = install_runtime_components(target, &mut sink);
+                match install_result {
                     Ok(()) => {
-                        if id == RuntimeId::Bootstrap
+                        if matches!(
+                            target,
+                            EntryKind::Runtime(RuntimeId::Bootstrap | RuntimeId::ManagedLinux)
+                        )
                             && let Err(err) = super::ensure_agent_cli_launchers()
                         {
                             log::error!(
                                 "zdroid_runtime_picker: Agent launcher repair failed: {err:#}"
                             );
                             let _ = tx.unbounded_send(format!(
-                                "ERROR: Bootstrap installed, but Agent launchers could not be created: {err:#}"
+                                "ERROR: Runtime installed, but Agent launchers could not be created: {err:#}"
                             ));
                         }
                     }
                     Err(err) => {
                         log::error!(
-                            "zdroid_runtime_picker: BootstrapAdapter::install failed: {err:#}"
+                            "zdroid_runtime_picker: runtime install failed: {err:#}"
                         );
                         let _ = tx.unbounded_send(format!("ERROR: {err:#}"));
                     }
@@ -300,47 +327,60 @@ impl RuntimePicker {
             while let Some(msg) = rx.next().await {
                 let _ = this.update(cx, |this, cx| {
                     if let Some(error) = msg.strip_prefix("ERROR: ") {
-                        this.install_error = Some((id, error.to_string()));
+                        this.install_error = Some((target, error.to_string()));
                     } else {
                         this.install_status = Some(msg);
+                        if let Some(status) = this.install_status.as_deref() {
+                            cx.start_background_task(RUNTIME_INSTALL_TASK_ID, status);
+                        }
                     }
                     cx.notify();
                 });
             }
             let _ = this.update(cx, |this, cx| {
                 this.install_status = None;
+                this.install_started_at = None;
                 this.installing_runtime = None;
-                this.entries = build_entries();
-                let bootstrap_ready = this.entries.iter().any(|entry| {
-                    entry.id == RuntimeId::Bootstrap
-                        && matches!(entry.health, HealthStatus::Healthy)
+                this.entries = build_entries(this.first_setup);
+                let runtime_ready = this.entries.iter().any(|entry| {
+                    entry.kind == target && matches!(entry.health, HealthStatus::Healthy)
                 });
                 let install_failed = this
                     .install_error
                     .as_ref()
-                    .is_some_and(|(runtime, _)| *runtime == id);
+                    .is_some_and(|(runtime, _)| *runtime == target);
+                cx.finish_background_task(
+                    RUNTIME_INSTALL_TASK_ID,
+                    if install_failed {
+                        "Runtime installation failed"
+                    } else {
+                        "Runtime installation completed"
+                    },
+                    !install_failed,
+                );
                 if !install_failed
-                    && id == RuntimeId::Bootstrap
                     && this.current.is_none()
-                    && bootstrap_ready
+                    && runtime_ready
+                    && let Some(id) = target.runtime_id()
                 {
                     let path = std::path::PathBuf::from(RUNTIME_TOML_PATH);
-                    match RuntimeFile::with_defaults(RuntimeId::Bootstrap).save(&path) {
+                    match RuntimeFile::with_defaults(id).save(&path) {
                         Ok(()) => {
-                            this.current = Some(RuntimeId::Bootstrap);
+                            this.current = Some(id);
                             cx.set_global(onboarding::runtime_global::ActiveRuntime {
-                                current: Some(RuntimeId::Bootstrap),
+                                current: Some(id),
                             });
                             log::info!(
-                                "zdroid_runtime_picker: first Bootstrap install selected without restart"
+                                "zdroid_runtime_picker: first {:?} setup selected without restart",
+                                id
                             );
                             cx.emit(DismissEvent);
                         }
                         Err(err) => {
                             this.install_error = Some((
-                                RuntimeId::Bootstrap,
+                                target,
                                 format!(
-                                    "Bootstrap installed, but its runtime selection could not be saved: {err:#}"
+                                    "Runtime installed, but its selection could not be saved: {err:#}"
                                 ),
                             ));
                         }
@@ -411,6 +451,33 @@ impl RuntimePicker {
     }
 }
 
+fn install_runtime_components(
+    target: EntryKind,
+    sink: &mut dyn ProgressSink,
+) -> anyhow::Result<()> {
+    match target {
+        EntryKind::Runtime(RuntimeId::Bootstrap) => {
+            adapters::bootstrap::BootstrapAdapter::new(default_bootstrap_config())?.install(sink)
+        }
+        EntryKind::Runtime(RuntimeId::ManagedLinux) => {
+            let bootstrap = adapters::bootstrap::BootstrapAdapter::new(default_bootstrap_config())?;
+            if !matches!(bootstrap.health_check(), HealthStatus::Healthy) {
+                sink.step("Installing Zdroid Bootstrap");
+                bootstrap.install(sink)?;
+            }
+
+            sink.step("Installing Managed Linux compatibility");
+            adapters::managed_linux::ManagedLinuxAdapter::new(default_managed_linux_config())?
+                .install(sink)
+        }
+        EntryKind::MuslCompatibility => {
+            adapters::managed_linux::ManagedLinuxAdapter::new(default_managed_linux_config())?
+                .install_musl(sink)
+        }
+        EntryKind::Runtime(id) => anyhow::bail!("{id:?} has no in-app installer"),
+    }
+}
+
 impl Focusable for RuntimePicker {
     fn focus_handle(&self, _cx: &App) -> FocusHandle {
         self.focus_handle.clone()
@@ -445,6 +512,16 @@ impl Render for RuntimePicker {
         let bg = cx.theme().colors().editor_background;
         let text = cx.theme().colors().text;
         let compact = cfg!(target_os = "android") && window.viewport_size().width.as_f32() < 520.0;
+        let title = if self.first_setup {
+            "Choose your Zdroid setup"
+        } else {
+            "Android runtimes"
+        };
+        let description = if self.first_setup {
+            "Standard usually takes around 5 minutes. Full Linux usually takes around 20 minutes and can also be installed later from Settings."
+        } else {
+            "Manage where Zdroid runs tools and install optional Linux compatibility. Switch any time from Settings."
+        };
 
         let cards: Vec<AnyElement> = self
             .entries
@@ -456,6 +533,7 @@ impl Render for RuntimePicker {
                     entry,
                     self.current,
                     self.install_status.as_deref(),
+                    self.install_started_at,
                     self.installing_runtime,
                     self.install_error.as_ref(),
                     compact,
@@ -512,14 +590,11 @@ impl Render for RuntimePicker {
             .child(
                 v_flex()
                     .gap_1()
-                    .child(Headline::new("Pick your runtime").size(HeadlineSize::Medium))
+                    .child(Headline::new(title).size(HeadlineSize::Medium))
                     .child(
-                        Label::new(
-                            "Where Zdroid runs your tools: LSPs, git, formatters, terminal. \
-                             Switch any time from Settings.",
-                        )
-                        .size(LabelSize::Small)
-                        .color(Color::Muted),
+                        Label::new(description)
+                            .size(LabelSize::Small)
+                            .color(Color::Muted),
                     ),
             )
             .when_some(banner, |this, banner| this.child(banner))
@@ -561,15 +636,17 @@ fn render_card(
     entry: &AdapterEntry,
     current: Option<RuntimeId>,
     install_status: Option<&str>,
-    installing_runtime: Option<RuntimeId>,
-    install_error: Option<&(RuntimeId, String)>,
+    install_started_at: Option<Instant>,
+    installing_runtime: Option<EntryKind>,
+    install_error: Option<&(EntryKind, String)>,
     compact: bool,
     cx: &mut Context<RuntimePicker>,
 ) -> AnyElement {
     let theme_colors = cx.theme().colors();
-    let id = entry.id;
-    let is_current = current == Some(id);
-    let name = id.display_name();
+    let kind = entry.kind;
+    let id = kind.runtime_id();
+    let is_current = id.is_some_and(|id| current == Some(id));
+    let name = entry.name;
     let tagline = entry.tagline;
 
     let (dot_color, dot_label): (Color, &'static str) = match &entry.health {
@@ -585,15 +662,19 @@ fn render_card(
         HealthStatus::Misconfigured { reason } => Some(reason.clone()),
         HealthStatus::Failed { error } => Some(error.clone()),
     };
-    let detail = if matches!(id, RuntimeId::Bootstrap | RuntimeId::ManagedLinux) {
+    let detail = if matches!(
+        kind,
+        EntryKind::Runtime(RuntimeId::Bootstrap | RuntimeId::ManagedLinux)
+            | EntryKind::MuslCompatibility
+    ) {
         install_error
-            .filter(|(runtime, _)| *runtime == id)
+            .filter(|(runtime, _)| *runtime == kind)
             .map(|(_, error)| format!("Install failed: {error}"))
             .or(detail)
     } else {
         detail
     };
-    let detail_color = if install_error.is_some_and(|(runtime, _)| *runtime == id) {
+    let detail_color = if install_error.is_some_and(|(runtime, _)| *runtime == kind) {
         Color::Error
     } else {
         Color::Muted
@@ -641,11 +722,13 @@ fn render_card(
                             )
                         }),
                 )
-                .when(id == RuntimeId::Bootstrap, |this| {
+                .when(id == Some(RuntimeId::ManagedLinux), |this| {
                     this.child(
-                        Label::new("Recommended - required for AI agents")
-                            .size(LabelSize::XSmall)
-                            .color(Color::Accent),
+                        Label::new(
+                            "Includes Zdroid Bootstrap and full Ubuntu Linux userland access",
+                        )
+                        .size(LabelSize::XSmall)
+                        .color(Color::Accent),
                     )
                 })
                 .child(
@@ -653,6 +736,9 @@ fn render_card(
                         .size(LabelSize::Small)
                         .color(Color::Muted),
                 )
+                .when_some(runtime_install_time_hint(kind), |this, hint| {
+                    this.child(Label::new(hint).size(LabelSize::XSmall).color(Color::Muted))
+                })
                 .child(
                     h_flex()
                         .gap_2()
@@ -674,6 +760,47 @@ fn render_card(
                             .size(LabelSize::XSmall)
                             .color(detail_color),
                     )
+                })
+                .when(installing_runtime == Some(kind), |this| {
+                    let status = install_status.unwrap_or("Starting install");
+                    let elapsed = install_started_at
+                        .map(|started| format_elapsed(started.elapsed()))
+                        .unwrap_or_else(|| "0:00".into());
+                    let percent = status_percent(status);
+                    this.child(
+                        v_flex()
+                            .w_full()
+                            .min_w_0()
+                            .gap_2()
+                            .child(
+                                h_flex()
+                                    .min_w_0()
+                                    .gap_2()
+                                    .items_center()
+                                    .child(SpinnerLabel::dots_variant().size(LabelSize::Small))
+                                    .child(
+                                        Label::new(Arc::<str>::from(status.to_owned()))
+                                            .size(LabelSize::XSmall)
+                                            .color(Color::Accent),
+                                    ),
+                            )
+                            .when_some(percent, |this, percent| {
+                                this.child(ProgressBar::new(
+                                    ("runtime-install-progress", idx),
+                                    percent as f32,
+                                    100.0,
+                                    cx,
+                                ))
+                            })
+                            .child(
+                                Label::new(format!(
+                                    "Elapsed {elapsed}. {}",
+                                    runtime_install_progress_hint(kind)
+                                ))
+                                .size(LabelSize::XSmall)
+                                .color(Color::Muted),
+                            ),
+                    )
                 }),
         )
         // Cascade priority: install actions WIN over the "Selected"
@@ -684,7 +811,7 @@ fn render_card(
         // "Selected" chip there would leave them stuck without a way
         // to trigger the download.
         .child(div().when(compact, |this| this.w_full()).child(
-            if id == RuntimeId::Chroot && !matches!(entry.health, HealthStatus::Healthy) {
+            if id == Some(RuntimeId::Chroot) && !matches!(entry.health, HealthStatus::Healthy) {
                 // Chroot adapter requires the zdroid-spawnd Magisk module
                 // to be running. If the daemon socket isn't reachable,
                 // letting the user pick chroot just writes a runtime.toml
@@ -696,28 +823,29 @@ fn render_card(
                 Button::new(("get-module", idx), "Get module")
                     .when(compact, |this| this.full_width())
                     .end_icon(Icon::new(IconName::ArrowUpRight).size(IconSize::Small))
+                    .disabled(installing_runtime.is_some())
                     .on_click(cx.listener(|_, _, _, cx| {
                         cx.open_url(SPAWND_RELEASE_URL);
                     }))
                     .into_any_element()
-            } else if matches!(id, RuntimeId::Bootstrap | RuntimeId::ManagedLinux)
-                && matches!(
-                    entry.health,
-                    HealthStatus::NotInstalled { .. } | HealthStatus::Misconfigured { .. }
-                )
-            {
+            } else if matches!(
+                kind,
+                EntryKind::Runtime(RuntimeId::Bootstrap | RuntimeId::ManagedLinux)
+                    | EntryKind::MuslCompatibility
+            ) && matches!(
+                entry.health,
+                HealthStatus::NotInstalled { .. } | HealthStatus::Misconfigured { .. }
+            ) {
                 // Bootstrap adapter has its 240 MB userland in a separate
                 // GitHub repo (`<release_repo>`); Phase 6 of the Termux-
                 // divestment refactor stopped bundling it in the APK and
                 // moved download to `BootstrapAdapter::install`. Tap
                 // "Install" to kick off the async download + extract; the
-                // button label switches to the live `install_status` for
-                // the duration. After completion the card flips to
+                // status is rendered in a wrapping block inside the card.
+                // After completion the card flips to
                 // Healthy â†’ normal Select.
-                if installing_runtime == Some(id)
-                    && let Some(status) = install_status
-                {
-                    Button::new(("installing", idx), status.to_string())
+                if installing_runtime == Some(kind) {
+                    Button::new(("installing", idx), "Installing...")
                         .when(compact, |this| this.full_width())
                         .disabled(true)
                         .into_any_element()
@@ -730,15 +858,21 @@ fn render_card(
                     };
                     Button::new(("install", idx), action_label)
                         .when(compact, |this| this.full_width())
+                        .disabled(installing_runtime.is_some())
                         .on_click(cx.listener(move |this, _, _, cx| {
-                            this.install_runtime(id, cx);
+                            this.install_runtime(kind, cx);
                         }))
                         .into_any_element()
                 }
-            } else if id == RuntimeId::ExternalTermux {
+            } else if id == Some(RuntimeId::ExternalTermux) {
                 Button::new(("external-termux-unavailable", idx), "Not available yet")
                     .when(compact, |this| this.full_width())
                     .disabled(true)
+                    .into_any_element()
+            } else if kind == EntryKind::MuslCompatibility {
+                Chip::new("Installed")
+                    .icon(IconName::Check)
+                    .label_color(Color::Success)
                     .into_any_element()
             } else if is_current {
                 // Healthy AND the active selection â€” decorative confirm.
@@ -748,23 +882,75 @@ fn render_card(
                     .icon(IconName::Check)
                     .label_color(Color::Accent)
                     .into_any_element()
-            } else {
+            } else if let Some(id) = id {
                 Button::new(("select", idx), "Select")
                     .when(compact, |this| this.full_width())
+                    .disabled(installing_runtime.is_some())
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.select(id, window, cx);
                     }))
                     .into_any_element()
+            } else {
+                div().into_any_element()
             },
         ))
         .into_any_element()
+}
+
+fn runtime_install_label(target: EntryKind) -> &'static str {
+    match target {
+        EntryKind::Runtime(RuntimeId::Bootstrap) => "Installing Zdroid Standard",
+        EntryKind::Runtime(RuntimeId::ManagedLinux) => "Installing Zdroid Full Linux",
+        EntryKind::MuslCompatibility => "Installing Alpine compatibility",
+        EntryKind::Runtime(_) => "Installing Android runtime",
+    }
+}
+
+fn runtime_install_time_hint(target: EntryKind) -> Option<&'static str> {
+    match target {
+        EntryKind::Runtime(RuntimeId::Bootstrap) => Some("Estimated setup time: around 5 minutes."),
+        EntryKind::Runtime(RuntimeId::ManagedLinux) => {
+            Some("Estimated setup time: around 20 minutes. You can install this later.")
+        }
+        EntryKind::MuslCompatibility => Some("Estimated setup time: around 10 minutes."),
+        EntryKind::Runtime(_) => None,
+    }
+}
+
+fn runtime_install_progress_hint(target: EntryKind) -> &'static str {
+    match target {
+        EntryKind::Runtime(RuntimeId::Bootstrap) => {
+            "Setup usually takes around 5 minutes and continues in the background."
+        }
+        EntryKind::Runtime(RuntimeId::ManagedLinux) => {
+            "Full Linux setup usually takes around 20 minutes and continues in the background."
+        }
+        EntryKind::MuslCompatibility => {
+            "Compatibility setup usually takes around 10 minutes and continues in the background."
+        }
+        EntryKind::Runtime(_) => "This task continues in the background.",
+    }
+}
+
+fn status_percent(status: &str) -> Option<u64> {
+    status
+        .split_whitespace()
+        .next_back()?
+        .strip_suffix('%')?
+        .parse()
+        .ok()
+}
+
+fn format_elapsed(elapsed: Duration) -> String {
+    let seconds = elapsed.as_secs();
+    format!("{}:{:02}", seconds / 60, seconds % 60)
 }
 
 /// Build the per-adapter health snapshot at modal-open time. Each
 /// adapter is constructed with on-device defaults so the health probe
 /// can run; the user's eventual `runtime.toml` overrides these when
 /// the adapter is actually selected.
-fn build_entries() -> Vec<AdapterEntry> {
+fn build_entries(first_setup: bool) -> Vec<AdapterEntry> {
     let chroot_health = adapters::chroot::ChrootAdapter::new(default_chroot_config())
         .map(|a| a.health_check())
         .unwrap_or_else(|err| HealthStatus::Failed {
@@ -788,28 +974,75 @@ fn build_entries() -> Vec<AdapterEntry> {
                 error: err.to_string(),
             });
 
+    if first_setup {
+        return vec![
+            AdapterEntry {
+                kind: EntryKind::Runtime(RuntimeId::Bootstrap),
+                name: "Zdroid Standard",
+                tagline: "Fast, self-contained Android-native development environment with terminal, Git and npm.",
+                health: bootstrap_health,
+            },
+            AdapterEntry {
+                kind: EntryKind::Runtime(RuntimeId::ManagedLinux),
+                name: "Zdroid Full Linux",
+                tagline: "Includes Zdroid Bootstrap, then adds an Ubuntu glibc environment with apt for ARM64 Linux software and local servers.",
+                health: combined_managed_health(&managed_linux_health),
+            },
+        ];
+    }
+
     vec![
         AdapterEntry {
-            id: RuntimeId::Chroot,
+            kind: EntryKind::Runtime(RuntimeId::Chroot),
+            name: "Chroot roots",
             tagline: "Fastest. Routes through the persistent zd-spawnd daemon. Requires Magisk root + the zdroid-spawnd module.",
             health: chroot_health,
         },
         AdapterEntry {
-            id: RuntimeId::Bootstrap,
+            kind: EntryKind::Runtime(RuntimeId::Bootstrap),
+            name: "Zdroid Bootstrap",
             tagline: "Self-contained Termux-flavored userland inside Zdroid's sandbox. Bare or proot-wrapped. No root, no external app.",
             health: bootstrap_health,
         },
         AdapterEntry {
-            id: RuntimeId::ManagedLinux,
-            tagline: "ARM64 glibc and musl Linux through PRoot-Distro. Use apt/apk or add any compatible OCI image. No root required.",
+            kind: EntryKind::Runtime(RuntimeId::ManagedLinux),
+            name: "Managed Linux Compatibility",
+            tagline: "Optional Ubuntu glibc compatibility layered on Zdroid Bootstrap, with apt and broader ARM64 Linux software support.",
             health: managed_linux_health,
         },
         AdapterEntry {
-            id: RuntimeId::ExternalTermux,
+            kind: EntryKind::MuslCompatibility,
+            name: "Alpine musl Compatibility",
+            tagline: "Optional Alpine environment for software that only provides a dynamic ARM64 musl build. Most users do not need this.",
+            health: adapters::managed_linux::ManagedLinuxAdapter::new(
+                default_managed_linux_config(),
+            )
+            .map(|adapter| adapter.musl_health_check())
+            .unwrap_or_else(|err| HealthStatus::Failed {
+                error: err.to_string(),
+            }),
+        },
+        AdapterEntry {
+            kind: EntryKind::Runtime(RuntimeId::ExternalTermux),
+            name: "Existing Termux app",
             tagline: "Planned integration with the installed Termux app. Interactive stdio bridging is not implemented yet.",
             health: termux_health,
         },
     ]
+}
+
+fn combined_managed_health(managed_health: &HealthStatus) -> HealthStatus {
+    let bootstrap = adapters::bootstrap::BootstrapAdapter::new(default_bootstrap_config())
+        .map(|adapter| adapter.health_check())
+        .unwrap_or_else(|err| HealthStatus::Failed {
+            error: err.to_string(),
+        });
+    if !matches!(bootstrap, HealthStatus::Healthy) {
+        return HealthStatus::NotInstalled {
+            hint: "Installs Zdroid Bootstrap first, followed by Ubuntu glibc compatibility.".into(),
+        };
+    }
+    managed_health.clone()
 }
 
 fn default_chroot_config() -> ChrootConfig {
@@ -832,9 +1065,9 @@ fn default_bootstrap_config() -> BootstrapConfig {
 fn default_managed_linux_config() -> ManagedLinuxConfig {
     ManagedLinuxConfig {
         bootstrap_prefix: PathBuf::from("/data/data/com.zdroid/files/usr"),
-        container: "zdroid-linux".into(),
+        container: "ubuntu".into(),
         image: "ubuntu:24.04".into(),
-        musl_container: "zdroid-musl".into(),
+        musl_container: "alpine".into(),
         musl_image: "alpine:3.21".into(),
     }
 }

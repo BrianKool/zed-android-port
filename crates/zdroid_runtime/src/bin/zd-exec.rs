@@ -103,16 +103,28 @@ fn main() -> ExitCode {
     };
 
     let cwd = env::current_dir().ok();
-    let env_map: HashMap<String, OsString> = env::vars_os()
+    let runtime_label = match provider.id() {
+        zdroid_runtime::config::RuntimeId::Bootstrap => "Android · Bionic",
+        zdroid_runtime::config::RuntimeId::ManagedLinux => "Ubuntu 24.04 · glibc",
+        zdroid_runtime::config::RuntimeId::Chroot => "Root chroot",
+        zdroid_runtime::config::RuntimeId::ExternalTermux => "External Termux",
+    };
+    let interactive = std::io::stdin().is_terminal();
+    let interactive_shell = interactive && program == "bash";
+    if interactive_shell {
+        eprintln!("\x1b[2mZdroid environment: {runtime_label}\x1b[0m");
+    }
+    let mut env_map: HashMap<String, OsString> = env::vars_os()
         .filter_map(|(k, v)| k.into_string().ok().map(|k| (k, v)))
         .collect();
+    env_map.insert("ZDROID_RUNTIME".into(), OsString::from(runtime_label));
 
     let req = SpawnRequest {
         program,
         args: prog_args,
         cwd,
         env: env_map,
-        interactive: std::io::stdin().is_terminal(),
+        interactive,
         stdio: [0, 1, 2],
     };
 
@@ -172,10 +184,10 @@ fn run_compatible_binary(argv: &[String]) -> ExitCode {
     match (&info.format, info.libc) {
         (BinaryFormat::Elf, LibcFamily::Bionic | LibcFamily::None) => run_native(&path, &args),
         (BinaryFormat::Elf, LibcFamily::Glibc) => {
-            run_in_managed_linux(&path, &args, "zdroid-linux", "ubuntu:24.04")
+            run_in_managed_linux(&path, &args, "ubuntu", "ubuntu:24.04")
         }
         (BinaryFormat::Elf, LibcFamily::Musl) => {
-            run_in_managed_linux(&path, &args, "zdroid-musl", "alpine:3.21")
+            run_in_managed_linux(&path, &args, "alpine", "alpine:3.21")
         }
         (BinaryFormat::Script { interpreter }, _) => {
             let native = interpreter.as_deref().is_some_and(|interpreter| {
@@ -185,7 +197,7 @@ fn run_compatible_binary(argv: &[String]) -> ExitCode {
             if native {
                 run_native(&path, &args)
             } else {
-                run_in_managed_linux(&path, &args, "zdroid-linux", "ubuntu:24.04")
+                run_in_managed_linux(&path, &args, "ubuntu", "ubuntu:24.04")
             }
         }
         (BinaryFormat::Other, _) => {
@@ -223,7 +235,7 @@ fn run_in_managed_linux(path: &Path, args: &[OsString], container: &str, image: 
         bootstrap_prefix: PathBuf::from("/data/data/com.zdroid/files/usr"),
         container: container.into(),
         image: image.into(),
-        musl_container: "zdroid-musl".into(),
+        musl_container: "alpine".into(),
         musl_image: "alpine:3.21".into(),
     };
     let provider = match adapters::managed_linux::ManagedLinuxAdapter::new(config) {
@@ -234,9 +246,15 @@ fn run_in_managed_linux(path: &Path, args: &[OsString], container: &str, image: 
         }
     };
     if !matches!(provider.health_check(), HealthStatus::Healthy) {
-        eprintln!(
-            "zd-run: required runtime '{container}' is not installed. Open Settings > Android Runtime to install Managed Linux. For musl binaries, run `proot-distro install {image} --name {container} --architecture aarch64`."
-        );
+        if container == "alpine" {
+            eprintln!(
+                "zd-run: this executable requires a dynamic ARM64 musl environment. Open Settings > Android Runtime and install Alpine musl Compatibility, then retry."
+            );
+        } else {
+            eprintln!(
+                "zd-run: required runtime '{container}' ({image}) is not installed. Open Settings > Android Runtime and install Managed Linux Compatibility, then retry."
+            );
+        }
         return ExitCode::from(69);
     }
     let env_map: HashMap<String, OsString> = env::vars_os()
@@ -270,9 +288,9 @@ fn run_in_managed_linux(path: &Path, args: &[OsString], container: &str, image: 
 fn manage_service(argv: &[String]) -> ExitCode {
     let config = ManagedLinuxConfig {
         bootstrap_prefix: PathBuf::from("/data/data/com.zdroid/files/usr"),
-        container: "zdroid-linux".into(),
+        container: "ubuntu".into(),
         image: "ubuntu:24.04".into(),
-        musl_container: "zdroid-musl".into(),
+        musl_container: "alpine".into(),
         musl_image: "alpine:3.21".into(),
     };
     let provider = match adapters::managed_linux::ManagedLinuxAdapter::new(config) {

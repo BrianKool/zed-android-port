@@ -7,9 +7,13 @@
 
 use std::collections::BTreeSet;
 use std::ffi::OsString;
+use std::fs::File;
+use std::io::{BufRead, BufReader};
 use std::os::fd::BorrowedFd;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::thread;
+use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use util::env::EnvOp;
@@ -64,6 +68,27 @@ impl ManagedLinuxAdapter {
         self.rootfs_for(&self.config.container)
     }
 
+    fn remove_incomplete_container_state(&self, container: &str) -> Result<()> {
+        if self.rootfs_for(container).is_some() {
+            return Ok(());
+        }
+        let runtime = self.config.bootstrap_prefix.join("var/lib/proot-distro");
+        for path in [
+            runtime.join("containers").join(container),
+            runtime.join("installed-rootfs").join(container),
+        ] {
+            if path.exists() {
+                std::fs::remove_dir_all(&path).with_context(|| {
+                    format!(
+                        "remove incomplete Managed Linux state at {}",
+                        path.display()
+                    )
+                })?;
+            }
+        }
+        Ok(())
+    }
+
     fn host_environment(&self) -> Vec<(String, OsString)> {
         let prefix = &self.config.bootstrap_prefix;
         let home = self.host_home();
@@ -94,7 +119,19 @@ impl ManagedLinuxAdapter {
     }
 
     fn host_command(&self, program: &Path) -> Command {
-        let mut command = Command::new(program);
+        // Upstream Termux packages commonly ship scripts whose shebang is
+        // hardcoded to /data/data/com.termux. LD_PRELOAD cannot rewrite the
+        // interpreter used for the kernel's initial script exec, so launch
+        // these scripts through the matching interpreter in Zdroid's prefix.
+        let script_interpreter =
+            bootstrap_script_interpreter(program, &self.config.bootstrap_prefix);
+        let mut command = if let Some(interpreter) = script_interpreter {
+            let mut command = Command::new(interpreter);
+            command.arg(program);
+            command
+        } else {
+            Command::new(program)
+        };
         command.env_clear();
         command.envs(self.host_environment());
         let termux_exec = self.config.bootstrap_prefix.join("lib/libtermux-exec.so");
@@ -104,20 +141,111 @@ impl ManagedLinuxAdapter {
         command
     }
 
-    fn supports_managed_features(&self) -> bool {
-        let Ok(output) = self
-            .host_command(&self.proot_distro())
-            .arg("--help")
-            .output()
-        else {
-            return false;
+    fn command_help(&self, command: Option<&str>) -> Option<String> {
+        let mut invocation = self.host_command(&self.proot_distro());
+        if let Some(command) = command {
+            invocation.arg(command);
+        }
+        let Ok(output) = invocation.arg("--help").output() else {
+            return None;
         };
         if !output.status.success() {
-            return false;
+            return None;
         }
         let mut help = String::from_utf8_lossy(&output.stdout).into_owned();
         help.push_str(&String::from_utf8_lossy(&output.stderr));
-        help.contains("install") && help.contains("ps") && help.contains("kill")
+        Some(help)
+    }
+
+    fn proot_distro_ready(&self) -> bool {
+        if !self.proot_distro().is_file() {
+            return false;
+        }
+        let python = self.config.bootstrap_prefix.join("bin/python");
+        if !python.is_file() {
+            return false;
+        }
+        let import_ok = self
+            .host_command(&python)
+            .args(["-c", "import proot_distro"])
+            .status()
+            .is_ok_and(|status| status.success());
+        import_ok && self.command_help(None).is_some()
+    }
+
+    fn run_package_command(
+        &self,
+        program: &Path,
+        args: &[&str],
+        operation: &str,
+        progress: &mut dyn ProgressSink,
+    ) -> Result<()> {
+        const MAX_LOCK_RETRIES: usize = 300;
+
+        for attempt in 0..=MAX_LOCK_RETRIES {
+            let output = self
+                .host_command(program)
+                .env("DEBIAN_FRONTEND", "noninteractive")
+                .args(args)
+                .output()
+                .with_context(|| format!("run {operation}"))?;
+            if output.status.success() {
+                return Ok(());
+            }
+
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let details = [stderr.trim(), stdout.trim()]
+                .into_iter()
+                .filter(|text| !text.is_empty())
+                .collect::<Vec<_>>()
+                .join("\n");
+            let lock_busy = details.contains("Could not get lock")
+                || details.contains("Unable to acquire the dpkg frontend lock")
+                || details.contains("is another process using it")
+                || details.contains("Could not open lock file");
+            if lock_busy && attempt < MAX_LOCK_RETRIES {
+                progress.step("Waiting for essential package setup to finish");
+                progress.progress(0, 0);
+                thread::sleep(Duration::from_secs(2));
+                continue;
+            }
+
+            bail!(
+                "{operation} failed with {}{}",
+                output.status,
+                if details.is_empty() {
+                    String::new()
+                } else {
+                    format!(": {details}")
+                }
+            );
+        }
+        unreachable!("package command retry loop always returns")
+    }
+
+    fn supports_oci_install(&self) -> bool {
+        self.command_help(Some("install"))
+            .is_some_and(|help| help.contains("--name") && help.contains("--architecture"))
+    }
+
+    fn supports_shared_home(&self) -> bool {
+        self.command_help(Some("login"))
+            .is_some_and(|help| help.contains("--shared-home"))
+    }
+
+    fn supports_service_tracking(&self) -> bool {
+        self.command_help(None)
+            .is_some_and(|help| help.contains("ps") && help.contains("kill"))
+    }
+
+    fn add_shared_home_option(&self, command: &mut Command) {
+        if self.supports_shared_home() {
+            command.arg("--shared-home");
+        } else {
+            // PRoot-Distro v4 calls the equivalent option --termux-home.
+            command.arg("--termux-home");
+        }
     }
 
     fn guest_path(&self, path: &Path) -> PathBuf {
@@ -140,12 +268,9 @@ impl ManagedLinuxAdapter {
     }
 
     fn install_host_dependency(&self, progress: &mut dyn ProgressSink) -> Result<()> {
-        let needs_install_or_upgrade =
-            !self.proot_distro().is_file() || !self.supports_managed_features();
-        if !needs_install_or_upgrade {
+        if self.proot_distro_ready() {
             return Ok(());
         }
-        progress.step("Installing or upgrading the Managed Linux runtime engine");
         let pkg = self.config.bootstrap_prefix.join(".zed/bin/pkg");
         if !pkg.is_file() {
             bail!(
@@ -153,20 +278,59 @@ impl ManagedLinuxAdapter {
                 pkg.display()
             );
         }
-        let status = self
-            .host_command(&pkg)
-            .args(["install", "-y", "proot-distro"])
-            .status()
-            .context("run pkg install proot-distro")?;
-        if !status.success() {
-            bail!("pkg install proot-distro failed with {status}");
+
+        let apt = self.config.bootstrap_prefix.join(".zed/bin/apt");
+        if !apt.is_file() {
+            bail!("Zdroid package repair tool is missing at {}", apt.display());
         }
-        if !self.proot_distro().is_file() {
-            bail!("proot-distro installation completed but its executable is missing");
+
+        progress.step("Repairing Managed Linux package dependencies");
+        progress.progress(0, 0);
+        self.run_package_command(
+            &apt,
+            &[
+                "--fix-broken",
+                "install",
+                "-y",
+                "-o",
+                "Dpkg::Options::=--force-confdef",
+                "-o",
+                "Dpkg::Options::=--force-confold",
+            ],
+            "repair package dependencies",
+            progress,
+        )?;
+
+        progress.step("Installing the Managed Linux runtime engine");
+        progress.progress(0, 0);
+        self.run_package_command(
+            &pkg,
+            &[
+                "install",
+                "-y",
+                "python",
+                "python-pip",
+                "proot",
+                "proot-distro",
+            ],
+            "install Managed Linux dependencies",
+            progress,
+        )?;
+
+        if !self.proot_distro_ready() {
+            progress.step("Reinstalling the Managed Linux runtime engine");
+            progress.progress(0, 0);
+            self.run_package_command(
+                &apt,
+                &["install", "--reinstall", "-y", "proot-distro"],
+                "reinstall proot-distro",
+                progress,
+            )?;
         }
-        if !self.supports_managed_features() {
+
+        if !self.proot_distro_ready() {
             bail!(
-                "the installed proot-distro is too old for OCI images and managed services; run pkg update and pkg upgrade, then retry"
+                "proot-distro was installed but failed its Python module and command health checks"
             );
         }
         Ok(())
@@ -181,22 +345,44 @@ impl ManagedLinuxAdapter {
         if self.rootfs_for(container).is_some() {
             return Ok(());
         }
+        self.remove_incomplete_container_state(container)?;
         progress.step(&format!("Downloading ARM64 Linux image {image}"));
         progress.progress(0, 0);
-        let status = self
-            .host_command(&self.proot_distro())
-            .args([
-                "install",
-                image,
-                "--name",
-                container,
-                "--architecture",
-                "aarch64",
-            ])
-            .status()
+        let mut command = self.host_command(&self.proot_distro());
+        command.arg("install");
+        if self.supports_oci_install() {
+            command.args([image, "--name", container, "--architecture", "aarch64"]);
+        } else {
+            let distro = legacy_distro_alias(image)?;
+            progress.warn(
+                "The bundled repository provides PRoot-Distro v4; installing its verified distribution rootfs instead of pulling an OCI image.",
+            );
+            if container == distro {
+                command.arg(distro);
+            } else {
+                command.args(["--override-alias", container, distro]);
+            }
+        }
+        let output = command
+            .output()
             .context("install Managed Linux container")?;
-        if !status.success() {
-            bail!("proot-distro install failed with {status}");
+        if !output.status.success() {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let details = [stderr.trim(), stdout.trim()]
+                .into_iter()
+                .filter(|text| !text.is_empty())
+                .collect::<Vec<_>>()
+                .join(" ");
+            bail!(
+                "proot-distro install failed with {}{}",
+                output.status,
+                if details.is_empty() {
+                    String::new()
+                } else {
+                    format!(": {details}")
+                }
+            );
         }
         if self.rootfs_for(container).is_none() {
             bail!("Managed Linux install completed but container '{container}' has no rootfs");
@@ -216,16 +402,16 @@ impl ManagedLinuxAdapter {
         if self.rootfs_for(container).is_none() {
             bail!("Managed Linux container '{container}' is not installed");
         }
-        let status = self
-            .host_command(&self.proot_distro())
-            .args([
-                "login",
-                "--shared-home",
-                "--detach",
-                container,
-                "--",
-                program,
-            ])
+        if !self.supports_service_tracking() {
+            bail!(
+                "background service tracking requires a newer PRoot-Distro; interactive Managed Linux commands remain available"
+            );
+        }
+        let mut command = self.host_command(&self.proot_distro());
+        command.arg("login");
+        self.add_shared_home_option(&mut command);
+        let status = command
+            .args(["--detach", container, "--", program])
             .args(args)
             .status()
             .context("start detached Managed Linux service")?;
@@ -244,6 +430,9 @@ impl ManagedLinuxAdapter {
         if self.rootfs_for(container).is_none() {
             bail!("Managed Linux container '{container}' is not installed");
         }
+        if !self.supports_service_tracking() {
+            bail!("OCI entrypoint services require a newer PRoot-Distro");
+        }
         let mut command = self.host_command(&self.proot_distro());
         command.args(["run", container, "--detach"]);
         if !args.is_empty() {
@@ -258,6 +447,9 @@ impl ManagedLinuxAdapter {
     }
 
     pub fn list_services(&self) -> Result<()> {
+        if !self.supports_service_tracking() {
+            bail!("service listing requires a newer PRoot-Distro");
+        }
         let status = self
             .host_command(&self.proot_distro())
             .arg("ps")
@@ -271,6 +463,9 @@ impl ManagedLinuxAdapter {
     }
 
     pub fn stop_service(&self, pid: u32) -> Result<()> {
+        if !self.supports_service_tracking() {
+            bail!("service stopping requires a newer PRoot-Distro");
+        }
         let status = self
             .host_command(&self.proot_distro())
             .args(["kill", &pid.to_string()])
@@ -281,6 +476,54 @@ impl ManagedLinuxAdapter {
         } else {
             bail!("proot-distro kill failed with {status}")
         }
+    }
+
+    pub fn musl_health_check(&self) -> HealthStatus {
+        if !self.proot_distro().is_file() {
+            return HealthStatus::NotInstalled {
+                hint: "Install Managed Linux before adding Alpine musl compatibility.".into(),
+            };
+        }
+        if self.rootfs_for(&self.config.musl_container).is_none() {
+            return HealthStatus::NotInstalled {
+                hint: format!(
+                    "Optional musl compatibility image {} is not installed.",
+                    self.config.musl_image
+                ),
+            };
+        }
+        HealthStatus::Healthy
+    }
+
+    pub fn install_musl(&self, progress: &mut dyn ProgressSink) -> Result<()> {
+        self.install_host_dependency(progress)?;
+        self.install_container(
+            &self.config.musl_container,
+            &self.config.musl_image,
+            progress,
+        )?;
+        progress.step("Verifying Alpine musl compatibility");
+        let mut command = self.host_command(&self.proot_distro());
+        command.arg("login");
+        self.add_shared_home_option(&mut command);
+        let output = command
+            .args([
+                self.config.musl_container.as_str(),
+                "--",
+                "/bin/sh",
+                "-c",
+                "test -r /etc/alpine-release && uname -m",
+            ])
+            .output()
+            .context("verify Alpine musl compatibility")?;
+        if !output.status.success() {
+            bail!(
+                "Alpine musl verification failed: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            );
+        }
+        progress.progress(1, 1);
+        Ok(())
     }
 }
 
@@ -309,16 +552,16 @@ impl RuntimeProvider for ManagedLinuxAdapter {
                 hint: "Managed Linux engine is not installed. Select Install to add PRoot-Distro explicitly.".into(),
             };
         }
-        if !self.supports_managed_features() {
+        if !self.proot_distro_ready() {
             return HealthStatus::Misconfigured {
-                reason: "PRoot-Distro must be upgraded before Managed Linux can use OCI images and tracked background services.".into(),
+                reason: "Managed Linux package installation is incomplete. Select Repair to restore its Python and PRoot dependencies.".into(),
             };
         }
-        if self.rootfs().is_none() || self.rootfs_for(&self.config.musl_container).is_none() {
+        if self.rootfs().is_none() {
             return HealthStatus::NotInstalled {
                 hint: format!(
-                    "Managed Linux compatibility containers are incomplete (glibc {}, musl {}).",
-                    self.config.image, self.config.musl_image
+                    "Managed Linux glibc environment {} is not installed.",
+                    self.config.image
                 ),
             };
         }
@@ -328,17 +571,12 @@ impl RuntimeProvider for ManagedLinuxAdapter {
     fn install(&self, progress: &mut dyn ProgressSink) -> Result<()> {
         self.install_host_dependency(progress)?;
         self.install_container(&self.config.container, &self.config.image, progress)?;
-        self.install_container(
-            &self.config.musl_container,
-            &self.config.musl_image,
-            progress,
-        )?;
         progress.step("Verifying Managed Linux runtime");
-        let output = self
-            .host_command(&self.proot_distro())
+        let mut command = self.host_command(&self.proot_distro());
+        command.arg("login");
+        self.add_shared_home_option(&mut command);
+        let output = command
             .args([
-                "login",
-                "--shared-home",
                 self.config.container.as_str(),
                 "--",
                 "/bin/sh",
@@ -381,11 +619,19 @@ impl RuntimeProvider for ManagedLinuxAdapter {
             );
         }
         let mut command = self.host_command(&self.proot_distro());
-        command.arg("login").arg("--shared-home");
+        command.arg("login");
+        self.add_shared_home_option(&mut command);
         if let Some(cwd) = req.cwd.as_deref() {
             command.arg("--work-dir").arg(self.guest_path(cwd));
         }
-        for key in ["TERM", "COLORTERM", "LANG", "GIT_ASKPASS", "SSH_AUTH_SOCK"] {
+        for key in [
+            "TERM",
+            "COLORTERM",
+            "LANG",
+            "GIT_ASKPASS",
+            "SSH_AUTH_SOCK",
+            "ZDROID_RUNTIME",
+        ] {
             if let Some(value) = req.env.get(key) {
                 let mut assignment = OsString::from(key);
                 assignment.push("=");
@@ -492,4 +738,59 @@ fn validate_container_name(value: &str) -> Result<()> {
         bail!("Managed Linux container name contains unsupported characters");
     }
     Ok(())
+}
+
+fn legacy_distro_alias(image: &str) -> Result<&'static str> {
+    if image == "ubuntu" || image.starts_with("ubuntu:") {
+        Ok("ubuntu")
+    } else if image == "alpine" || image.starts_with("alpine:") {
+        Ok("alpine")
+    } else {
+        bail!(
+            "this PRoot-Distro version cannot pull OCI image '{image}'; update PRoot-Distro or choose the built-in Ubuntu/Alpine runtime"
+        )
+    }
+}
+
+fn bootstrap_script_interpreter(program: &Path, prefix: &Path) -> Option<PathBuf> {
+    let mut first_line = String::new();
+    BufReader::new(File::open(program).ok()?)
+        .read_line(&mut first_line)
+        .ok()?;
+    if !first_line.starts_with("#!") {
+        return None;
+    }
+
+    let interpreter = if first_line.contains("python") {
+        prefix.join("bin/python")
+    } else if first_line.contains("bash") {
+        prefix.join("bin/bash")
+    } else if first_line.contains("/sh") {
+        prefix.join("bin/sh")
+    } else {
+        return None;
+    };
+    interpreter.is_file().then_some(interpreter)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn maps_builtin_images_to_legacy_distro_aliases() {
+        assert_eq!(legacy_distro_alias("ubuntu:24.04").unwrap(), "ubuntu");
+        assert_eq!(legacy_distro_alias("alpine:3.21").unwrap(), "alpine");
+    }
+
+    #[test]
+    fn rejects_arbitrary_images_for_legacy_proot_distro() {
+        assert!(legacy_distro_alias("postgres:17").is_err());
+    }
+
+    #[test]
+    fn ignores_non_script_files_when_selecting_an_interpreter() {
+        let prefix = Path::new("/not-used");
+        assert!(bootstrap_script_interpreter(Path::new("/missing"), prefix).is_none());
+    }
 }

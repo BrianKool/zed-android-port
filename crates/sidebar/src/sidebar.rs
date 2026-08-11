@@ -7543,6 +7543,21 @@ impl Sidebar {
                             }),
                     )
             })
+            .when(cfg!(target_os = "android"), |this| {
+                this.child(div().flex_1()).child(
+                    IconButton::new("close-threads-sidebar", IconName::Close)
+                        .icon_size(IconSize::Small)
+                        .tooltip(Tooltip::text("Close Threads"))
+                        .on_click(|_, window, cx| {
+                            if let Some(multi_workspace) = window.root::<MultiWorkspace>().flatten()
+                            {
+                                multi_workspace.update(cx, |multi_workspace, cx| {
+                                    multi_workspace.close_sidebar(window, cx);
+                                });
+                            }
+                        }),
+                )
+            })
             .when(right_window_controls, |this| {
                 this.children(Self::render_right_window_controls(window, cx))
             })
