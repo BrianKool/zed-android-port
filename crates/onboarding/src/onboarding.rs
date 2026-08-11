@@ -258,7 +258,7 @@ fn android_essential_setup_done() -> bool {
 fn run_android_essential_setup(tx: futures::channel::mpsc::UnboundedSender<EssentialSetupMessage>) {
     use std::{
         fs,
-        process::Command,
+        process::{Command, Stdio},
         thread,
         time::{Duration, Instant},
     };
@@ -267,28 +267,37 @@ fn run_android_essential_setup(tx: futures::channel::mpsc::UnboundedSender<Essen
     let home = "/data/data/com.zdroid/files/home";
     let marker = format!("{prefix}/.zed/essential-packages-ok-v1");
     let path = format!("{prefix}/.zed/bin:{prefix}/bin:{prefix}/bin/applets:/system/bin");
+    let tmp = format!("{prefix}/tmp");
+    let termux_exec = format!("{prefix}/lib/libtermux-exec.so");
+    let output_log = format!("{tmp}/zdroid-essential-setup.log");
+    if let Err(error) = fs::create_dir_all(&tmp) {
+        let _ = tx.unbounded_send(EssentialSetupMessage::Error(format!(
+            "Could not prepare package setup directory: {error}"
+        )));
+        return;
+    }
     let commands = [
         (
             "Initialising package system",
-            "\"$PREFIX/.zed/bin/apt\" --fix-broken install -y",
+            "\"$PREFIX/.zed/bin/dpkg\" --configure -a || true; \"$PREFIX/.zed/bin/apt\" --fix-broken install -y -o DPkg::Lock::Timeout=120",
             0.05,
             0.15,
         ),
         (
             "Updating package index",
-            "\"$PREFIX/.zed/bin/pkg\" update -y",
+            "\"$PREFIX/.zed/bin/pkg\" update -y -o DPkg::Lock::Timeout=120",
             0.15,
             0.30,
         ),
         (
             "Upgrading base packages",
-            "DEBIAN_FRONTEND=noninteractive \"$PREFIX/.zed/bin/pkg\" upgrade -y -o Dpkg::Options::=\"--force-confdef\" -o Dpkg::Options::=\"--force-confold\"",
+            "DEBIAN_FRONTEND=noninteractive \"$PREFIX/.zed/bin/pkg\" upgrade -y -o DPkg::Lock::Timeout=120 -o Dpkg::Options::=\"--force-confdef\" -o Dpkg::Options::=\"--force-confold\"",
             0.30,
             0.80,
         ),
         (
             "Installing Node.js and Git",
-            "\"$PREFIX/.zed/bin/pkg\" install -y nodejs-lts git",
+            "\"$PREFIX/.zed/bin/pkg\" install -y nodejs-lts git -o DPkg::Lock::Timeout=120",
             0.80,
             0.95,
         ),
@@ -313,16 +322,50 @@ fn run_android_essential_setup(tx: futures::channel::mpsc::UnboundedSender<Essen
             progress: *start_progress,
         });
 
-        let mut child = match Command::new("/system/bin/sh")
+        let output_file = match fs::OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .write(true)
+            .open(&output_log)
+        {
+            Ok(file) => file,
+            Err(error) => {
+                let _ = tx.unbounded_send(EssentialSetupMessage::Error(format!(
+                    "{label} could not create its diagnostic log: {error}"
+                )));
+                return;
+            }
+        };
+        let output_clone = match output_file.try_clone() {
+            Ok(file) => file,
+            Err(error) => {
+                let _ = tx.unbounded_send(EssentialSetupMessage::Error(format!(
+                    "{label} could not prepare its diagnostic log: {error}"
+                )));
+                return;
+            }
+        };
+
+        let mut process = Command::new("/system/bin/sh");
+        process
             .arg("-c")
             .arg(command)
             .env("PREFIX", prefix)
             .env("HOME", home)
+            .env("TMPDIR", &tmp)
             .env("PATH", &path)
+            .env("TERMUX__PREFIX", prefix)
+            .env("TERMUX__HOME", home)
+            .env("TERMUX_APP__PACKAGE_NAME", "com.zdroid")
             .env("LD_LIBRARY_PATH", format!("{prefix}/lib"))
-            .current_dir(home)
-            .spawn()
-        {
+            .stdout(Stdio::from(output_clone))
+            .stderr(Stdio::from(output_file))
+            .current_dir(home);
+        if std::path::Path::new(&termux_exec).is_file() {
+            process.env("LD_PRELOAD", &termux_exec);
+        }
+
+        let mut child = match process.spawn() {
             Ok(child) => child,
             Err(error) => {
                 let _ = tx.unbounded_send(EssentialSetupMessage::Error(format!(
@@ -357,8 +400,17 @@ fn run_android_essential_setup(tx: futures::channel::mpsc::UnboundedSender<Essen
         match status {
             Ok(status) if status.success() => {}
             Ok(status) => {
+                let output = fs::read(&output_log).unwrap_or_default();
+                let output_start = output.len().saturating_sub(2 * 1024);
+                let details = String::from_utf8_lossy(&output[output_start..]);
+                let details = details.trim();
+                let details = if details.is_empty() {
+                    "No command output was captured."
+                } else {
+                    details
+                };
                 let _ = tx.unbounded_send(EssentialSetupMessage::Error(format!(
-                    "{label} failed with exit code {}",
+                    "{label} failed with exit code {}:\n{details}",
                     status.code().unwrap_or(-1)
                 )));
                 return;
@@ -377,6 +429,7 @@ fn run_android_essential_setup(tx: futures::channel::mpsc::UnboundedSender<Essen
         });
     }
 
+    let _ = fs::remove_file(&output_log);
     let _ = tx.unbounded_send(EssentialSetupMessage::Step {
         label: "Finalising essential packages".to_string(),
         progress: 1.0,
@@ -565,9 +618,15 @@ impl Render for EssentialSetupModal {
                     v_flex()
                         .gap_2()
                         .child(
-                            Label::new(error)
-                                .size(LabelSize::XSmall)
-                                .color(Color::Error),
+                            div()
+                                .id("zdroid-essential-setup-error")
+                                .max_h(rems_from_px(180.0))
+                                .overflow_y_scroll()
+                                .child(
+                                    Label::new(error)
+                                        .size(LabelSize::XSmall)
+                                        .color(Color::Error),
+                                ),
                         )
                         .child(
                             Button::new("retry-essential-setup", "Retry")

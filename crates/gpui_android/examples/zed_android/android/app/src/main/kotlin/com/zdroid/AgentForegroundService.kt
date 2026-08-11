@@ -109,7 +109,7 @@ class AgentForegroundService : Service() {
                 Process.killProcess(Process.myPid())
             }
         }
-        return if (keepAliveEnabled) START_STICKY else START_NOT_STICKY
+        return if (keepAliveEnabled || activeTasks.isNotEmpty()) START_STICKY else START_NOT_STICKY
     }
 
     override fun onDestroy() {
