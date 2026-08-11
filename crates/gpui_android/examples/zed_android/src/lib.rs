@@ -391,7 +391,7 @@ fn ensure_managed_npm_acp_launcher(
     command: &str,
     package: &str,
 ) -> Result<PathBuf> {
-    let (_, home) = zdroid_bootstrap_paths()?;
+    let (prefix, home) = zdroid_bootstrap_paths()?;
     let launcher = home.join(format!(".local/bin/zdroid-{id}"));
     let parent = launcher
         .parent()
@@ -400,6 +400,9 @@ fn ensure_managed_npm_acp_launcher(
     let script = format!(
         r#"#!/system/bin/sh
 set -eu
+export PREFIX="{prefix}"
+export HOME="{home}"
+export PATH="$PREFIX/.zed/bin:$PREFIX/bin:${{PATH:-/system/bin}}"
 root="$HOME/.local/share/zdroid/{id}"
 managed_bin="$root/node_modules/.bin/{command}"
 global_bin="$PREFIX/bin/{command}"
@@ -466,6 +469,8 @@ export PATH="$PREFIX/.zed/bin:$PREFIX/bin:$root/node_modules/.bin:$PATH"
 export BROWSER="$HOME/.local/bin/zdroid-open-url"
 exec "$resolved_bin" "$@"
 "#,
+        prefix = prefix.to_string_lossy(),
+        home = home.to_string_lossy(),
     );
     std::fs::write(&launcher, script).context("write managed ACP launcher")?;
     let mut permissions = std::fs::metadata(&launcher)?.permissions();
