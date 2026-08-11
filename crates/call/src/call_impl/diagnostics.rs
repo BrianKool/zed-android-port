@@ -331,7 +331,8 @@ fn compute_remote_audio_stats(
         test,
         feature = "test-support",
         all(target_os = "windows", target_env = "gnu"),
-        target_os = "freebsd"
+        target_os = "freebsd",
+        target_os = "android"
     ))
 ))]
 fn compute_remote_audio_stats(
@@ -464,7 +465,8 @@ fn compute_remote_audio_stats(
         test,
         feature = "test-support",
         all(target_os = "windows", target_env = "gnu"),
-        target_os = "freebsd"
+        target_os = "freebsd",
+        target_os = "android"
     )
 ))]
 fn extract_metrics(

@@ -6,6 +6,7 @@
 //! a container manager or silently install a rootfs from an agent prompt.
 
 use std::collections::BTreeSet;
+use std::collections::HashMap;
 use std::ffi::OsString;
 use std::fs::File;
 use std::io::{self, BufRead, BufReader, Read};
@@ -277,13 +278,74 @@ impl ManagedLinuxAdapter {
     }
 
     fn guest_path(&self, path: &Path) -> PathBuf {
-        if let Ok(relative) = path.strip_prefix(self.host_home()) {
+        if let Some(relative) = private_app_relative(path, &self.host_home()) {
             return Path::new("/root").join(relative);
         }
         if let Ok(relative) = path.strip_prefix("/storage/emulated/0") {
             return Path::new("/storage/emulated/0").join(relative);
         }
         path.to_path_buf()
+    }
+
+    fn should_spawn_on_host(&self, program: &Path) -> bool {
+        let Some(relative) = private_app_relative(program, &self.host_home()) else {
+            return false;
+        };
+        relative.starts_with("../usr")
+            || relative
+                .strip_prefix(".local/bin")
+                .ok()
+                .and_then(Path::file_name)
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with("zdroid-"))
+    }
+
+    fn shell_invokes_host_tool(&self, req: &SpawnRequest) -> bool {
+        let program = Path::new(&req.program)
+            .file_name()
+            .and_then(|name| name.to_str());
+        if !matches!(program, Some("bash" | "sh")) {
+            return false;
+        }
+
+        req.args.iter().any(|argument| {
+            let argument = argument.to_string_lossy();
+            ["/data/data/", "/data/user/0/"].iter().any(|root| {
+                argument.contains(&format!("{root}com.zdroid/files/usr/"))
+                    || argument.contains(&format!("{root}com.zdroid/files/home/.local/bin/zdroid-"))
+            })
+        })
+    }
+
+    fn spawn_on_host(&self, req: SpawnRequest) -> Result<Box<dyn SpawnHandle>> {
+        let mut command = self.host_command(Path::new(&req.program));
+        command.args(&req.args);
+        self.apply_host_request_environment(&mut command, &req.env);
+        // A request originates in the Zed process, whose PATH intentionally
+        // starts with zd-runtime so ordinary tools enter Managed Linux. Once a
+        // command has been classified as a Bootstrap-host launcher, inheriting
+        // that PATH would route its `env node`/bare CLI children straight back
+        // into Managed Linux. Reassert the host boundary and shared HOME after
+        // applying caller-specific variables (auth tokens, BROWSER, etc.).
+        if let Some(cwd) = req.cwd.as_deref().filter(|cwd| cwd.is_dir()) {
+            command.current_dir(cwd);
+        } else {
+            command.current_dir(self.host_home());
+        }
+        apply_stdio(&mut command, req.stdio)?;
+        let child = command
+            .spawn()
+            .context("spawn Bootstrap tool from Managed Linux")?;
+        Ok(Box::new(ChildHandle { child }))
+    }
+
+    fn apply_host_request_environment(
+        &self,
+        command: &mut Command,
+        request_environment: &HashMap<String, OsString>,
+    ) {
+        command.envs(request_environment);
+        command.envs(self.host_environment());
     }
 
     fn translated_argument(&self, argument: &OsString) -> OsString {
@@ -694,6 +756,12 @@ impl RuntimeProvider for ManagedLinuxAdapter {
                 "Managed Linux is not installed; open Android Runtime settings and install it first"
             );
         }
+        if (Path::new(&req.program).is_absolute()
+            && self.should_spawn_on_host(Path::new(&req.program)))
+            || self.shell_invokes_host_tool(&req)
+        {
+            return self.spawn_on_host(req);
+        }
         let mut command = self.host_command(&self.proot_distro());
         command.arg("login");
         self.add_shared_home_option(&mut command);
@@ -707,6 +775,13 @@ impl RuntimeProvider for ManagedLinuxAdapter {
             "GIT_ASKPASS",
             "SSH_AUTH_SOCK",
             "ZDROID_RUNTIME",
+            "BROWSER",
+            "HTTP_PROXY",
+            "HTTPS_PROXY",
+            "NO_PROXY",
+            "http_proxy",
+            "https_proxy",
+            "no_proxy",
         ] {
             if let Some(value) = req.env.get(key) {
                 let mut assignment = OsString::from(key);
@@ -719,17 +794,7 @@ impl RuntimeProvider for ManagedLinuxAdapter {
         command.arg(self.translated_argument(&OsString::from(&req.program)));
         command.args(req.args.iter().map(|arg| self.translated_argument(arg)));
 
-        for (index, fd) in req.stdio.iter().enumerate() {
-            // SAFETY: SpawnRequest stdio values are live inherited descriptors.
-            // We immediately duplicate each one, so BorrowedFd never outlives it.
-            let owned = unsafe { BorrowedFd::borrow_raw(*fd) }.try_clone_to_owned()?;
-            match index {
-                0 => command.stdin(Stdio::from(owned)),
-                1 => command.stdout(Stdio::from(owned)),
-                2 => command.stderr(Stdio::from(owned)),
-                _ => unreachable!(),
-            };
-        }
+        apply_stdio(&mut command, req.stdio)?;
         let child = command.spawn().context("spawn in Managed Linux")?;
         Ok(Box::new(ChildHandle { child }))
     }
@@ -803,6 +868,44 @@ impl RuntimeProvider for ManagedLinuxAdapter {
     }
 }
 
+fn private_app_relative(path: &Path, host_home: &Path) -> Option<PathBuf> {
+    if let Ok(relative) = path.strip_prefix(host_home) {
+        return Some(relative.to_path_buf());
+    }
+
+    let files = host_home.parent()?;
+    let app_root = files.parent()?;
+    let package = app_root.file_name()?;
+    for data_root in [Path::new("/data/data"), Path::new("/data/user/0")] {
+        let alias_root = data_root.join(package);
+        let Ok(app_relative) = path.strip_prefix(alias_root) else {
+            continue;
+        };
+        if let Ok(relative) = app_relative.strip_prefix("files/home") {
+            return Some(relative.to_path_buf());
+        }
+        if let Ok(relative) = app_relative.strip_prefix("files") {
+            return Some(Path::new("..").join(relative));
+        }
+    }
+    None
+}
+
+fn apply_stdio(command: &mut Command, stdio: [i32; 3]) -> Result<()> {
+    for (index, fd) in stdio.into_iter().enumerate() {
+        // SAFETY: SpawnRequest stdio values are live inherited descriptors.
+        // We immediately duplicate each one, so BorrowedFd never outlives it.
+        let owned = unsafe { BorrowedFd::borrow_raw(fd) }.try_clone_to_owned()?;
+        match index {
+            0 => command.stdin(Stdio::from(owned)),
+            1 => command.stdout(Stdio::from(owned)),
+            2 => command.stderr(Stdio::from(owned)),
+            _ => unreachable!(),
+        };
+    }
+    Ok(())
+}
+
 fn validate_container_name(value: &str) -> Result<()> {
     if value.is_empty() || value.len() > CONTAINER_NAME_MAX {
         bail!("Managed Linux container name must be 1-{CONTAINER_NAME_MAX} characters");
@@ -851,6 +954,8 @@ fn bootstrap_script_interpreter(program: &Path, prefix: &Path) -> Option<PathBuf
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+
     use super::*;
 
     #[test]
@@ -868,5 +973,94 @@ mod tests {
     fn ignores_non_script_files_when_selecting_an_interpreter() {
         let prefix = Path::new("/not-used");
         assert!(bootstrap_script_interpreter(Path::new("/missing"), prefix).is_none());
+    }
+
+    #[test]
+    fn maps_android_private_path_aliases_to_shared_home() {
+        let home = Path::new("/data/data/com.zdroid/files/home");
+        assert_eq!(
+            private_app_relative(
+                Path::new("/data/user/0/com.zdroid/files/home/projects/demo"),
+                home
+            ),
+            Some(PathBuf::from("projects/demo"))
+        );
+        assert_eq!(
+            private_app_relative(
+                Path::new("/data/user/0/com.zdroid/files/usr/bin/node"),
+                home
+            ),
+            Some(PathBuf::from("../usr/bin/node"))
+        );
+    }
+
+    #[test]
+    fn detects_bootstrap_node_inside_shell_command() {
+        let adapter = ManagedLinuxAdapter::new(ManagedLinuxConfig {
+            bootstrap_prefix: PathBuf::from("/data/data/com.zdroid/files/usr"),
+            container: "ubuntu".into(),
+            image: "ubuntu:24.04".into(),
+            musl_container: "alpine".into(),
+            musl_image: "alpine:3.21".into(),
+        })
+        .unwrap();
+        let request = SpawnRequest {
+            program: "bash".into(),
+            args: vec![
+                OsString::from("-c"),
+                OsString::from("/data/user/0/com.zdroid/files/usr/bin/node /tmp/agent.js"),
+            ],
+            cwd: None,
+            env: HashMap::new(),
+            interactive: false,
+            stdio: [0, 1, 2],
+        };
+
+        assert!(adapter.shell_invokes_host_tool(&request));
+    }
+
+    #[test]
+    fn host_spawn_preserves_credentials_but_controls_runtime_paths() {
+        let adapter = ManagedLinuxAdapter::new(ManagedLinuxConfig {
+            bootstrap_prefix: PathBuf::from("/data/data/com.zdroid/files/usr"),
+            container: "ubuntu".into(),
+            image: "ubuntu:24.04".into(),
+            musl_container: "alpine".into(),
+            musl_image: "alpine:3.21".into(),
+        })
+        .unwrap();
+        let mut command = Command::new("/system/bin/true");
+        adapter.apply_host_request_environment(
+            &mut command,
+            &HashMap::from([
+                ("HOME".into(), OsString::from("/root")),
+                ("PATH".into(), OsString::from("/guest/bin")),
+                ("AGENT_TOKEN".into(), OsString::from("preserved")),
+            ]),
+        );
+        let environment = command
+            .get_envs()
+            .map(|(key, value)| {
+                (
+                    key.to_string_lossy().into_owned(),
+                    value.unwrap().to_string_lossy().into_owned(),
+                )
+            })
+            .collect::<HashMap<_, _>>();
+
+        assert_eq!(
+            environment.get("HOME").map(String::as_str),
+            Some("/data/data/com.zdroid/files/home")
+        );
+        assert_eq!(
+            environment.get("PATH").map(String::as_str),
+            Some(
+                "/data/data/com.zdroid/files/usr/.zed/bin:/data/data/com.zdroid/files/usr/bin:/system/bin:/system/xbin"
+            )
+        );
+        assert_eq!(
+            environment.get("AGENT_TOKEN").map(String::as_str),
+            Some("preserved")
+        );
     }
 }

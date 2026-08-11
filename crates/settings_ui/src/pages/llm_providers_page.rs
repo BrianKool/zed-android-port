@@ -505,7 +505,8 @@ fn render_provider_configuration(
     let Some(provider) = LanguageModelRegistry::read_global(cx).provider(&provider_id) else {
         return v_flex()
             .size_full()
-            .px_8()
+            .when(cfg!(target_os = "android"), |this| this.px_3())
+            .when(!cfg!(target_os = "android"), |this| this.px_8())
             .pt_2p5()
             .child(Label::new(
                 "This provider is not available in the current runtime.",
@@ -524,7 +525,8 @@ fn render_provider_configuration(
     else {
         return v_flex()
             .size_full()
-            .px_8()
+            .when(cfg!(target_os = "android"), |this| this.px_3())
+            .when(!cfg!(target_os = "android"), |this| this.px_8())
             .pt_2p5()
             .child(Label::new("This provider has no configurable settings."))
             .into_any_element();
@@ -711,7 +713,8 @@ fn render_llm_provider_form_page(
                 .id("llm-provider-form-page")
                 .track_scroll(scroll_handle)
                 .pt_2p5()
-                .px_8()
+                .when(cfg!(target_os = "android"), |this| this.px_3())
+                .when(!cfg!(target_os = "android"), |this| this.px_8())
                 .pb_16()
                 .gap_4()
                 .overflow_y_scroll()
@@ -746,7 +749,8 @@ fn render_llm_provider_form_page(
         )
         .child(
             v_flex()
-                .px_8()
+                .when(cfg!(target_os = "android"), |this| this.px_3())
+                .when(!cfg!(target_os = "android"), |this| this.px_8())
                 .py_2p5()
                 .gap_1()
                 .border_t_1()
@@ -790,7 +794,8 @@ fn render_form_field(
         .child(
             h_flex()
                 .w_full()
-                .min_w_64()
+                .when(cfg!(target_os = "android"), |this| this.min_w_0())
+                .when(!cfg!(target_os = "android"), |this| this.min_w_64())
                 .h_8()
                 .px_2()
                 .rounded_md()

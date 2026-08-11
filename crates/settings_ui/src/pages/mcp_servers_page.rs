@@ -52,7 +52,8 @@ pub(crate) fn render_mcp_servers_page(
         .child(
             v_flex()
                 .w_full()
-                .px_8()
+                .when(cfg!(target_os = "android"), |this| this.px_3())
+                .when(!cfg!(target_os = "android"), |this| this.px_8())
                 .gap_2()
                 .child(
                     v_flex().child(Label::new("Configured Servers")).child(
@@ -100,33 +101,41 @@ fn get_context_server_store(
 }
 
 fn render_empty_state(cx: &App) -> AnyElement {
-    h_flex()
+    v_flex()
+        .w_full()
+        .min_w_0()
         .p_4()
-        .justify_center()
+        .items_center()
         .border_1()
         .border_dashed()
         .border_color(cx.theme().colors().border.opacity(0.6))
         .rounded_sm()
         .child(
-            Label::new("No MCP servers added yet. Click \"Add Server\" to get started.")
-                .color(Color::Muted)
-                .size(LabelSize::Small),
+            div().w_full().min_w_0().text_center().child(
+                Label::new("No MCP servers added yet. Click \"Add Server\" to get started.")
+                    .color(Color::Muted)
+                    .size(LabelSize::Small),
+            ),
         )
         .into_any_element()
 }
 
 fn render_no_project_state(cx: &App) -> AnyElement {
-    h_flex()
+    v_flex()
+        .w_full()
+        .min_w_0()
         .p_4()
-        .justify_center()
+        .items_center()
         .border_1()
         .border_dashed()
         .border_color(cx.theme().colors().border.opacity(0.6))
         .rounded_sm()
         .child(
-            Label::new("No active project found. Open a workspace to manage MCP servers.")
-                .color(Color::Muted)
-                .size(LabelSize::Small),
+            div().w_full().min_w_0().text_center().child(
+                Label::new("No active project found. Open a workspace to manage MCP servers.")
+                    .color(Color::Muted)
+                    .size(LabelSize::Small),
+            ),
         )
         .into_any_element()
 }
@@ -977,7 +986,8 @@ fn render_mcp_server_form_page(
         .id("mcp-server-form-page")
         .size_full()
         .pt_2p5()
-        .px_8()
+        .when(cfg!(target_os = "android"), |this| this.px_3())
+        .when(!cfg!(target_os = "android"), |this| this.px_8())
         .pb_16()
         .track_scroll(scroll_handle)
         .overflow_y_scroll()
@@ -992,7 +1002,8 @@ fn input_box(editor: &Entity<Editor>, cx: &App) -> impl IntoElement {
     // routes keyboard focus into the editor when tabbed to.
     let focus_handle = editor.focus_handle(cx).tab_index(0).tab_stop(true);
     h_flex()
-        .min_w_64()
+        .when(cfg!(target_os = "android"), |this| this.w_full().min_w_0())
+        .when(!cfg!(target_os = "android"), |this| this.min_w_64())
         .py_1()
         .px_2()
         .h_8()
@@ -1036,7 +1047,8 @@ fn render_kv_section(
     cx: &mut Context<SettingsWindow>,
 ) -> AnyElement {
     let control = v_flex()
-        .min_w_64()
+        .when(cfg!(target_os = "android"), |this| this.w_full().min_w_0())
+        .when(!cfg!(target_os = "android"), |this| this.min_w_64())
         .gap_2()
         .children(rows.iter().enumerate().map(|(ix, row)| {
             v_flex()

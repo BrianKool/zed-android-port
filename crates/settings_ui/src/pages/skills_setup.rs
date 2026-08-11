@@ -63,29 +63,33 @@ pub(crate) fn render_skills_setup_page(
                     _ => "No skills available for this context.",
                 };
 
-                this.px_8().items_center().justify_center().child(
-                    v_flex()
-                        .items_center()
-                        .gap_2()
-                        .child(Label::new(message).color(Color::Muted))
-                        .child(
-                            Button::new("open-skill-creator-empty", "Create a Skill")
-                                .tab_index(0_isize)
-                                .style(ButtonStyle::Outlined)
-                                .start_icon(
-                                    Icon::new(IconName::Plus)
-                                        .size(IconSize::Small)
-                                        .color(Color::Muted),
-                                )
-                                .on_click(cx.listener(move |this, _event, window, cx| {
-                                    this.open_skill_creator_sub_page(
-                                        SkillCreatorOpenMode::Form,
-                                        window,
-                                        cx,
-                                    );
-                                })),
-                        ),
-                )
+                this.when(cfg!(target_os = "android"), |this| this.px_3())
+                    .when(!cfg!(target_os = "android"), |this| this.px_8())
+                    .items_center()
+                    .justify_center()
+                    .child(
+                        v_flex()
+                            .items_center()
+                            .gap_2()
+                            .child(Label::new(message).color(Color::Muted))
+                            .child(
+                                Button::new("open-skill-creator-empty", "Create a Skill")
+                                    .tab_index(0_isize)
+                                    .style(ButtonStyle::Outlined)
+                                    .start_icon(
+                                        Icon::new(IconName::Plus)
+                                            .size(IconSize::Small)
+                                            .color(Color::Muted),
+                                    )
+                                    .on_click(cx.listener(move |this, _event, window, cx| {
+                                        this.open_skill_creator_sub_page(
+                                            SkillCreatorOpenMode::Form,
+                                            window,
+                                            cx,
+                                        );
+                                    })),
+                            ),
+                    )
             } else {
                 this.track_scroll(scroll_handle)
                     .overflow_y_scroll()
@@ -96,7 +100,8 @@ pub(crate) fn render_skills_setup_page(
                         if i + 1 < skills.len() {
                             elements.push(
                                 div()
-                                    .px_8()
+                                    .when(cfg!(target_os = "android"), |this| this.px_3())
+                                    .when(!cfg!(target_os = "android"), |this| this.px_8())
                                     .child(Divider::horizontal().flex_grow_1())
                                     .into_any_element(),
                             );
@@ -199,7 +204,8 @@ fn render_skill_row(
         .w_full()
         .justify_between()
         .py_3()
-        .px_8()
+        .when(cfg!(target_os = "android"), |this| this.px_3())
+        .when(!cfg!(target_os = "android"), |this| this.px_8())
         .gap_4()
         .child(
             v_flex().gap_0p5().min_w_0().flex_1().child(title).child(

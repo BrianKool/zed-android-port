@@ -11,7 +11,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/release-1.1.2-2ea44f" alt="Release 1.1.2" />
+  <img src="https://img.shields.io/badge/release-1.1.3-2ea44f" alt="Release 1.1.3" />
   <img src="https://img.shields.io/badge/platform-Android-3DDC84?logo=android" alt="Android" />
   <a href="https://github.com/BrianKool/zed-android-port/releases/latest"><img src="https://img.shields.io/github/downloads/BrianKool/zed-android-port/total?label=downloads" alt="Total downloads" /></a>
 </p>
@@ -48,7 +48,7 @@ Termux userland rebuilt under `com.zdroid` (applicationId byte-length pinned to 
 
 ## <img src="https://api.iconify.design/lucide:download.svg?color=%23999999&height=22" valign="middle" /> &nbsp;Install
 
-Download [`Zdroid-B-1.1.2.apk`](https://github.com/BrianKool/zed-android-port/releases/latest) from the latest release and open it in your file manager. Android prompts for permission to install unknown apps the first time. Later Zdroid-B releases can upgrade in place because they use the same release signing certificate.
+Download [`Zdroid-B-1.1.3.apk`](https://github.com/BrianKool/zed-android-port/releases/latest) from the latest release and open it in your file manager. Android prompts for permission to install unknown apps the first time. Later Zdroid-B releases can upgrade in place because they use the same release signing certificate.
 
 > [!NOTE]
 > Android may show a "built for an older version of Android" warning before you tap Install. Proceed anyway. `targetSdk` is pinned at 28 on purpose: the bundled Termux userland depends on the `untrusted_app_27` SELinux domain, which permits `execve` on app-private files. Bumping `targetSdk` to 29+ lands the process in a stricter domain that denies exec, and the entire runtime stops working. See [`docs/workarounds/targetsdk-28-execve.md`](crates/gpui_android/docs/workarounds/targetsdk-28-execve.md) for the receipts.
@@ -233,7 +233,7 @@ First build is around 10 minutes. Incremental Rust rebuilds are 20 seconds, Grad
 
 ## <img src="https://api.iconify.design/lucide:tablet-smartphone.svg?color=%23999999&height=22" valign="middle" /> &nbsp;Tested on
 
-Zdroid-B 1.1.2 has been exercised on a Samsung S26 (Exynos 2600) at 360 logical pixels and in Samsung DeX, including touch input, a hardware mouse and keyboard, GitHub login, Codex, Claude, Managed Linux, and Vulkan-accelerated local LLM inference. It compiles for arm64 Android 9+ with Vulkan 1.1. Other GPU families may require device-specific Vulkan tuning.
+Zdroid-B 1.1.3 has been exercised on a Samsung S26 (Exynos 2600) at 360 logical pixels and in Samsung DeX, including touch input, a hardware mouse and keyboard, GitHub login, Codex, Claude, Managed Linux, and Vulkan-accelerated local LLM inference. It compiles for arm64 Android 9+ with Vulkan 1.1. Other GPU families may require device-specific Vulkan tuning.
 
 Touch-only phone use, tablet keyboards, Bluetooth input, and DeX are supported. Local 7B inference needs several gigabytes of free RAM and can heat the device; smaller 1B-3B models are the practical default for longer mobile sessions.
 

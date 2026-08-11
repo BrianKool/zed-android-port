@@ -27,10 +27,10 @@ use file_icons::FileIcons;
 use fs::Fs;
 use futures::FutureExt as _;
 use gpui::{
-    Action, Animation, AnimationExt, App, ClickEvent, ClipboardItem, CursorStyle,
-    DismissEvent, ElementId, Empty, Entity, EventEmitter, FocusHandle, Focusable, Hsla, ListOffset,
-    ListState, ObjectFit, PlatformDisplay, ScrollHandle, SharedString, StyledText, Subscription,
-    Task, TaskExt, TextRun, TextStyle, WeakEntity, Window, WindowHandle, div, ease_in_out, img,
+    Action, Animation, AnimationExt, App, ClickEvent, ClipboardItem, CursorStyle, DismissEvent,
+    ElementId, Empty, Entity, EventEmitter, FocusHandle, Focusable, Hsla, ListOffset, ListState,
+    ObjectFit, PlatformDisplay, ScrollHandle, SharedString, StyledText, Subscription, Task,
+    TaskExt, TextRun, TextStyle, WeakEntity, Window, WindowHandle, div, ease_in_out, img,
     linear_color_stop, linear_gradient, list, pulsating_between,
 };
 #[cfg(test)]
@@ -118,13 +118,6 @@ fn android_agent_account_note(agent_id: &AgentId) -> Option<&'static str> {
     match agent_id.as_ref() {
         "gemini" => Some(
             "Account availability is controlled by Google. Individual accounts may not be accepted; Gemini Code Assist Enterprise or API-key access may be required.",
-        ),
-        "github-copilot-cli" => {
-            Some("Sign in with a GitHub account that has GitHub Copilot access.")
-        }
-        "grok-build" => Some("Sign in with an xAI account that has Grok Build access."),
-        "opencode" => Some(
-            "OpenCode requires at least one model provider configured in its own CLI. Provider terms and charges apply.",
         ),
         _ => None,
     }
@@ -873,29 +866,26 @@ struct LoadingView {
 #[cfg(target_os = "android")]
 fn android_agent_install_target_exists(agent_id: &AgentId) -> bool {
     match agent_id.as_ref() {
-        "codex-acp" => std::fs::read_dir(
-            "/data/data/com.zdroid/files/home/.local/share/zdroid",
-        )
-        .ok()
-        .into_iter()
-        .flatten()
-        .flatten()
-        .any(|entry| {
-            entry
-                .file_name()
-                .to_str()
-                .is_some_and(|name| name.starts_with("codex-termux-"))
-                && entry
-                    .path()
-                    .join("node_modules/@mmmbuto/codex-cli-termux/bin/codex.bin")
-                    .is_file()
-        }),
+        "codex-acp" => std::fs::read_dir("/data/data/com.zdroid/files/home/.local/share/zdroid")
+            .ok()
+            .into_iter()
+            .flatten()
+            .flatten()
+            .any(|entry| {
+                entry
+                    .file_name()
+                    .to_str()
+                    .is_some_and(|name| name.starts_with("codex-termux-"))
+                    && entry
+                        .path()
+                        .join("node_modules/@mmmbuto/codex-cli-termux/bin/codex.bin")
+                        .is_file()
+            }),
         "claude-acp" => {
             let managed_root = Path::new(
                 "/data/data/com.zdroid/files/home/.local/share/zdroid/claude-code/node_modules",
             );
-            let global_root =
-                Path::new("/data/data/com.zdroid/files/usr/lib/node_modules");
+            let global_root = Path::new("/data/data/com.zdroid/files/usr/lib/node_modules");
             let cli_exists = managed_root
                 .join("@anthropic-ai/claude-code/cli.js")
                 .is_file()
@@ -910,24 +900,11 @@ fn android_agent_install_target_exists(agent_id: &AgentId) -> bool {
                     .is_file();
             cli_exists && acp_exists
         }
-        "gemini" => {
-            Path::new(
-                "/data/data/com.zdroid/files/home/.local/share/zdroid/gemini/node_modules/.bin/gemini",
-            )
-            .is_file()
-                || Path::new("/data/data/com.zdroid/files/usr/bin/gemini").is_file()
-        }
-        "github-copilot-cli" => {
-            Path::new(
-                "/data/data/com.zdroid/files/home/.local/share/zdroid/github-copilot-cli/node_modules/.bin/copilot",
-            )
-            .is_file()
-                || Path::new("/data/data/com.zdroid/files/usr/bin/copilot").is_file()
-        }
-        "grok-build" => {
-            Path::new("/data/data/com.zdroid/files/home/.grok/bin/grok").is_file()
-                || Path::new("/data/data/com.zdroid/files/usr/bin/grok").is_file()
-        }
+        "gemini" => Path::new(
+            "/data/data/com.zdroid/files/home/.local/share/zdroid/gemini/node_modules/.bin/gemini",
+        )
+        .is_file()
+            || Path::new("/data/data/com.zdroid/files/usr/bin/gemini").is_file(),
         _ => true,
     }
 }
@@ -949,16 +926,6 @@ fn android_agent_loading_label(agent_id: &AgentId) -> Option<SharedString> {
             "/data/data/com.zdroid/files/home/.local/share/zdroid/agent-setup/gemini.status",
             "Checking Gemini CLI",
             "Starting Gemini agent",
-        ),
-        "github-copilot-cli" => (
-            "/data/data/com.zdroid/files/home/.local/share/zdroid/agent-setup/github-copilot-cli.status",
-            "Checking GitHub Copilot CLI",
-            "Starting GitHub Copilot agent",
-        ),
-        "grok-build" => (
-            "/data/data/com.zdroid/files/home/.local/share/zdroid/agent-setup/grok-build.status",
-            "Checking Grok Build",
-            "Starting Grok Build agent",
         ),
         _ => return None,
     };
@@ -1003,14 +970,6 @@ fn android_agent_provisioning_task(agent_id: &AgentId) -> Option<(String, Shared
         "gemini" => Some((
             "zdroid-agent-provision-gemini".to_string(),
             "Downloading Gemini CLI".into(),
-        )),
-        "github-copilot-cli" => Some((
-            "zdroid-agent-provision-github-copilot".to_string(),
-            "Downloading GitHub Copilot CLI".into(),
-        )),
-        "grok-build" => Some((
-            "zdroid-agent-provision-grok-build".to_string(),
-            "Checking Grok Build compatibility".into(),
         )),
         _ => None,
     }

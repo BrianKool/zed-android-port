@@ -474,44 +474,6 @@ exec "$resolved_bin" "$@"
     Ok(launcher)
 }
 
-fn ensure_detected_acp_launcher(id: &str, label: &str, command: &str) -> Result<PathBuf> {
-    let (_, home) = zdroid_bootstrap_paths()?;
-    let launcher = home.join(format!(".local/bin/zdroid-{id}"));
-    let parent = launcher
-        .parent()
-        .context("detected ACP launcher has no parent")?;
-    std::fs::create_dir_all(parent).context("create detected ACP launcher directory")?;
-    let script = format!(
-        r#"#!/system/bin/sh
-set -eu
-setup_dir="$HOME/.local/share/zdroid/agent-setup"
-setup_status="$setup_dir/{id}.status"
-mkdir -p "$setup_dir"
-set_setup_status() {{
-    printf '%s\n' "$1" > "$setup_status.tmp"
-    mv "$setup_status.tmp" "$setup_status"
-}}
-resolved_bin=""
-for candidate in "$HOME/.grok/bin/{command}" "$PREFIX/bin/{command}"; do
-    if [ -x "$candidate" ]; then resolved_bin="$candidate"; break; fi
-done
-if [ -z "$resolved_bin" ]; then
-    set_setup_status '{label} has no Android-compatible installer'
-    echo 'Zdroid-B: {label} is not installed. Its official installer does not currently advertise Android support.' >&2
-    exit 127
-fi
-set_setup_status 'Starting {label} agent'
-export BROWSER="$HOME/.local/bin/zdroid-open-url"
-exec "$resolved_bin" "$@"
-"#,
-    );
-    std::fs::write(&launcher, script).context("write detected ACP launcher")?;
-    let mut permissions = std::fs::metadata(&launcher)?.permissions();
-    permissions.set_mode(0o700);
-    std::fs::set_permissions(&launcher, permissions).context("chmod detected ACP launcher")?;
-    Ok(launcher)
-}
-
 fn ensure_claude_acp_launcher() -> Result<PathBuf> {
     let (prefix, home) = zdroid_bootstrap_paths()?;
     if let Err(err) = ensure_claude_model_catalog(&home) {
@@ -608,7 +570,13 @@ if [ ! -f "$resolved_cli" ] || [ ! -f "$resolved_acp" ]; then
     exit 127
 fi
 
-if node "$resolved_cli" auth status >/dev/null 2>&1; then
+auth_status=1
+if [ -x "$PREFIX/bin/timeout" ]; then
+    "$PREFIX/bin/timeout" 10 "$PREFIX/bin/node" "$resolved_cli" auth status >/dev/null 2>&1 && auth_status=0
+else
+    "$PREFIX/bin/node" "$resolved_cli" auth status >/dev/null 2>&1 && auth_status=0
+fi
+if [ "$auth_status" -eq 0 ]; then
     printf 'authenticated\n' > "$setup_dir/claude-auth.status"
 else
     printf 'unauthenticated\n' > "$setup_dir/claude-auth.status"
@@ -617,7 +585,7 @@ set_setup_status 'Starting Claude agent'
 export CLAUDE_CODE_EXECUTABLE="$claude_cli"
 export DISABLE_AUTOUPDATER=1
 /system/bin/log -t zed_android "Claude ACP source=$resolved_acp" || true
-exec node "$resolved_acp" "$@"
+exec "$PREFIX/bin/node" "$resolved_acp" "$@"
 "#;
     std::fs::write(&launcher, script).context("write Claude ACP launcher")?;
     let mut permissions = std::fs::metadata(&launcher)?.permissions();
@@ -667,7 +635,7 @@ exec 9<"$resolv_conf"
 # from migrating to an Android-incompatible native build.
 export DISABLE_AUTOUPDATER=1
 export USE_BUILTIN_RIPGREP=0
-exec node "$resolved_cli" "$@"
+exec "$PREFIX/bin/node" "$resolved_cli" "$@"
 "#,
     )
     .context("write Claude terminal launcher")?;
@@ -704,15 +672,6 @@ pub(crate) fn ensure_agent_cli_launchers() -> Result<()> {
     ensure_claude_acp_launcher().context("recreate Claude launchers")?;
     ensure_managed_npm_acp_launcher("gemini", "Gemini CLI", "gemini", "@google/gemini-cli")
         .context("recreate Gemini launcher")?;
-    ensure_managed_npm_acp_launcher(
-        "github-copilot-cli",
-        "GitHub Copilot CLI",
-        "copilot",
-        "@github/copilot",
-    )
-    .context("recreate GitHub Copilot launcher")?;
-    ensure_detected_acp_launcher("grok-build", "Grok Build", "grok")
-        .context("recreate Grok Build launcher")?;
     Ok(())
 }
 
@@ -852,28 +811,13 @@ struct AndroidAcpAgent {
     args: &'static [&'static str],
 }
 
-const ANDROID_ACP_AGENTS: &[AndroidAcpAgent] = &[
-    AndroidAcpAgent {
-        id: "gemini",
-        command: "gemini",
-        args: &["--acp"],
-    },
-    AndroidAcpAgent {
-        id: "github-copilot-cli",
-        command: "copilot",
-        args: &["--acp", "--stdio"],
-    },
-    AndroidAcpAgent {
-        id: "grok-build",
-        command: "grok",
-        args: &["agent", "stdio"],
-    },
-    AndroidAcpAgent {
-        id: "opencode",
-        command: "opencode",
-        args: &["acp"],
-    },
-];
+const ANDROID_ACP_AGENTS: &[AndroidAcpAgent] = &[AndroidAcpAgent {
+    id: "gemini",
+    command: "gemini",
+    args: &["--acp"],
+}];
+
+const RETIRED_ANDROID_ACP_AGENTS: &[&str] = &["github-copilot-cli", "grok-build", "opencode"];
 
 fn executable_on_path(command: &str) -> Option<PathBuf> {
     std::env::split_paths(&std::env::var_os("PATH")?).find_map(|directory| {
@@ -1019,20 +963,6 @@ fn ensure_cli_subscription_agents(fs: Arc<dyn Fs>, cx: &mut App) {
                 log::error!("zed_android: failed to create Gemini launcher: {err:#}")
             })
             .ok();
-    let copilot_launcher = ensure_managed_npm_acp_launcher(
-        "github-copilot-cli",
-        "GitHub Copilot CLI",
-        "copilot",
-        "@github/copilot",
-    )
-    .inspect_err(|err| {
-        log::error!("zed_android: failed to create GitHub Copilot launcher: {err:#}")
-    })
-    .ok();
-    let grok_launcher = ensure_detected_acp_launcher("grok-build", "Grok Build", "grok")
-        .inspect_err(|err| log::error!("zed_android: failed to create Grok launcher: {err:#}"))
-        .ok();
-
     // Apply the launch contract synchronously before any Project creates its
     // AgentServerStore. Persisting settings below is intentionally async, but
     // relying on that write alone lets a project register the cached Registry
@@ -1041,6 +971,9 @@ fn ensure_cli_subscription_agents(fs: Arc<dyn Fs>, cx: &mut App) {
     // replaces this temporary global override once its atomic write completes.
     let mut runtime_settings =
         project::agent_server_store::AllAgentServersSettings::get_global(cx).clone();
+    for retired_agent in RETIRED_ANDROID_ACP_AGENTS {
+        runtime_settings.remove(*retired_agent);
+    }
     let codex = runtime_settings
         .entry("codex-acp".into())
         .or_insert_with(
@@ -1109,12 +1042,9 @@ fn ensure_cli_subscription_agents(fs: Arc<dyn Fs>, cx: &mut App) {
         );
     }
     for spec in ANDROID_ACP_AGENTS {
-        let launcher = match spec.id {
-            "gemini" => gemini_launcher.as_deref(),
-            "github-copilot-cli" => copilot_launcher.as_deref(),
-            "grok-build" => grok_launcher.as_deref(),
-            _ => None,
-        };
+        let launcher = (spec.id == "gemini")
+            .then_some(gemini_launcher.as_deref())
+            .flatten();
         if let Some(launcher) = launcher {
             configure_runtime_android_acp_agent(&mut runtime_settings, spec, launcher);
         }
@@ -1124,6 +1054,9 @@ fn ensure_cli_subscription_agents(fs: Arc<dyn Fs>, cx: &mut App) {
     cx.global::<SettingsStore>()
         .update_settings_file(fs, move |content, _cx| {
             let agent_servers = content.agent_servers.get_or_insert_default();
+            for retired_agent in RETIRED_ANDROID_ACP_AGENTS {
+                agent_servers.remove(*retired_agent);
+            }
 
             let codex = agent_servers
                 .entry("codex-acp".to_string())
@@ -1186,12 +1119,9 @@ fn ensure_cli_subscription_agents(fs: Arc<dyn Fs>, cx: &mut App) {
             }
 
             for spec in ANDROID_ACP_AGENTS {
-                let managed_launcher = match spec.id {
-                    "gemini" => gemini_launcher.as_deref(),
-                    "github-copilot-cli" => copilot_launcher.as_deref(),
-                    "grok-build" => grok_launcher.as_deref(),
-                    _ => None,
-                };
+                let managed_launcher = (spec.id == "gemini")
+                    .then_some(gemini_launcher.as_deref())
+                    .flatten();
                 configure_android_acp_agent(agent_servers, spec, managed_launcher);
             }
         });
@@ -1884,41 +1814,50 @@ fn boot(cx: &mut App, data_path: &std::path::Path, dns_resolver: AndroidDnsResol
     // (patched node platform string, npm wrapper, launcher-gen RUNPATH
     // fixup, libtermux-exec LD_PRELOAD) plus the bundled musl loader make
     // a Termux-installed Node usable. Wire NodeRuntime against settings
-    // so PATH-resolved Node (`pkg install nodejs` → $PREFIX/bin/node)
-    // works, and Zed's managed-node fallback download path is available
-    // for users without termux Node. Without this, npm-based LSPs
+    // so Bootstrap Node (`pkg install nodejs-lts` → $PREFIX/bin/node)
+    // works. Android must not use Zed's managed-node download: upstream
+    // Node distributions target glibc Linux rather than Android/Bionic.
+    // Use absolute Bootstrap paths because Managed Linux deliberately gives
+    // the Zed process a launcher PATH that does not include $PREFIX/bin.
+    // SystemNodeRuntime does not cache a failed explicit-path check, so Node
+    // installed after startup becomes available on the next request without
+    // restarting Zdroid-B. Without this, npm-based LSPs
     // (TypeScript / JavaScript / Pyright / etc.) fail at the install step
     // with `'node' settings do not allow any way to use Node.js`.
     let (mut node_options_tx, node_options_rx) =
         watch::channel::<Option<node_runtime::NodeBinaryOptions>>(None);
+    let bootstrap_node = data_path.join("usr/bin/node");
+    let bootstrap_npm = data_path.join("usr/bin/npm");
     cx.observe_global::<SettingsStore>(move |cx| {
         let settings = &project::project_settings::ProjectSettings::get_global(cx).node;
+        let configured_paths = settings.path.as_ref().map(|node_path| {
+            let node_path = std::path::PathBuf::from(shellexpand::tilde(node_path).as_ref());
+            let npm_path = settings
+                .npm_path
+                .as_ref()
+                .map(|p| std::path::PathBuf::from(shellexpand::tilde(&p).as_ref()));
+            (
+                node_path.clone(),
+                npm_path.unwrap_or_else(|| {
+                    node_path
+                        .parent()
+                        .map(|p| p.to_path_buf())
+                        .unwrap_or_default()
+                        .join("npm")
+                }),
+            )
+        });
         let options = node_runtime::NodeBinaryOptions {
             allow_path_lookup: !settings.ignore_system_version,
-            allow_binary_download: true,
-            use_paths: settings.path.as_ref().map(|node_path| {
-                let node_path = std::path::PathBuf::from(shellexpand::tilde(node_path).as_ref());
-                let npm_path = settings
-                    .npm_path
-                    .as_ref()
-                    .map(|p| std::path::PathBuf::from(shellexpand::tilde(&p).as_ref()));
-                (
-                    node_path.clone(),
-                    npm_path.unwrap_or_else(|| {
-                        node_path
-                            .parent()
-                            .map(|p| p.to_path_buf())
-                            .unwrap_or_default()
-                            .join("npm")
-                    }),
-                )
-            }),
+            allow_binary_download: false,
+            use_paths: configured_paths
+                .or_else(|| Some((bootstrap_node.clone(), bootstrap_npm.clone()))),
         };
         node_options_tx.send(Some(options)).log_err();
     })
     .detach();
     let node_runtime = NodeRuntime::new(client.http_client(), None, node_options_rx);
-    info!("zed_android: RealFs + NodeRuntime constructed (PATH lookup + managed download)");
+    info!("zed_android: RealFs + NodeRuntime constructed (Bootstrap Node + PATH lookup)");
 
     // Mirror production zed::watch_settings_files. Without this, edits to
     // ~/.config/zed/settings.json on disk never propagate into the running

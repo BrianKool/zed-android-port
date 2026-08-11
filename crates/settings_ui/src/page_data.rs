@@ -17,10 +17,13 @@ use crate::{
     all_language_names,
     pages::{
         open_audio_test_window, render_edit_prediction_setup_page, render_external_agents_page,
-        render_llm_providers_page, render_mcp_servers_page, render_sandbox_settings_page,
-        render_skills_setup_page, render_tool_permissions_setup_page,
+        render_llm_providers_page, render_mcp_servers_page, render_skills_setup_page,
+        render_tool_permissions_setup_page,
     },
 };
+
+#[cfg(not(target_os = "android"))]
+use crate::pages::render_sandbox_settings_page;
 
 const DEFAULT_STRING: String = String::new();
 /// A default empty string reference. Useful in `pick` functions for cases either in dynamic item fields, or when dealing with `settings::Maybe`
@@ -8509,49 +8512,58 @@ fn ai_page(cx: &App) -> SettingsPage {
     fn agent_configuration_section(_cx: &App) -> Box<[SettingsPageItem]> {
         let mut items = vec![SettingsPageItem::SectionHeader("Agent Configuration")];
 
-        items.extend([
-            SettingsPageItem::SubPageLink(SubPageLink {
-                title: "Skills".into(),
-                r#type: Default::default(),
-                json_path: Some(zed_actions::AGENT_SKILLS_SETTINGS_PATH),
-                description: Some("View and manage agent skills installed globally or in project worktrees.".into()),
-                search_aliases: &["agent skill", "agent skills", "custom instructions", "skill", "skills"],
-                in_json: false,
-                files: USER | PROJECT,
-                render: render_skills_setup_page,
-            }),
-            SettingsPageItem::SubPageLink(SubPageLink {
-                title: "Sandbox".into(),
-                r#type: Default::default(),
-                json_path: Some(zed_actions::AGENT_SANDBOX_SETTINGS_PATH),
-                description: Some(
-                    "Review and change the elevated terminal sandbox permissions that are always allowed without prompting."
-                        .into(),
-                ),
-                search_aliases: &[
-                    "allow",
-                    "domain",
-                    "filesystem",
-                    "network",
-                    "sandbox",
-                    "unsandboxed",
-                    "permissions",
-                ],
-                in_json: true,
-                files: USER,
-                render: render_sandbox_settings_page,
-            }),
-            SettingsPageItem::SubPageLink(SubPageLink {
-                title: "Tool Permissions".into(),
-                r#type: Default::default(),
-                json_path: Some("agent.tool_permissions"),
-                description: Some("Set up regex patterns to auto-allow, auto-deny, or always request confirmation, for specific tool inputs.".into()),
-                search_aliases: &[],
-                in_json: true,
-                files: USER,
-                render: render_tool_permissions_setup_page,
-            }),
-        ]);
+        items.push(SettingsPageItem::SubPageLink(SubPageLink {
+            title: "Skills".into(),
+            r#type: Default::default(),
+            json_path: Some(zed_actions::AGENT_SKILLS_SETTINGS_PATH),
+            description: Some(
+                "View and manage agent skills installed globally or in project worktrees.".into(),
+            ),
+            search_aliases: &[
+                "agent skill",
+                "agent skills",
+                "custom instructions",
+                "skill",
+                "skills",
+            ],
+            in_json: false,
+            files: USER | PROJECT,
+            render: render_skills_setup_page,
+        }));
+
+        #[cfg(not(target_os = "android"))]
+        items.push(SettingsPageItem::SubPageLink(SubPageLink {
+            title: "Sandbox".into(),
+            r#type: Default::default(),
+            json_path: Some(zed_actions::AGENT_SANDBOX_SETTINGS_PATH),
+            description: Some(
+                "Review and change the elevated terminal sandbox permissions that are always allowed without prompting."
+                    .into(),
+            ),
+            search_aliases: &[
+                "allow",
+                "domain",
+                "filesystem",
+                "network",
+                "sandbox",
+                "unsandboxed",
+                "permissions",
+            ],
+            in_json: true,
+            files: USER,
+            render: render_sandbox_settings_page,
+        }));
+
+        items.push(SettingsPageItem::SubPageLink(SubPageLink {
+            title: "Tool Permissions".into(),
+            r#type: Default::default(),
+            json_path: Some("agent.tool_permissions"),
+            description: Some("Set up regex patterns to auto-allow, auto-deny, or always request confirmation, for specific tool inputs.".into()),
+            search_aliases: &[],
+            in_json: true,
+            files: USER,
+            render: render_tool_permissions_setup_page,
+        }));
 
         items.extend([
             SettingsPageItem::SettingItem(SettingItem {

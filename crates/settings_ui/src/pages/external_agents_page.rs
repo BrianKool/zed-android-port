@@ -44,7 +44,8 @@ pub(crate) fn render_external_agents_page(
         .id("external-agents-page")
         .size_full()
         .pt_2p5()
-        .px_8()
+        .when(cfg!(target_os = "android"), |this| this.px_3())
+        .when(!cfg!(target_os = "android"), |this| this.px_8())
         .pb_16()
         .track_scroll(scroll_handle)
         .overflow_y_scroll()
@@ -109,33 +110,41 @@ fn custom_agent_settings(id: &AgentId, cx: &App) -> Option<CustomAgentServerSett
 }
 
 fn render_empty_state(cx: &App) -> AnyElement {
-    h_flex()
+    v_flex()
+        .w_full()
+        .min_w_0()
         .p_4()
-        .justify_center()
+        .items_center()
         .border_1()
         .border_dashed()
         .border_color(cx.theme().colors().border.opacity(0.6))
         .rounded_sm()
         .child(
-            Label::new("No external agents added yet. Click \"Add Agent\" to get started.")
-                .color(Color::Muted)
-                .size(LabelSize::Small),
+            div().w_full().min_w_0().text_center().child(
+                Label::new("No external agents added yet. Click \"Add Agent\" to get started.")
+                    .color(Color::Muted)
+                    .size(LabelSize::Small),
+            ),
         )
         .into_any_element()
 }
 
 fn render_no_project_state(cx: &App) -> AnyElement {
-    h_flex()
+    v_flex()
+        .w_full()
+        .min_w_0()
         .p_4()
-        .justify_center()
+        .items_center()
         .border_1()
         .border_dashed()
         .border_color(cx.theme().colors().border.opacity(0.6))
         .rounded_sm()
         .child(
-            Label::new("No active project found. Open a workspace to manage external agents.")
-                .color(Color::Muted)
-                .size(LabelSize::Small),
+            div().w_full().min_w_0().text_center().child(
+                Label::new("No active project found. Open a workspace to manage external agents.")
+                    .color(Color::Muted)
+                    .size(LabelSize::Small),
+            ),
         )
         .into_any_element()
 }
@@ -547,7 +556,8 @@ fn render_custom_agent_form_page(
         .id("custom-agent-form-page")
         .size_full()
         .pt_2p5()
-        .px_8()
+        .when(cfg!(target_os = "android"), |this| this.px_3())
+        .when(!cfg!(target_os = "android"), |this| this.px_8())
         .pb_16()
         .track_scroll(scroll_handle)
         .overflow_y_scroll()
@@ -562,7 +572,8 @@ fn input_box(editor: &Entity<Editor>, cx: &App) -> impl IntoElement {
     // routes keyboard focus into the editor when tabbed to.
     let focus_handle = editor.focus_handle(cx).tab_index(0).tab_stop(true);
     h_flex()
-        .min_w_64()
+        .when(cfg!(target_os = "android"), |this| this.w_full().min_w_0())
+        .when(!cfg!(target_os = "android"), |this| this.min_w_64())
         .py_1()
         .px_2()
         .h_8()
@@ -584,7 +595,8 @@ fn render_env_section(
     // variable stacks its key above its value (with the remove affordance next
     // to the value) to stay readable.
     let control = v_flex()
-        .min_w_64()
+        .when(cfg!(target_os = "android"), |this| this.w_full().min_w_0())
+        .when(!cfg!(target_os = "android"), |this| this.min_w_64())
         .gap_2()
         .children(rows.iter().enumerate().map(|(ix, row)| {
             v_flex().gap_1().child(input_box(&row.key, cx)).child(

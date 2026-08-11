@@ -1,6 +1,6 @@
 use crate::{
-    NewFile, Open, OpenMode, PathList, RecentWorkspace, SerializedWorkspaceLocation,
-    Workspace, WorkspaceSettings,
+    NewFile, Open, OpenMode, PathList, RecentWorkspace, SerializedWorkspaceLocation, Workspace,
+    WorkspaceSettings,
     item::{Item, ItemEvent},
     persistence::WorkspaceDb,
 };
@@ -599,20 +599,6 @@ impl WelcomePage {
                 "\"$PREFIX/bin/gemini\"",
                 Some("\"$PREFIX/bin/gemini\""),
             ))
-            .child(Label::new("Grok Build").size(LabelSize::Small))
-            .child(command(
-                "agent-command-grok",
-                "Install Grok",
-                "Install the official Linux ARM64 build, then run:\ngrok\nACP: grok agent stdio",
-                None,
-            ))
-            .child(
-                Label::new(
-                    "Also detected when installed: GitHub Copilot CLI (`copilot --acp --stdio`) and OpenCode (`opencode acp`). Only agents that launch successfully appear as connected.",
-                )
-                .size(LabelSize::Small)
-                .color(Color::Muted),
-            )
     }
 
     fn render_recent_project_section(
