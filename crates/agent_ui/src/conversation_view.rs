@@ -2494,11 +2494,17 @@ impl ConversationView {
         if cfg!(target_os = "android") && window.viewport_size().width.as_f32() < 700.0 {
             workspace.update(cx, |workspace, cx| {
                 workspace.close_panel::<AgentPanel>(window, cx);
+                workspace.reveal_panel::<TerminalPanel>(window, cx);
             });
         }
 
         window.spawn(cx, async move |cx| {
             let mut task = login.clone();
+            if cfg!(target_os = "android") {
+                // Authentication is interactive on Android. Keep its terminal
+                // visible after an early exit so setup errors are actionable.
+                task.hide = task::HideStrategy::Never;
+            }
             if let Some(cmd) = &task.command {
                 // Have "node" command use Zed's managed Node runtime by default
                 if cmd == "node" {
@@ -2532,6 +2538,7 @@ impl ConversationView {
 
             let success_patterns = match method.0.as_ref() {
                 "claude-login" | GEMINI_TERMINAL_AUTH_METHOD_ID => vec![
+                    "Authentication succeeded".to_string(),
                     "Login successful".to_string(),
                     "Type your message".to_string(),
                 ],
