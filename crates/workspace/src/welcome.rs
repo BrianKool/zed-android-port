@@ -586,19 +586,6 @@ impl WelcomePage {
                 "\"$PREFIX/.zed/bin/claude\"",
                 Some("\"$PREFIX/.zed/bin/claude\""),
             ))
-            .child(Label::new("Gemini CLI").size(LabelSize::Small))
-            .child(command(
-                "agent-command-gemini-install",
-                "Install Gemini",
-                "\"$PREFIX/bin/npm\" install -g @google/gemini-cli",
-                Some("\"$PREFIX/bin/npm\" install -g @google/gemini-cli"),
-            ))
-            .child(command(
-                "agent-command-gemini-login",
-                "Login to Gemini",
-                "\"$PREFIX/bin/gemini\"",
-                Some("\"$PREFIX/bin/gemini\""),
-            ))
     }
 
     fn render_recent_project_section(

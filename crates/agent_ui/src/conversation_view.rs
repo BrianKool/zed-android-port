@@ -116,9 +116,6 @@ pub(crate) const DRAFT_PROMPT_PERSIST_DEBOUNCE: Duration = Duration::from_millis
 #[cfg(target_os = "android")]
 fn android_agent_account_note(agent_id: &AgentId) -> Option<&'static str> {
     match agent_id.as_ref() {
-        "gemini" => Some(
-            "Account availability is controlled by Google. Individual accounts may not be accepted; Gemini Code Assist Enterprise or API-key access may be required.",
-        ),
         _ => None,
     }
 }
@@ -900,11 +897,6 @@ fn android_agent_install_target_exists(agent_id: &AgentId) -> bool {
                     .is_file();
             cli_exists && acp_exists
         }
-        "gemini" => Path::new(
-            "/data/data/com.zdroid/files/home/.local/share/zdroid/gemini/node_modules/.bin/gemini",
-        )
-        .is_file()
-            || Path::new("/data/data/com.zdroid/files/usr/bin/gemini").is_file(),
         _ => true,
     }
 }
@@ -921,11 +913,6 @@ fn android_agent_loading_label(agent_id: &AgentId) -> Option<SharedString> {
             "/data/data/com.zdroid/files/home/.local/share/zdroid/agent-setup/claude-acp.status",
             "Checking Claude CLI and ACP",
             "Starting Claude agent",
-        ),
-        "gemini" => (
-            "/data/data/com.zdroid/files/home/.local/share/zdroid/agent-setup/gemini.status",
-            "Checking Gemini CLI",
-            "Starting Gemini agent",
         ),
         _ => return None,
     };
@@ -966,10 +953,6 @@ fn android_agent_provisioning_task(agent_id: &AgentId) -> Option<(String, Shared
         "claude-acp" => Some((
             "zdroid-agent-provision-claude".to_string(),
             "Downloading Claude CLI and ACP".into(),
-        )),
-        "gemini" => Some((
-            "zdroid-agent-provision-gemini".to_string(),
-            "Downloading Gemini CLI".into(),
         )),
         _ => None,
     }

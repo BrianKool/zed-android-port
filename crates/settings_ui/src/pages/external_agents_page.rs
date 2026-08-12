@@ -81,6 +81,10 @@ fn collect_agents(store: &Entity<AgentServerStore>, cx: &App) -> Vec<AgentRow> {
     let store = store.read(cx);
     store
         .external_agents()
+        .filter(|agent_id| {
+            !cfg!(target_os = "android")
+                || matches!(agent_id.0.as_ref(), "claude-acp" | "codex-acp")
+        })
         .cloned()
         .collect::<Vec<_>>()
         .into_iter()
@@ -290,16 +294,18 @@ pub(crate) fn render_add_agent_popover(
         .menu(move |window, cx| {
             let settings_window = settings_window.clone();
             Some(ContextMenu::build(window, cx, move |menu, _window, _cx| {
-                menu.entry("Install from Registry", None, move |_window, cx| {
-                    if let Some(original_window) = original_window {
-                        cx.activate(true);
-                        original_window
-                            .update(cx, |_, window, cx| {
-                                window.activate_window();
-                                window.dispatch_action(Box::new(zed_actions::AcpRegistry), cx);
-                            })
-                            .log_err();
-                    }
+                menu.when(!cfg!(target_os = "android"), |menu| {
+                    menu.entry("Install from Registry", None, move |_window, cx| {
+                        if let Some(original_window) = original_window {
+                            cx.activate(true);
+                            original_window
+                                .update(cx, |_, window, cx| {
+                                    window.activate_window();
+                                    window.dispatch_action(Box::new(zed_actions::AcpRegistry), cx);
+                                })
+                                .log_err();
+                        }
+                    })
                 })
                 .entry("Add Custom Agent", None, move |window, cx| {
                     settings_window

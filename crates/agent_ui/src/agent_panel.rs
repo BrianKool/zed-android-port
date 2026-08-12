@@ -128,6 +128,14 @@ const KNOWN_TERMINAL_AGENT_COMMANDS: &[&str] = &[
     "qwen",
 ];
 
+fn external_agent_visible_on_this_platform(agent_id: &AgentId) -> bool {
+    if cfg!(target_os = "android") {
+        matches!(agent_id.as_ref(), "claude-acp" | "codex-acp")
+    } else {
+        true
+    }
+}
+
 fn is_known_terminal_agent_command(command: &str) -> bool {
     KNOWN_TERMINAL_AGENT_COMMANDS.contains(&command)
 }
@@ -4926,6 +4934,9 @@ impl agent::SiblingThreadHost for AgentPanelSiblingHost {
         let agent_server_store = project.read(cx).agent_server_store().clone();
         let store = agent_server_store.read(cx);
         for agent_id in store.external_agents() {
+            if !external_agent_visible_on_this_platform(agent_id) {
+                continue;
+            }
             let display = store
                 .agent_display_name(agent_id)
                 .unwrap_or_else(|| agent_id.0.clone());
@@ -5913,6 +5924,9 @@ impl AgentPanel {
 
                             let agent_items = agent_server_store
                                 .external_agents()
+                                .filter(|agent_id| {
+                                    external_agent_visible_on_this_platform(agent_id)
+                                })
                                 .map(|agent_id| {
                                     let display_name = agent_server_store
                                         .agent_display_name(agent_id)
