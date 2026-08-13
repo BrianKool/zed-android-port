@@ -1,0 +1,411 @@
+Zdroid-B Bootstrap + Ubuntu Runtime Path Rules
+==============================================
+
+Purpose
+-------
+Zdroid-B can have two development environments installed at the same time:
+
+1. Zdroid Standard / Bootstrap
+   Android-native, Termux-like, Bionic-based environment.
+
+2. Zdroid Full Linux / Managed Linux / Ubuntu
+   PRoot-based Linux userland, glibc-based environment.
+
+These two environments share project files, but they do not share the same
+filesystem namespace or libc. Most "No such file or directory" bugs after a
+tool is already installed are caused by sending an absolute path from one
+runtime into the other runtime.
+
+
+Important Paths
+---------------
+Bootstrap / Android-native paths:
+
+  /data/data/com.zdroid/files/usr/bin/git
+  /data/data/com.zdroid/files/usr/bin/node
+  /data/data/com.zdroid/files/usr/bin/npm
+  /data/data/com.zdroid/files/home
+  /data/user/0/com.zdroid/files/usr/bin/git
+  /data/user/0/com.zdroid/files/home
+
+Ubuntu / Managed Linux guest paths:
+
+  /root
+  /root/projects
+  /usr/bin/git
+  /usr/bin/node
+  /bin/bash
+  /etc
+  /tmp
+
+Zdroid bridge paths:
+
+  /data/data/com.zdroid/files/bin/zd-exec
+  /data/data/com.zdroid/files/zd-runtime/<tool>
+
+
+Core Rule
+---------
+Never pass a Bootstrap absolute executable path into Ubuntu / Managed Linux.
+
+Bad example:
+
+  /data/data/com.zdroid/files/usr/bin/git
+
+If this is routed through Managed Linux, it may become something like:
+
+  /root/../usr/bin/git
+
+That file does not exist inside Ubuntu, so the user sees:
+
+  No such file or directory
+  Git is not installed or not available
+  exit status 127
+
+
+Preferred Tool Resolution
+-------------------------
+Use short command names whenever possible:
+
+  git
+  node
+  npm
+  bash
+  ssh
+  gh
+  claude
+  codex
+
+Short names let Zdroid-B choose the correct runtime through PATH:
+
+  1. Managed Linux tools exposed through /data/data/com.zdroid/files/zd-runtime
+  2. Zdroid app bridge tools in /data/data/com.zdroid/files/bin
+  3. Bootstrap tools in /data/data/com.zdroid/files/usr/.zed/bin
+  4. Bootstrap tools in /data/data/com.zdroid/files/usr/bin
+
+
+What Should Run In Bootstrap
+----------------------------
+Prefer Bootstrap for app-level tools and credentials:
+
+  git
+  gh
+  ssh
+  GitHub credentials
+  Codex CLI
+  Claude CLI
+  Node/npm-based ACP launchers
+  Zed Git panel commands
+  Git commit/push/fetch/pull
+
+Reason:
+These tools need to share HOME, credentials, GitHub login, npm global installs,
+and Zed app integration.
+
+
+What Should Run In Ubuntu / Managed Linux
+-----------------------------------------
+Prefer Ubuntu for Linux server/runtime compatibility:
+
+  MongoDB server, if an ARM64 glibc build is available
+  PostgreSQL
+  Redis
+  glibc-only Linux binaries
+  apt-installed Linux services
+  tools that require a real Linux userland
+
+Reason:
+These tools need glibc, Linux filesystem layout, or apt packages.
+
+
+Absolute Path Rule
+------------------
+If a command path starts with:
+
+  /data/data/com.zdroid/files/usr/
+  /data/user/0/com.zdroid/files/usr/
+
+it belongs to Bootstrap.
+
+Do not route it into Ubuntu. Either:
+
+  - run it on the Bootstrap side, or
+  - replace it with a short command name like "git" or "node".
+
+If a command path starts with:
+
+  /usr/
+  /bin/
+  /root/
+  /etc/
+
+and it is meant to run inside Managed Linux, route it through zd-exec /
+Managed Linux.
+
+
+Git-Specific Rule
+-----------------
+The Git panel must not execute this as an absolute path when Managed Linux is
+active:
+
+  /data/data/com.zdroid/files/usr/bin/git
+
+Instead it should execute:
+
+  git
+
+This lets PATH select a valid Git:
+
+  - Ubuntu Git if installed and exposed through zd-runtime
+  - Bootstrap Git as fallback
+
+This rule prevents:
+
+  /bin/bash: line 1: /root/../usr/bin/git: No such file or directory
+
+
+Node/npm/Agent Rule
+-------------------
+Codex and Claude ACP launchers should prefer Bootstrap Node/npm.
+
+Do not let Managed Linux translate:
+
+  /data/data/com.zdroid/files/usr/bin/node
+  /data/data/com.zdroid/files/usr/bin/npm
+
+into Ubuntu paths.
+
+If the user installed Codex or Claude from the Zdroid terminal, the agent panel
+should be able to reuse the same Bootstrap HOME and npm global binaries.
+
+
+Debug Checklist
+---------------
+When a tool says "not found" or "No such file or directory":
+
+1. Check whether the tool is actually missing.
+2. Check whether the path belongs to Bootstrap or Ubuntu.
+3. If the path is /data/data/com.zdroid/files/usr/bin/<tool>, do not run it
+   inside Ubuntu.
+4. Prefer short command names before using absolute paths.
+5. Check PATH order in logcat:
+
+   adb logcat -d | grep "PATH ="
+
+6. Check for these symptoms:
+
+   /root/../usr/bin/<tool>
+   exit status 127
+   No such file or directory
+   Git is not installed or not available
+
+
+Design Decision
+---------------
+Bootstrap and Ubuntu should coexist, but they are not interchangeable.
+
+Bootstrap is the stable app integration and credential layer.
+Ubuntu is the compatibility layer for Linux/glibc software.
+
+Cross-runtime absolute paths are dangerous. Short command names and explicit
+runtime ownership are safer.
+
+
+Build Reminder
+==============
+
+Why this exists
+---------------
+Zdroid-B builds cross several layers at once:
+
+  - Windows host
+  - Gradle Android project
+  - Kotlin/Java Android wrapper
+  - Rust workspace
+  - cargo-ndk Android target
+  - Android NDK
+  - release signing
+
+Most build confusion comes from using the wrong Gradle executable, stale Gradle
+daemon processes, unfinished timed-out builds, or installing an older APK after a
+build timeout.
+
+
+Correct Working Directory
+-------------------------
+Run Gradle from:
+
+  crates/gpui_android/examples/zed_android/android
+
+From the repository root, the release APK is produced at:
+
+  crates/gpui_android/examples/zed_android/android/app/build/outputs/apk/release/app-release.apk
+
+
+Recommended Gradle Command
+--------------------------
+Use the Gradle distribution already cached by this machine:
+
+  C:\Users\brian\.gradle\wrapper\dists\gradle-8.11.1-all\2qik7nd48slq1ooc2496ixf4i\gradle-8.11.1\bin\gradle.bat :app:assembleRelease --no-daemon
+
+Do not assume system "gradle" exists.
+Do not assume "gradlew.bat" exists in this checkout.
+
+
+Required Toolchain Checks
+-------------------------
+Before a release build, check:
+
+  cargo --version
+  rustc --version
+  cargo ndk --version
+  adb devices
+
+Also confirm Android NDK is available through the existing Gradle/Android setup.
+Do not reinstall toolchains unless something is truly missing.
+
+
+Formatting Checks
+-----------------
+For Rust files touched by Zdroid-B, prefer:
+
+  rustfmt --edition 2024 --check <files>
+
+Use direct file formatting checks for scoped changes. Avoid running broad
+formatters across the whole upstream Zed repo unless intentionally doing a
+format-only cleanup.
+
+
+Build Verification Checklist
+----------------------------
+After Gradle returns success:
+
+1. Confirm the APK timestamp changed:
+
+   Get-Item crates\gpui_android\examples\zed_android\android\app\build\outputs\apk\release\app-release.apk
+
+2. Confirm the APK size is plausible.
+   Recent release APKs are about 300 MB.
+
+3. Only then install:
+
+   adb install -r crates\gpui_android\examples\zed_android\android\app\build\outputs\apk\release\app-release.apk
+
+4. Launch and inspect logcat for the specific bug being tested.
+
+
+Avoid Installing An Old APK
+---------------------------
+If a build times out, do not immediately install whatever APK is present.
+
+First check:
+
+  - APK LastWriteTime
+  - whether Gradle/Java is still running
+  - whether the changed Rust crate was actually rebuilt
+
+Useful commands:
+
+  Get-Item crates\gpui_android\examples\zed_android\android\app\build\outputs\apk\release\app-release.apk | Format-List FullName,Length,LastWriteTime
+
+  Get-Process java,gradle -ErrorAction SilentlyContinue | Select-Object ProcessName,Id,CPU,StartTime
+
+If the APK timestamp is older than the last source edit, it is the wrong APK.
+
+
+Handling Stuck Gradle Builds
+----------------------------
+Sometimes a Codex tool timeout leaves orphan Gradle/Java processes running.
+Symptoms:
+
+  - command timed out
+  - APK timestamp did not change
+  - java.exe / GradleDaemon still running
+  - a second build appears to hang
+
+Inspect Java command lines:
+
+  Get-CimInstance Win32_Process -Filter "name='java.exe'" | Select-Object ProcessId,CommandLine | Format-List
+
+If orphan assembleRelease processes are confirmed, stop only the Gradle build
+processes and daemons related to this repo, then run:
+
+  C:\Users\brian\.gradle\wrapper\dists\gradle-8.11.1-all\2qik7nd48slq1ooc2496ixf4i\gradle-8.11.1\bin\gradle.bat --stop
+
+Then rebuild cleanly.
+
+Do not randomly kill unrelated Java processes.
+
+
+Expected Build Output
+---------------------
+A normal release build should include:
+
+  :app:buildZdExec
+  :app:buildZedAndroidLib
+  :app:packageRelease
+  :app:assembleRelease
+  BUILD SUCCESSFUL
+
+Warnings about unused patches, deprecated quick_xml methods, or upstream unused
+code are usually not blockers unless they are tied to the current change.
+
+
+Release Signing
+---------------
+The release APK depends on the existing local signing configuration.
+Do not create a new keystore casually.
+
+If the signing key changes, Android will not allow direct upgrade over the
+previously installed app. The user would need to uninstall first, losing app
+sandbox data unless backed up.
+
+
+GitHub / Release Upload Rule
+----------------------------
+Do not automatically commit, push, or upload release assets after every local
+change.
+
+Only do these when explicitly requested:
+
+  - commit
+  - push
+  - upload release
+  - overwrite GitHub release APK
+
+Default workflow:
+
+  1. edit locally
+  2. build locally
+  3. install to phone
+  4. verify with logcat / user testing
+  5. commit/push/upload only after explicit approval
+
+
+Post-Install Smoke Test
+-----------------------
+For runtime or Git changes, use:
+
+  adb logcat -c
+  adb shell am force-stop com.zdroid
+  adb shell monkey -p com.zdroid 1
+
+Then inspect:
+
+  adb logcat -d -t 3000
+
+Search for:
+
+  No such file
+  os error 2
+  exit status 127
+  /root/../usr/bin
+  Git is not installed
+  git status failed
+  node missing
+  zed-npm
+  claude
+  codex
+
+For UI changes, open the exact panel/dialog on the phone. A successful build is
+not enough.
