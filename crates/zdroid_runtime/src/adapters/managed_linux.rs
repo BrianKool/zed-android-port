@@ -830,6 +830,10 @@ impl RuntimeProvider for ManagedLinuxAdapter {
         path.push(":");
         path.push(data_path.join("bin"));
         path.push(":");
+        path.push(self.config.bootstrap_prefix.join(".zed/bin"));
+        path.push(":");
+        path.push(self.config.bootstrap_prefix.join("bin"));
+        path.push(":");
         path.push(std::env::var_os("PATH").unwrap_or_default());
         vec![
             ("HOME".into(), EnvOp::Set(self.host_home().into_os_string())),

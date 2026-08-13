@@ -3802,7 +3802,7 @@ impl GitBinary {
     where
         S: AsRef<OsStr>,
     {
-        let mut command = new_command(&self.git_binary_path);
+        let mut command = new_command(android_safe_git_program(&self.git_binary_path));
         command.current_dir(&self.working_directory);
         // Disabled to stop malicious actors from running arbitrary commands via fsmonitor hooks
         command.args(["-c", "core.fsmonitor=false"]);
@@ -3834,6 +3834,29 @@ impl GitBinary {
         command.envs(&self.envs);
         command
     }
+}
+
+#[cfg(target_os = "android")]
+fn android_safe_git_program(path: &Path) -> &OsStr {
+    let path_text = path.to_string_lossy();
+    let is_app_private_git = path.file_name() == Some(OsStr::new("git"))
+        && [
+            "/data/data/com.zdroid/files/",
+            "/data/user/0/com.zdroid/files/",
+        ]
+        .iter()
+        .any(|prefix| path_text.starts_with(prefix));
+
+    if is_app_private_git {
+        OsStr::new("git")
+    } else {
+        path.as_os_str()
+    }
+}
+
+#[cfg(not(target_os = "android"))]
+fn android_safe_git_program(path: &Path) -> &OsStr {
+    path.as_os_str()
 }
 
 #[derive(Error, Debug)]
