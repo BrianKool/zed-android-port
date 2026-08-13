@@ -1253,7 +1253,11 @@ impl Fs for RealFs {
             .args(&["init", "-b"])
             .arg(branch_name.trim())
             .output()
-            .await?;
+            .await
+            .with_context(|| {
+                "Git is not installed or not available in the active Zdroid runtime. \
+                 Install Git before initializing a repository."
+            })?;
 
         Ok(())
     }
@@ -1272,7 +1276,11 @@ impl Fs for RealFs {
             .current_dir(abs_work_directory)
             .args(&["clone", repo_url])
             .output()
-            .await?;
+            .await
+            .with_context(|| {
+                "Git is not installed or not available in the active Zdroid runtime. \
+                 Install Git before cloning a repository."
+            })?;
 
         if !output.status.success() {
             anyhow::bail!(
@@ -1292,7 +1300,11 @@ impl Fs for RealFs {
             .current_dir(abs_work_directory)
             .args([String::from("config")].into_iter().chain(args))
             .output()
-            .await?;
+            .await
+            .with_context(|| {
+                "Git is not installed or not available in the active Zdroid runtime. \
+                 Install Git in Zdroid Standard, or switch to Zdroid Full Linux and install Git there."
+            })?;
 
         if !output.status.success() {
             let err = String::from_utf8(output.stderr)?;

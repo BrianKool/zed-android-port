@@ -117,7 +117,7 @@ pub fn init(cx: &mut App) {
             };
             let token = std::str::from_utf8(&token)?;
             let user = github_auth::validate_token(&http_client, token).await?;
-            github_auth::ensure_git_identity(&user)?;
+            github_auth::ensure_git_identity(&user).await?;
             anyhow::Ok(())
         })
         .detach_and_log_err(cx);

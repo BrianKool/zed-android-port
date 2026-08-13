@@ -1,3 +1,5 @@
+#[cfg(target_os = "android")]
+use std::io::ErrorKind;
 use std::{
     sync::Arc,
     time::{Duration, Instant},
@@ -16,7 +18,7 @@ use ui::{
     Button, ButtonStyle, Color, Icon, IconName, IconSize, Label, LabelSize, Modal, ModalFooter,
     ModalHeader, Section, TintColor, prelude::*,
 };
-use util::command::new_std_command;
+use util::command::new_command;
 use workspace::{ModalView, Workspace};
 
 actions!(github_auth, [OpenGithubAccounts]);
@@ -53,30 +55,46 @@ impl GithubUser {
     }
 }
 
-pub(crate) fn ensure_git_identity(user: &GithubUser) -> Result<()> {
-    let global_config_value = |key: &str| -> Option<String> {
-        let output = new_std_command("git")
+pub(crate) async fn ensure_git_identity(user: &GithubUser) -> Result<()> {
+    async fn global_config_value(key: &str) -> Option<String> {
+        let output = new_command("git")
             .args(["config", "--global", "--get", key])
             .output()
+            .await
             .ok()?;
         output
             .status
             .success()
             .then(|| String::from_utf8_lossy(&output.stdout).trim().to_owned())
             .filter(|value| !value.is_empty())
-    };
-    let set_global_config = |key: &str, value: &str| -> Result<()> {
-        let status = new_std_command("git")
+    }
+
+    async fn set_global_config(key: &str, value: &str) -> Result<()> {
+        let status = match new_command("git")
             .args(["config", "--global", key, value])
             .status()
-            .with_context(|| format!("run git config --global {key}"))?;
+            .await
+        {
+            Ok(status) => status,
+            #[cfg(target_os = "android")]
+            Err(error) if error.kind() == ErrorKind::NotFound => {
+                log::warn!(
+                    "GitHub is signed in, but Git is not available in the active Zdroid runtime; \
+                     skipping automatic git config --global {key}"
+                );
+                return Ok(());
+            }
+            Err(error) => {
+                return Err(error).with_context(|| format!("run git config --global {key}"));
+            }
+        };
         if !status.success() {
             bail!("git config --global {key} exited with {status}");
         }
         Ok(())
-    };
+    }
 
-    let has_name = global_config_value("user.name").is_some();
+    let has_name = global_config_value("user.name").await.is_some();
     if !has_name {
         let name = user
             .name
@@ -84,10 +102,10 @@ pub(crate) fn ensure_git_identity(user: &GithubUser) -> Result<()> {
             .map(str::trim)
             .filter(|name| !name.is_empty())
             .unwrap_or(&user.login);
-        set_global_config("user.name", name)?;
+        set_global_config("user.name", name).await?;
     }
 
-    let has_email = global_config_value("user.email").is_some();
+    let has_email = global_config_value("user.email").await.is_some();
     if !has_email {
         let email = user
             .email
@@ -96,7 +114,7 @@ pub(crate) fn ensure_git_identity(user: &GithubUser) -> Result<()> {
             .filter(|email| !email.is_empty())
             .map(ToOwned::to_owned)
             .unwrap_or_else(|| format!("{}+{}@users.noreply.github.com", user.id, user.login));
-        set_global_config("user.email", &email)?;
+        set_global_config("user.email", &email).await?;
     }
 
     Ok(())
@@ -320,7 +338,7 @@ impl GithubAccountsModal {
                 Ok(Some((username, token))) if username == GITHUB_GIT_USERNAME => {
                     match std::str::from_utf8(&token) {
                         Ok(token) => match validate_token(&http_client, token).await {
-                            Ok(user) => match ensure_git_identity(&user) {
+                            Ok(user) => match ensure_git_identity(&user).await {
                                 Ok(()) => AuthState::SignedIn(user.display_label().into()),
                                 Err(error) => AuthState::Error(
                                     format!("GitHub is signed in, but Git identity setup failed: {error:#}")
@@ -376,7 +394,7 @@ impl GithubAccountsModal {
         cx.spawn(async move |this, cx| {
             let result: Result<GithubUser> = async {
                 let user = validate_token(&http_client, &token).await?;
-                ensure_git_identity(&user)?;
+                ensure_git_identity(&user).await?;
                 let store = cx.update(|cx| {
                     cx.write_credentials(GITHUB_CREDENTIALS_KEY, &user.login, token.as_bytes())
                 });
@@ -419,7 +437,7 @@ impl GithubAccountsModal {
 
                 let token = poll_for_access_token(&http_client, &executor, &device).await?;
                 let user = validate_token(&http_client, &token).await?;
-                ensure_git_identity(&user)?;
+                ensure_git_identity(&user).await?;
                 let store = cx.update(|cx| {
                     cx.write_credentials(
                         GITHUB_CREDENTIALS_KEY,
