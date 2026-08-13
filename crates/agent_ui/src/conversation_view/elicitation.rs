@@ -4,7 +4,7 @@ use collections::{HashMap, HashSet};
 use component::{Component, ComponentScope, example_group_with_title, single_example};
 use editor::Editor;
 use futures::channel::oneshot;
-use gpui::{AnyElement, App, Div, Empty, Entity, Hsla, SharedString, Window, div};
+use gpui::{AnyElement, App, Div, Empty, Entity, Hsla, MouseButton, SharedString, Window, div};
 use std::collections::BTreeMap;
 use std::rc::Rc;
 use ui::{
@@ -1495,6 +1495,9 @@ impl<'a> ElicitationCard<'a> {
             .border_1()
             .border_color(border_color)
             .overflow_hidden()
+            .when(cfg!(target_os = "android"), |this| {
+                this.on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            })
             .child(
                 h_flex()
                     .h_8()
@@ -1611,6 +1614,7 @@ impl<'a> ElicitationCard<'a> {
                         .gap_1()
                         .cursor_pointer()
                         .on_click(move |_, _window, cx| {
+                            cx.stop_propagation();
                             on_boolean_change(
                                 elicitation_id.clone(),
                                 field_name.clone(),
@@ -1726,6 +1730,7 @@ impl<'a> ElicitationCard<'a> {
                                 .py_1()
                                 .hover(move |this| this.bg(hover_background).cursor_pointer())
                                 .on_click(move |_, _window, cx| {
+                                    cx.stop_propagation();
                                     on_multi_select_change(
                                         elicitation_id.clone(),
                                         field_name.clone(),
@@ -1793,6 +1798,7 @@ impl<'a> ElicitationCard<'a> {
                     .py_1()
                     .hover(move |this| this.bg(hover_background).cursor_pointer())
                     .on_click(move |_, _window, cx| {
+                        cx.stop_propagation();
                         on_single_select_change(
                             elicitation_id.clone(),
                             field_name.clone(),
@@ -1984,6 +1990,7 @@ impl<'a> ElicitationCard<'a> {
                     .label_size(LabelSize::Small)
                     .disabled(is_submitting)
                     .on_click(move |_, window, cx| {
+                        cx.stop_propagation();
                         if let Some(url) = &open_url {
                             on_open_url(submit_id.clone(), url.clone(), window, cx);
                             if !is_accepted_url {
@@ -2004,6 +2011,7 @@ impl<'a> ElicitationCard<'a> {
                         )
                         .label_size(LabelSize::Small)
                         .on_click(move |_, window, cx| {
+                            cx.stop_propagation();
                             on_decline(decline_id.clone(), window, cx);
                         }),
                 )
@@ -2011,6 +2019,7 @@ impl<'a> ElicitationCard<'a> {
                     Button::new(("elicitation-cancel", self.entry_ix), "Cancel")
                         .label_size(LabelSize::Small)
                         .on_click(move |_, window, cx| {
+                            cx.stop_propagation();
                             on_cancel(cancel_id.clone(), window, cx);
                         }),
                 )
@@ -2020,6 +2029,7 @@ impl<'a> ElicitationCard<'a> {
                     Button::new(("elicitation-dismiss-url", self.entry_ix), "Cancel")
                         .label_size(LabelSize::Small)
                         .on_click(move |_, window, cx| {
+                            cx.stop_propagation();
                             on_dismiss_url(dismiss_id.clone(), window, cx);
                         }),
                 )

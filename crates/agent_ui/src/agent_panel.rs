@@ -74,7 +74,7 @@ use fs::Fs;
 use futures::FutureExt as _;
 use gpui::{
     Action, Anchor, Animation, AnimationExt, AnyElement, App, AsyncWindowContext, ClipboardItem,
-    Entity, EventEmitter, ExternalPaths, FocusHandle, Focusable, KeyContext, Pixels,
+    Entity, EventEmitter, ExternalPaths, FocusHandle, Focusable, KeyContext, MouseButton, Pixels,
     PlatformDisplay, Subscription, Task, TaskExt, WeakEntity, WindowHandle, prelude::*,
     pulsating_between,
 };
@@ -3665,10 +3665,18 @@ impl AgentPanel {
     }
 
     pub fn toggle_zoom(&mut self, _: &ToggleZoom, window: &mut Window, cx: &mut Context<Self>) {
+        // Android keeps text-editor focus after tapping nearby icon buttons. Moving a
+        // zoomed panel while its compact composer still owns focus can leave the panel
+        // attached to a stale editor layout. Always hand focus to the panel itself
+        // before either zoom transition; this does not alter the composer contents.
+        if cfg!(target_os = "android") {
+            self.focus_handle.focus(window, cx);
+        }
+
         if self.zoomed {
             cx.emit(PanelEvent::ZoomOut);
         } else {
-            if !self.focus_handle(cx).contains_focused(window, cx) {
+            if !cfg!(target_os = "android") && !self.focus_handle(cx).contains_focused(window, cx) {
                 self.activation_focus_handle(cx).focus(window, cx);
             }
             cx.emit(PanelEvent::ZoomIn);
@@ -4985,6 +4993,10 @@ impl Panel for AgentPanel {
     }
 
     fn activation_focus_handle(&self, cx: &App) -> FocusHandle {
+        if cfg!(target_os = "android") {
+            return self.focus_handle.clone();
+        }
+
         match self.visible_surface() {
             VisibleSurface::Uninitialized => self.focus_handle.clone(),
             VisibleSurface::AgentThread(conversation_view) => {
@@ -5052,6 +5064,12 @@ impl Panel for AgentPanel {
         self.is_active = active;
         if active {
             self.ensure_thread_initialized(window, cx);
+        } else if cfg!(target_os = "android") && self.zoomed {
+            // A hidden Android dock cannot safely retain a zoom layer while its
+            // compact message editor is also hidden. Reopening would otherwise
+            // focus an invisible editor and leave the panel impossible to reveal.
+            self.zoomed = false;
+            cx.emit(PanelEvent::ZoomOut);
         }
     }
 
@@ -6091,13 +6109,18 @@ impl AgentPanel {
         } else {
             (IconName::Maximize, "Enable Full Screen")
         };
-        let full_screen_button = IconButton::new("toggle-full-screen", icon_name)
-            .icon_size(IconSize::Small)
-            .toggle_state(is_full_screen)
-            .tooltip(move |_, cx| Tooltip::for_action(tooltip_text, &ToggleZoom, cx))
-            .on_click(cx.listener(move |this, _, window, cx| {
-                this.toggle_zoom(&ToggleZoom, window, cx);
-            }));
+        let full_screen_button = div()
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .child(
+                IconButton::new("toggle-full-screen", icon_name)
+                    .icon_size(IconSize::Small)
+                    .toggle_state(is_full_screen)
+                    .tooltip(move |_, cx| Tooltip::for_action(tooltip_text, &ToggleZoom, cx))
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        cx.stop_propagation();
+                        this.toggle_zoom(&ToggleZoom, window, cx);
+                    })),
+            );
 
         let history_button = |cx: &mut Context<Self>| {
             IconButton::new("agent-thread-history", IconName::HistoryRerun)

@@ -3982,7 +3982,7 @@ impl GitPanel {
     /// worktree to the `safe.directory` config, ensuring that, even if the user
     /// that's running the application is not the owner of `.git/`, it can still
     /// read the repository's contents.
-    fn add_safe_directory(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+    fn add_safe_directory(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(active_repository) = &self.active_repository else {
             return;
         };
@@ -4000,10 +4000,23 @@ impl GitPanel {
                 path_arg,
             ];
 
-            self.project
-                .read(cx)
-                .git_config(path, args, cx)
-                .detach_and_log_err(cx);
+            let task = self.project.read(cx).git_config(path, args, cx);
+            cx.spawn_in(window, async move |this, cx| {
+                let result = task.await;
+                this.update_in(cx, |this, window, cx| match result {
+                    Ok(_) => {
+                        // The unsafe-repository view caches GitAccess::No.
+                        // Re-run the access check after updating global config
+                        // so the panel becomes usable without reopening it.
+                        this.git_access = None;
+                        this.update_visible_entries(window, cx);
+                        cx.notify();
+                    }
+                    Err(error) => this.show_error_toast("trust directory", error, cx),
+                })
+                .ok();
+            })
+            .detach();
         }
     }
 

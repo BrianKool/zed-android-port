@@ -306,6 +306,22 @@ impl RuntimePicker {
                                 "ERROR: Runtime installed, but Agent launchers could not be created: {err:#}"
                             ));
                         }
+                        if matches!(
+                            target,
+                            EntryKind::Runtime(RuntimeId::Bootstrap | RuntimeId::ManagedLinux)
+                        ) {
+                            let data_path = std::path::Path::new("/data/data/com.zdroid/files");
+                            if let Err(err) =
+                                gpui_android::github_credentials::ensure_gh_wrappers(data_path)
+                            {
+                                log::error!(
+                                    "zdroid_runtime_picker: GitHub CLI wrapper repair failed: {err:#}"
+                                );
+                                let _ = tx.unbounded_send(format!(
+                                    "warning: Runtime installed, but the GitHub CLI credential bridge could not be created: {err:#}"
+                                ));
+                            }
+                        }
                     }
                     Err(err) => {
                         log::error!(

@@ -61,14 +61,26 @@ class AgentForegroundService : Service() {
                     batchHadFailure = false
                     batchTaskDescriptions.clear()
                 }
+                val previousDescription = activeTasks[taskId]
                 if (!activeTasks.containsKey(taskId)) batchTaskCount += 1
                 activeTasks[taskId] = description
                 batchTaskDescriptions.add(description)
                 startForeground(RUNNING_NOTIFICATION_ID, runningNotification())
+                if (isWaitingForUser(description)) {
+                    if (previousDescription != description) {
+                        notificationManager.notify(
+                            attentionNotificationId(taskId),
+                            attentionNotification(description),
+                        )
+                    }
+                } else {
+                    notificationManager.cancel(attentionNotificationId(taskId))
+                }
             }
             ACTION_FINISH -> {
                 val successful = intent.getBooleanExtra(EXTRA_SUCCESSFUL, false)
                 val wasActive = activeTasks.remove(taskId) != null
+                notificationManager.cancel(attentionNotificationId(taskId))
                 if (!wasActive && activeTasks.isEmpty()) {
                     startForeground(RUNNING_NOTIFICATION_ID, runningNotification())
                 }
@@ -102,6 +114,7 @@ class AgentForegroundService : Service() {
             ACTION_EXIT -> {
                 persistBackgroundExecutionEnabled(this, false)
                 keepAliveEnabled = false
+                activeTasks.keys.forEach { notificationManager.cancel(attentionNotificationId(it)) }
                 activeTasks.clear()
                 stopServiceNow()
                 // The integrated editor owns its PTYs and ACP children. Ending
@@ -165,7 +178,9 @@ class AgentForegroundService : Service() {
     private fun runningNotification(): Notification {
         val description = when (activeTasks.size) {
             0 -> "No tasks running"
-            1 -> "1 task running: ${activeTasks.values.first()}"
+            1 -> activeTasks.values.first().let { task ->
+                if (isWaitingForUser(task)) task else "1 task running: $task"
+            }
             else -> "${activeTasks.size} tasks running"
         }
         return NotificationCompat.Builder(this, CHANNEL_RUNNING)
@@ -185,6 +200,24 @@ class AgentForegroundService : Service() {
             )
             .build()
     }
+
+    private fun attentionNotification(description: String): Notification {
+        return NotificationCompat.Builder(this, CHANNEL_ATTENTION)
+            .setSmallIcon(R.drawable.ic_launcher_foreground)
+            .setContentTitle("Agent needs your input")
+            .setContentText(description)
+            .setContentIntent(openAppIntent())
+            .setCategory(NotificationCompat.CATEGORY_REMINDER)
+            .setAutoCancel(true)
+            .setPriority(NotificationCompat.PRIORITY_HIGH)
+            .build()
+    }
+
+    private fun isWaitingForUser(description: String): Boolean =
+        description.contains("waiting", ignoreCase = true)
+
+    private fun attentionNotificationId(taskId: String): Int =
+        ATTENTION_NOTIFICATION_ID_BASE + (taskId.hashCode() and 0x0fff)
 
     private fun completionNotification(
         taskCount: Int,
@@ -249,8 +282,10 @@ class AgentForegroundService : Service() {
         private const val EXTRA_SUCCESSFUL = "successful"
         private const val CHANNEL_RUNNING = "zdroid_agent_running"
         private const val CHANNEL_COMPLETION = "zdroid_task_completion"
+        private const val CHANNEL_ATTENTION = "zdroid_agent_attention"
         private const val RUNNING_NOTIFICATION_ID = 1401
         private const val COMPLETION_NOTIFICATION_ID = 1402
+        private const val ATTENTION_NOTIFICATION_ID_BASE = 2000
         private const val PREFERENCES = "zdroid_background"
         private const val PREF_ENABLED = "enabled"
         private const val PREF_WAKE_LOCK = "wake_lock"
@@ -335,6 +370,16 @@ class AgentForegroundService : Service() {
                     NotificationManager.IMPORTANCE_DEFAULT,
                 ).apply {
                     description = "Notifies when every active Zdroid-B task has finished"
+                    setShowBadge(true)
+                },
+            )
+            manager.createNotificationChannel(
+                NotificationChannel(
+                    CHANNEL_ATTENTION,
+                    "Zdroid-B agent attention",
+                    NotificationManager.IMPORTANCE_HIGH,
+                ).apply {
+                    description = "Notifies when an Agent is waiting for your answer"
                     setShowBadge(true)
                 },
             )

@@ -20,6 +20,21 @@ use gpui::SharedString;
 use std::ffi::CString;
 use util::command::new_command;
 
+#[cfg(target_os = "android")]
+fn new_git_command() -> util::command::Command {
+    // Keep Git operations on the active runtime's PATH. Standard resolves to
+    // Bootstrap's $PREFIX/bin/git; Full Linux resolves through the zd-runtime
+    // symlink farm into Ubuntu's /usr/bin/git. Do not hardcode Bootstrap's
+    // absolute path here: in Full Linux it is translated into the guest as
+    // /root/../usr/bin/git, which does not exist.
+    new_command("git")
+}
+
+#[cfg(not(target_os = "android"))]
+fn new_git_command() -> util::command::Command {
+    new_command("git")
+}
+
 #[cfg(unix)]
 use std::os::fd::{AsFd, AsRawFd};
 #[cfg(unix)]
@@ -1219,7 +1234,7 @@ impl Fs for RealFs {
         abs_work_directory_path: &Path,
         fallback_branch_name: String,
     ) -> Result<()> {
-        let result = new_command("git")
+        let result = new_git_command()
             .current_dir(abs_work_directory_path)
             .args(&["config", "--global", "--get", "init.defaultBranch"])
             .output()
@@ -1233,7 +1248,7 @@ impl Fs for RealFs {
             _ => fallback_branch_name,
         };
 
-        new_command("git")
+        new_git_command()
             .current_dir(abs_work_directory_path)
             .args(&["init", "-b"])
             .arg(branch_name.trim())
@@ -1253,7 +1268,7 @@ impl Fs for RealFs {
 
         let _job_tracker = JobTracker::new(job_info, self.job_event_subscribers.clone());
 
-        let output = new_command("git")
+        let output = new_git_command()
             .current_dir(abs_work_directory)
             .args(&["clone", repo_url])
             .output()
@@ -1273,7 +1288,7 @@ impl Fs for RealFs {
     /// Will return `Ok` if the commands exit status is `0`, with the stdout
     /// contents. Otherwise returns `Err` with the stderr contents.
     async fn git_config(&self, abs_work_directory: &Path, args: Vec<String>) -> Result<String> {
-        let output = new_command("git")
+        let output = new_git_command()
             .current_dir(abs_work_directory)
             .args([String::from("config")].into_iter().chain(args))
             .output()
@@ -1375,7 +1390,6 @@ impl Fs for RealFs {
             .get(trash_id)
             .cloned()
             .ok_or(TrashRestoreError::AlreadyRestored)?;
-
 
         let restored_item_path = trashed_entry.original_parent.join(&trashed_entry.name);
 

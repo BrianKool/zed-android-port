@@ -1999,9 +1999,19 @@ impl ConversationView {
                 }
             }
             AcpThreadEvent::ElicitationRequested(_) => {
+                if !is_subagent {
+                    cx.start_background_task(
+                        &session_id.to_string(),
+                        "Agent is waiting for your answer",
+                    );
+                }
                 self.notify_with_sound("Waiting for input", IconName::Info, window, cx);
             }
-            AcpThreadEvent::ElicitationResponded(_) => {}
+            AcpThreadEvent::ElicitationResponded(_) => {
+                if !is_subagent {
+                    cx.start_background_task(&session_id.to_string(), "Agent is working");
+                }
+            }
             AcpThreadEvent::Retry(retry) => {
                 if let Some(active) = self.thread_view(&session_id) {
                     active.update(cx, |active, _cx| {

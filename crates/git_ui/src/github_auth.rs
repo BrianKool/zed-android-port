@@ -1,5 +1,4 @@
 use std::{
-    process::Command,
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -17,6 +16,7 @@ use ui::{
     Button, ButtonStyle, Color, Icon, IconName, IconSize, Label, LabelSize, Modal, ModalFooter,
     ModalHeader, Section, TintColor, prelude::*,
 };
+use util::command::new_std_command;
 use workspace::{ModalView, Workspace};
 
 actions!(github_auth, [OpenGithubAccounts]);
@@ -55,7 +55,7 @@ impl GithubUser {
 
 pub(crate) fn ensure_git_identity(user: &GithubUser) -> Result<()> {
     let global_config_value = |key: &str| -> Option<String> {
-        let output = Command::new("git")
+        let output = new_std_command("git")
             .args(["config", "--global", "--get", key])
             .output()
             .ok()?;
@@ -66,7 +66,7 @@ pub(crate) fn ensure_git_identity(user: &GithubUser) -> Result<()> {
             .filter(|value| !value.is_empty())
     };
     let set_global_config = |key: &str, value: &str| -> Result<()> {
-        let status = Command::new("git")
+        let status = new_std_command("git")
             .args(["config", "--global", key, value])
             .status()
             .with_context(|| format!("run git config --global {key}"))?;

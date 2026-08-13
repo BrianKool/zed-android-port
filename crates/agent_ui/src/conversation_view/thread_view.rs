@@ -601,6 +601,7 @@ pub struct ThreadView {
     pub plan_expanded: bool,
     pub queue_expanded: bool,
     pub editor_expanded: bool,
+    pub editor_collapsed: bool,
     pub should_be_following: bool,
     pub editing_message: Option<usize>,
     pub message_queue: MessageQueue,
@@ -1016,6 +1017,7 @@ impl ThreadView {
             plan_expanded: false,
             queue_expanded: true,
             editor_expanded: false,
+            editor_collapsed: false,
             should_be_following: false,
             editing_message: None,
             message_queue: MessageQueue::default(),
@@ -2389,13 +2391,28 @@ impl ThreadView {
         if self.list_state.item_count() == 0 {
             return;
         }
+        if self.editor_collapsed {
+            self.set_editor_is_collapsed(false, cx);
+            cx.stop_propagation();
+            return;
+        }
         self.set_editor_is_expanded(!self.editor_expanded, cx);
         cx.stop_propagation();
         cx.notify();
     }
 
     pub fn set_editor_is_expanded(&mut self, is_expanded: bool, cx: &mut Context<Self>) {
+        self.editor_collapsed = false;
         self.editor_expanded = is_expanded;
+        self.sync_editor_mode(cx);
+        cx.notify();
+    }
+
+    fn set_editor_is_collapsed(&mut self, is_collapsed: bool, cx: &mut Context<Self>) {
+        self.editor_collapsed = is_collapsed;
+        if is_collapsed {
+            self.editor_expanded = false;
+        }
         self.sync_editor_mode(cx);
         cx.notify();
     }
@@ -4348,6 +4365,7 @@ impl ThreadView {
         let focus_handle = self.message_editor.focus_handle(cx);
         let editor_bg_color = cx.theme().colors().editor_background;
 
+        let editor_collapsed = self.editor_collapsed;
         let editor_expanded = self.editor_expanded;
         let (expand_icon, expand_tooltip) = if editor_expanded {
             (IconName::Minimize, "Minimize Message Editor")
@@ -4358,6 +4376,42 @@ impl ThreadView {
         let max_content_width = AgentSettings::get_global(cx).max_content_width;
         let has_messages = self.list_state.item_count() > 0;
         let fills_container = !has_messages || editor_expanded;
+
+        if has_messages && editor_collapsed {
+            let is_generating = self.thread.read(cx).status() != ThreadStatus::Idle;
+            return h_flex()
+                .w_full()
+                .min_w_0()
+                .h_10()
+                .px_2()
+                .bg(editor_bg_color)
+                .border_t_1()
+                .border_color(cx.theme().colors().border)
+                .justify_between()
+                .child(
+                    Label::new("Message")
+                        .size(LabelSize::Small)
+                        .color(Color::Muted),
+                )
+                .when(is_generating, |this| {
+                    this.child(self.render_send_button(cx))
+                })
+                .child(
+                    div()
+                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                        .child(
+                            IconButton::new("restore-message-editor", IconName::ChevronUp)
+                                .icon_size(IconSize::Small)
+                                .icon_color(Color::Muted)
+                                .tooltip(Tooltip::text("Expand Message Editor"))
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.set_editor_is_collapsed(false, cx);
+                                    cx.stop_propagation();
+                                })),
+                        ),
+                )
+                .into_any();
+        }
 
         h_flex()
             .w_full()
@@ -4407,26 +4461,57 @@ impl ThreadView {
                                         .opacity(0.5)
                                         .hover(|s| s.opacity(1.0))
                                         .child(
-                                            IconButton::new("toggle-height", expand_icon)
-                                                .icon_size(IconSize::Small)
-                                                .icon_color(Color::Muted)
-                                                .tooltip({
-                                                    move |_window, cx| {
-                                                        Tooltip::for_action_in(
-                                                            expand_tooltip,
-                                                            &ExpandMessageEditor,
-                                                            &focus_handle,
-                                                            cx,
-                                                        )
-                                                    }
+                                            div()
+                                                .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                                                    cx.stop_propagation()
                                                 })
-                                                .on_click(cx.listener(|this, _, window, cx| {
-                                                    this.expand_message_editor(
-                                                        &ExpandMessageEditor,
-                                                        window,
-                                                        cx,
-                                                    );
-                                                })),
+                                                .child(
+                                                    IconButton::new(
+                                                        "collapse-message-editor",
+                                                        IconName::ChevronDown,
+                                                    )
+                                                    .icon_size(IconSize::Small)
+                                                    .icon_color(Color::Muted)
+                                                    .tooltip(Tooltip::text(
+                                                        "Collapse Message Editor",
+                                                    ))
+                                                    .on_click(cx.listener(|this, _, window, cx| {
+                                                        this.set_editor_is_collapsed(true, cx);
+                                                        this.focus_handle.focus(window, cx);
+                                                        cx.stop_propagation();
+                                                    })),
+                                                ),
+                                        )
+                                        .child(
+                                            div()
+                                                .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                                                    cx.stop_propagation()
+                                                })
+                                                .child(
+                                                    IconButton::new("toggle-height", expand_icon)
+                                                        .icon_size(IconSize::Small)
+                                                        .icon_color(Color::Muted)
+                                                        .tooltip({
+                                                            move |_window, cx| {
+                                                                Tooltip::for_action_in(
+                                                                    expand_tooltip,
+                                                                    &ExpandMessageEditor,
+                                                                    &focus_handle,
+                                                                    cx,
+                                                                )
+                                                            }
+                                                        })
+                                                        .on_click(cx.listener(
+                                                            |this, _, window, cx| {
+                                                                cx.stop_propagation();
+                                                                this.expand_message_editor(
+                                                                    &ExpandMessageEditor,
+                                                                    window,
+                                                                    cx,
+                                                                );
+                                                            },
+                                                        )),
+                                                ),
                                         ),
                                 )
                             }),
@@ -7394,6 +7479,7 @@ impl ThreadView {
 
         if !has_messages {
             self.editor_expanded = false;
+            self.editor_collapsed = false;
         }
 
         let mode = if self.editor_expanded {
