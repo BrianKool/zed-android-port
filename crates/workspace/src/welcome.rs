@@ -217,6 +217,7 @@ pub struct WelcomePage {
     recent_workspaces: Option<Vec<RecentWorkspace>>,
     agent_setup_info_open: bool,
     agent_setup_info_compact: bool,
+    terminal_tutorial_open: bool,
 }
 
 impl WelcomePage {
@@ -259,6 +260,7 @@ impl WelcomePage {
             recent_workspaces: None,
             agent_setup_info_open: false,
             agent_setup_info_compact: false,
+            terminal_tutorial_open: false,
         }
     }
 
@@ -372,6 +374,244 @@ impl WelcomePage {
                     .on_click(move |_, window, cx| {
                         focus.dispatch_action(&ToggleFocus, window, cx);
                     }),
+            )
+    }
+
+    fn open_android_runtime_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        match cx.build_action("zdroid_runtime::PickRuntime", None) {
+            Ok(action) => window.dispatch_action(action, cx),
+            Err(err) => log::warn!("welcome: zdroid_runtime::PickRuntime is not registered: {err}"),
+        }
+    }
+
+    fn render_terminal_tutorial_card(
+        &self,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let colors = cx.theme().colors();
+        let border_variant = colors.border_variant;
+        let panel_background = colors.panel_background;
+        let editor_background = colors.editor_background;
+        let show_button_label = window.viewport_size().width >= px(600.0);
+
+        v_flex()
+            .w_full()
+            .p_2()
+            .rounded_md()
+            .border_1()
+            .border_color(border_variant)
+            .bg(panel_background)
+            .child(
+                h_flex()
+                    .w_full()
+                    .justify_between()
+                    .gap_1p5()
+                    .child(
+                        h_flex()
+                            .gap_1p5()
+                            .child(
+                                Icon::new(IconName::Terminal)
+                                    .color(Color::Muted)
+                                    .size(IconSize::Small),
+                            )
+                            .child(Label::new("Zdroid Terminal Tutorial")),
+                    )
+                    .child(
+                        IconButton::new("terminal-tutorial-toggle", IconName::Info)
+                            .icon_size(IconSize::Small)
+                            .toggle_state(self.terminal_tutorial_open)
+                            .tooltip(Tooltip::text("Learn the Zdroid-B terminal runtime"))
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.terminal_tutorial_open = !this.terminal_tutorial_open;
+                                cx.notify();
+                            })),
+                    ),
+            )
+            .child(
+                Label::new(
+                    "Learn how the terminal, Ubuntu runtime, Python tools, GitHub credentials and AI CLIs fit together.",
+                )
+                .size(LabelSize::Small)
+                .color(Color::Muted)
+                .mb_2(),
+            )
+            .when(self.terminal_tutorial_open, |this| {
+                let max_height = (window.viewport_size().height - px(220.0))
+                    .max(px(220.0))
+                    .min(px(560.0));
+
+                this.child(
+                    v_flex()
+                        .id("terminal-tutorial-content")
+                        .w_full()
+                        .min_w_0()
+                        .max_h(max_height)
+                        .overflow_y_scroll()
+                        .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
+                        .gap_3()
+                        .p_3()
+                        .rounded_sm()
+                        .border_1()
+                        .border_color(border_variant)
+                        .bg(editor_background)
+                        .child(
+                            Label::new("Runtime map")
+                                .size(LabelSize::Small)
+                                .color(Color::Default),
+                        )
+                        .child(
+                            Label::new(
+                                "Zdroid-B uses one app sandbox with two cooperating runtimes. The Android Bootstrap keeps app-native tools, Node/npm and subscription agent launchers stable. The Ubuntu runtime is for normal development commands such as Python, pipx, apt packages and local servers.",
+                            )
+                            .size(LabelSize::Small)
+                            .color(Color::Muted),
+                        )
+                        .child(
+                            Label::new("Check where you are")
+                                .size(LabelSize::Small)
+                                .color(Color::Default),
+                        )
+                        .child(self.render_terminal_tutorial_command(
+                            "terminal-check-runtime",
+                            "echo $ZDROID_RUNTIME && which python3 && which pip && which codex && which claude && which gh",
+                            cx,
+                        ))
+                        .child(
+                            Label::new("Python and CLI apps")
+                                .size(LabelSize::Small)
+                                .color(Color::Default),
+                        )
+                        .child(
+                            Label::new(
+                                "Use pipx for global Python CLI tools and virtual environments for project dependencies. Ubuntu follows PEP 668, so bare system-wide pip install is intentionally blocked.",
+                            )
+                            .size(LabelSize::Small)
+                            .color(Color::Muted),
+                        )
+                        .child(self.render_terminal_tutorial_command(
+                            "terminal-python-pipx",
+                            "pipx install graphifyy",
+                            cx,
+                        ))
+                        .child(self.render_terminal_tutorial_command(
+                            "terminal-python-venv",
+                            "python3 -m venv .venv && source .venv/bin/activate && pip install -r requirements.txt",
+                            cx,
+                        ))
+                        .child(
+                            Label::new("Codex, Claude and GitHub")
+                                .size(LabelSize::Small)
+                                .color(Color::Default),
+                        )
+                        .child(
+                            Label::new(
+                                "Codex, Claude and gh are bridged so terminal sign-in and the Agent Panel can use the same device credentials. If an agent cannot start, run its install or login action from the Agent setup info.",
+                            )
+                            .size(LabelSize::Small)
+                            .color(Color::Muted),
+                        )
+                        .child(self.render_terminal_tutorial_command(
+                            "terminal-agent-login",
+                            "codex login\nclaude\ngh auth login",
+                            cx,
+                        ))
+                        .child(
+                            Label::new("Repair and runtime tools")
+                                .size(LabelSize::Small)
+                                .color(Color::Default),
+                        )
+                        .child(
+                            Label::new(
+                                "If Python, pipx, node, git, Codex or Claude reports missing files, open Android Runtime and use the repair cards. Python CLI Tools repairs pipx, venv and native build tools. Full Linux repairs the Ubuntu userland.",
+                            )
+                            .size(LabelSize::Small)
+                            .color(Color::Muted),
+                        )
+                        .child(
+                            h_flex()
+                                .w_full()
+                                .gap_2()
+                                .child(
+                                    Button::new("open-android-runtime", "Open Android Runtime")
+                                        .style(ButtonStyle::Outlined)
+                                        .on_click(cx.listener(|this, _, window, cx| {
+                                            this.open_android_runtime_picker(window, cx);
+                                        })),
+                                )
+                                .when(show_button_label, |this| {
+                                    this.child(
+                                        Label::new("Settings > Android Runtime > Repair")
+                                            .size(LabelSize::Small)
+                                            .color(Color::Muted),
+                                    )
+                                }),
+                        )
+                        .child(
+                            Label::new("Local servers")
+                                .size(LabelSize::Small)
+                                .color(Color::Default),
+                        )
+                        .child(
+                            Label::new(
+                                "For web apps, start the server in the terminal and open localhost in the phone browser. Long-running commands continue as Zdroid-B background tasks and report completion through notifications.",
+                            )
+                            .size(LabelSize::Small)
+                            .color(Color::Muted),
+                        )
+                        .child(self.render_terminal_tutorial_command(
+                            "terminal-local-server",
+                            "npm run dev -- --host 0.0.0.0",
+                            cx,
+                        ))
+                        .child(
+                            Label::new("Common fixes")
+                                .size(LabelSize::Small)
+                                .color(Color::Default),
+                        )
+                        .child(
+                            Label::new(
+                                "externally-managed-environment: use pipx or venv. python3.12 not found: repair Python CLI Tools. tree-sitter builds using android tags: open a new terminal after runtime setup and check ZDROID_RUNTIME. dubious ownership: press Trust Directory or set git safe.directory.",
+                            )
+                            .size(LabelSize::Small)
+                            .color(Color::Muted),
+                        ),
+                )
+            })
+    }
+
+    fn render_terminal_tutorial_command(
+        &self,
+        id: &'static str,
+        text: &'static str,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let colors = cx.theme().colors();
+
+        h_flex()
+            .id(id)
+            .w_full()
+            .min_w_0()
+            .items_start()
+            .justify_between()
+            .gap_2()
+            .p_2()
+            .rounded_sm()
+            .bg(colors.panel_background)
+            .border_1()
+            .border_color(colors.border_variant)
+            .child(
+                div().min_w_0().flex_1().child(
+                    Label::new(text)
+                        .buffer_font(cx)
+                        .size(LabelSize::XSmall)
+                        .color(Color::Default),
+                ),
+            )
+            .child(
+                CopyButton::new(format!("copy-{id}"), text)
+                    .icon_size(IconSize::Small)
+                    .tooltip_label("Copy command"),
             )
     }
 
@@ -725,6 +965,7 @@ impl Render for WelcomePage {
             "Welcome to Zdroid-B"
         };
         let compact = cfg!(target_os = "android") && window.viewport_size().width.as_f32() < 520.0;
+        let info_panel_open = self.agent_setup_info_open || self.terminal_tutorial_open;
 
         h_flex()
             .key_context("Welcome")
@@ -746,9 +987,9 @@ impl Render for WelcomePage {
                     .gap_6()
                     .when(compact, |this| this.gap_4())
                     .when(!compact, |this| this.justify_center())
-                    .when(!self.agent_setup_info_open, |this| this.overflow_y_scroll())
-                    .when(self.agent_setup_info_open, |this| this.overflow_y_hidden())
-                    .when(!self.agent_setup_info_open, |this| this.child(
+                    .when(!info_panel_open, |this| this.overflow_y_scroll())
+                    .when(info_panel_open, |this| this.overflow_y_hidden())
+                    .when(!info_panel_open, |this| this.child(
                         h_flex()
                             .w_full()
                             .justify_center()
@@ -776,17 +1017,18 @@ impl Render for WelcomePage {
                                 ),
                             ),
                     ))
-                    .when(!self.agent_setup_info_open, |this| {
+                    .when(!info_panel_open, |this| {
                         this.child(first_section.render(Default::default(), &self.focus_handle))
                     })
-                    .when(!self.agent_setup_info_open, |this| this.child(second_section))
+                    .when(!info_panel_open, |this| this.child(second_section))
+                    .child(self.render_terminal_tutorial_card(window, cx))
                     .when(ai_enabled && !showing_recent_projects, |this| {
                         let agent_tab_index = next_tab_index;
                         next_tab_index += 1;
                         this.child(self.render_agent_card(agent_tab_index, window, cx))
                     })
                     .when(
-                        !self.fallback_to_recent_projects && !self.agent_setup_info_open,
+                        !self.fallback_to_recent_projects && !info_panel_open,
                         |this| {
                             this.child(
                                 v_flex().gap_4().child(Divider::horizontal()).child(

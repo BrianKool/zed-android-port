@@ -171,13 +171,14 @@ fn open_runtime_picker(cx: &mut App) {
 enum EntryKind {
     Runtime(RuntimeId),
     MuslCompatibility,
+    PythonTools,
 }
 
 impl EntryKind {
     fn runtime_id(self) -> Option<RuntimeId> {
         match self {
             Self::Runtime(id) => Some(id),
-            Self::MuslCompatibility => None,
+            Self::MuslCompatibility | Self::PythonTools => None,
         }
     }
 }
@@ -229,7 +230,7 @@ impl RuntimePicker {
         };
         let current = detect_current();
         let first_setup = current.is_none();
-        Self {
+        let mut this = Self {
             title_bar,
             focus_handle: cx.focus_handle(),
             scroll_handle: ScrollHandle::new(),
@@ -241,7 +242,13 @@ impl RuntimePicker {
             install_error: None,
             restart_required: false,
             first_setup,
+        };
+
+        if first_setup {
+            this.install_runtime(EntryKind::Runtime(RuntimeId::ManagedLinux), cx);
         }
+
+        this
     }
 
     /// Install a runtime setup or optional compatibility component. Completed
@@ -490,6 +497,10 @@ fn install_runtime_components(
             adapters::managed_linux::ManagedLinuxAdapter::new(default_managed_linux_config())?
                 .install_musl(sink)
         }
+        EntryKind::PythonTools => {
+            adapters::managed_linux::ManagedLinuxAdapter::new(default_managed_linux_config())?
+                .repair_python_tools(sink)
+        }
         EntryKind::Runtime(id) => anyhow::bail!("{id:?} has no in-app installer"),
     }
 }
@@ -529,12 +540,12 @@ impl Render for RuntimePicker {
         let text = cx.theme().colors().text;
         let compact = cfg!(target_os = "android") && window.viewport_size().width.as_f32() < 520.0;
         let title = if self.first_setup {
-            "Choose your Zdroid setup"
+            "Setting up Zdroid-B"
         } else {
             "Android runtimes"
         };
         let description = if self.first_setup {
-            "Standard usually takes around 5 minutes. Full Linux usually takes around 20 minutes and can also be installed later from Settings."
+            "Installing Zdroid Bootstrap and Ubuntu Linux userland. This usually takes around 20 minutes and continues in the background."
         } else {
             "Manage where Zdroid runs tools and install optional Linux compatibility. Switch any time from Settings."
         };
@@ -682,6 +693,7 @@ fn render_card(
         kind,
         EntryKind::Runtime(RuntimeId::Bootstrap | RuntimeId::ManagedLinux)
             | EntryKind::MuslCompatibility
+            | EntryKind::PythonTools
     ) {
         install_error
             .filter(|(runtime, _)| *runtime == kind)
@@ -848,25 +860,19 @@ fn render_card(
                 kind,
                 EntryKind::Runtime(RuntimeId::Bootstrap | RuntimeId::ManagedLinux)
                     | EntryKind::MuslCompatibility
+                    | EntryKind::PythonTools
             ) && matches!(
                 entry.health,
                 HealthStatus::NotInstalled { .. } | HealthStatus::Misconfigured { .. }
             ) {
-                // Bootstrap adapter has its 240 MB userland in a separate
-                // GitHub repo (`<release_repo>`); Phase 6 of the Termux-
-                // divestment refactor stopped bundling it in the APK and
-                // moved download to `BootstrapAdapter::install`. Tap
-                // "Install" to kick off the async download + extract; the
-                // status is rendered in a wrapping block inside the card.
-                // After completion the card flips to
-                // Healthy â†’ normal Select.
                 if installing_runtime == Some(kind) {
                     Button::new(("installing", idx), "Installing...")
                         .when(compact, |this| this.full_width())
                         .disabled(true)
                         .into_any_element()
                 } else {
-                    let action_label = if matches!(entry.health, HealthStatus::Misconfigured { .. })
+                    let action_label = if kind == EntryKind::PythonTools
+                        || matches!(entry.health, HealthStatus::Misconfigured { .. })
                     {
                         "Repair"
                     } else {
@@ -887,6 +893,11 @@ fn render_card(
                     .into_any_element()
             } else if kind == EntryKind::MuslCompatibility {
                 Chip::new("Installed")
+                    .icon(IconName::Check)
+                    .label_color(Color::Success)
+                    .into_any_element()
+            } else if kind == EntryKind::PythonTools {
+                Chip::new("Ready")
                     .icon(IconName::Check)
                     .label_color(Color::Success)
                     .into_any_element()
@@ -918,6 +929,7 @@ fn runtime_install_label(target: EntryKind) -> &'static str {
         EntryKind::Runtime(RuntimeId::Bootstrap) => "Installing Zdroid Standard",
         EntryKind::Runtime(RuntimeId::ManagedLinux) => "Installing Zdroid Full Linux",
         EntryKind::MuslCompatibility => "Installing Alpine compatibility",
+        EntryKind::PythonTools => "Repairing Python CLI tools",
         EntryKind::Runtime(_) => "Installing Android runtime",
     }
 }
@@ -929,6 +941,7 @@ fn runtime_install_time_hint(target: EntryKind) -> Option<&'static str> {
             Some("Estimated setup time: around 20 minutes. You can install this later.")
         }
         EntryKind::MuslCompatibility => Some("Estimated setup time: around 10 minutes."),
+        EntryKind::PythonTools => Some("Repairs pipx, venv and Python native build tools."),
         EntryKind::Runtime(_) => None,
     }
 }
@@ -943,6 +956,9 @@ fn runtime_install_progress_hint(target: EntryKind) -> &'static str {
         }
         EntryKind::MuslCompatibility => {
             "Compatibility setup usually takes around 10 minutes and continues in the background."
+        }
+        EntryKind::PythonTools => {
+            "Python repair usually takes a few minutes and continues in the background."
         }
         EntryKind::Runtime(_) => "This task continues in the background.",
     }
@@ -989,22 +1005,20 @@ fn build_entries(first_setup: bool) -> Vec<AdapterEntry> {
             .unwrap_or_else(|err| HealthStatus::Failed {
                 error: err.to_string(),
             });
+    let python_tools_health =
+        adapters::managed_linux::ManagedLinuxAdapter::new(default_managed_linux_config())
+            .map(|adapter| adapter.python_tools_health_check())
+            .unwrap_or_else(|err| HealthStatus::Failed {
+                error: err.to_string(),
+            });
 
     if first_setup {
-        return vec![
-            AdapterEntry {
-                kind: EntryKind::Runtime(RuntimeId::Bootstrap),
-                name: "Zdroid Standard",
-                tagline: "Fast, self-contained Android-native development environment with terminal, Git and npm.",
-                health: bootstrap_health,
-            },
-            AdapterEntry {
-                kind: EntryKind::Runtime(RuntimeId::ManagedLinux),
-                name: "Zdroid Full Linux",
-                tagline: "Includes Zdroid Bootstrap, then adds an Ubuntu glibc environment with apt for ARM64 Linux software and local servers.",
-                health: combined_managed_health(&managed_linux_health),
-            },
-        ];
+        return vec![AdapterEntry {
+            kind: EntryKind::Runtime(RuntimeId::ManagedLinux),
+            name: "Zdroid-B Full Setup",
+            tagline: "Installs Zdroid Bootstrap first, then adds an Ubuntu glibc environment with apt for ARM64 Linux software and local servers.",
+            health: combined_managed_health(&managed_linux_health),
+        }];
     }
 
     vec![
@@ -1025,6 +1039,12 @@ fn build_entries(first_setup: bool) -> Vec<AdapterEntry> {
             name: "Managed Linux Compatibility",
             tagline: "Optional Ubuntu glibc compatibility layered on Zdroid Bootstrap, with apt and broader ARM64 Linux software support.",
             health: managed_linux_health,
+        },
+        AdapterEntry {
+            kind: EntryKind::PythonTools,
+            name: "Python CLI Tools",
+            tagline: "Repairs Ubuntu Python, pipx, venv and native build tools for CLI apps such as graphifyy, aider, ruff and poetry.",
+            health: python_tools_health,
         },
         AdapterEntry {
             kind: EntryKind::MuslCompatibility,

@@ -10,6 +10,7 @@ use std::ffi::OsString;
 use std::fs::File;
 use std::io::{self, BufRead, BufReader, Read};
 use std::os::fd::BorrowedFd;
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread;
@@ -25,6 +26,8 @@ use crate::port::{RuntimeProvider, SpawnHandle, SpawnRequest};
 const CONTAINER_NAME_MAX: usize = 80;
 const MIN_INSTALL_FREE_BYTES: u64 = 1536 * 1024 * 1024;
 const MAX_INSTALL_OUTPUT_BYTES: usize = 256 * 1024;
+const BRIDGE_MARKER: &str = "# ZDROID_BOOTSTRAP_COMMAND_BRIDGE_V1";
+const HOST_TO_GUEST_MARKER: &str = "# ZDROID_MANAGED_LINUX_COMMAND_BRIDGE_V1";
 
 fn stream_install_output(
     mut reader: impl Read + Send + 'static,
@@ -252,6 +255,267 @@ impl ManagedLinuxAdapter {
         unreachable!("package command retry loop always returns")
     }
 
+    pub fn install_bootstrap_command_bridges(&self) -> Result<()> {
+        for rootfs in self.installed_rootfs_paths() {
+            for (name, target) in [
+                ("codex", ".zed/bin/codex"),
+                ("claude", ".zed/bin/claude"),
+                ("gh", ".zed/bin/gh"),
+            ] {
+                self.install_guest_bridge_wrapper(&rootfs, name, target)?;
+            }
+        }
+        Ok(())
+    }
+
+    pub fn install_host_command_bridges(&self) -> Result<()> {
+        if self.rootfs_for(&self.config.container).is_none() {
+            return Ok(());
+        }
+
+        let data_path = self.environment_root();
+        let zd_exec = data_path.join("bin/zd-exec");
+        let bridge_dir = self.config.bootstrap_prefix.join(".zed/bin");
+        std::fs::create_dir_all(&bridge_dir).with_context(|| {
+            format!(
+                "create Managed Linux host bridge dir {}",
+                bridge_dir.display()
+            )
+        })?;
+
+        for (name, target) in [
+            ("python", "python3"),
+            ("python3", "python3"),
+            ("pip", "python3 -m pip"),
+            ("pip3", "python3 -m pip"),
+            ("uv", "uv"),
+            ("graphify", "graphify"),
+        ] {
+            self.install_host_bridge_wrapper(&bridge_dir, &zd_exec, name, target)?;
+        }
+        Ok(())
+    }
+
+    fn install_host_bridge_wrapper(
+        &self,
+        bridge_dir: &Path,
+        zd_exec: &Path,
+        name: &str,
+        target: &str,
+    ) -> Result<()> {
+        let path = bridge_dir.join(name);
+        if path.exists() {
+            let managed = std::fs::read_to_string(&path)
+                .map(|contents| contents.contains(HOST_TO_GUEST_MARKER))
+                .unwrap_or(false);
+            if !managed {
+                log::warn!(
+                    "Not replacing user-managed Bootstrap launcher at {}",
+                    path.display()
+                );
+                return Ok(());
+            }
+        }
+
+        let script = format!(
+            r#"#!/system/bin/sh
+{HOST_TO_GUEST_MARKER}
+
+zd_exec="{zd_exec}"
+if [ ! -x "$zd_exec" ]; then
+    printf '%s\n' "Zdroid-B: Managed Linux launcher is not installed yet." >&2
+    printf '%s\n' "Finish Zdroid-B setup, then retry {name}." >&2
+    exit 127
+fi
+
+exec "$zd_exec" {target} "$@"
+"#,
+            name = name,
+            target = target,
+            zd_exec = zd_exec.display()
+        );
+        let temporary = path.with_extension("zdroid-tmp");
+        std::fs::write(&temporary, script)
+            .with_context(|| format!("write Bootstrap host bridge {}", temporary.display()))?;
+        std::fs::set_permissions(&temporary, std::fs::Permissions::from_mode(0o755))
+            .with_context(|| format!("chmod Bootstrap host bridge {}", temporary.display()))?;
+        std::fs::rename(&temporary, &path)
+            .with_context(|| format!("publish Bootstrap host bridge {}", path.display()))?;
+        Ok(())
+    }
+
+    fn install_guest_development_packages(&self, progress: &mut dyn ProgressSink) -> Result<()> {
+        if self.rootfs_for(&self.config.container).is_none() {
+            return Ok(());
+        }
+
+        progress.step("Installing Ubuntu development packages");
+        progress.progress(0, 0);
+        self.run_ubuntu_shell(
+            "export DEBIAN_FRONTEND=noninteractive; apt-get update && apt-get install -y ca-certificates curl git python3-full python3-dev python3-pip python3-venv python3.12 python3.12-dev python3.12-venv pipx build-essential pkg-config",
+            "install Ubuntu development packages",
+        )?;
+        Ok(())
+    }
+
+    pub fn repair_python_tools(&self, progress: &mut dyn ProgressSink) -> Result<()> {
+        if self.rootfs_for(&self.config.container).is_none() {
+            bail!("Ubuntu is not installed; install Zdroid Full Linux first");
+        }
+
+        self.install_guest_development_packages(progress)?;
+        progress.step("Resetting broken pipx environments");
+        progress.progress(0, 0);
+        self.run_ubuntu_shell(
+            r#"set -eu
+mkdir -p "$HOME/.local/share/pipx/broken"
+stamp="$(date +%s)-$$"
+for path in "$HOME/.local/share/pipx/shared" "$HOME/.local/share/pipx/venvs/graphifyy" "$HOME/.local/share/pipx/trash"; do
+    if [ -e "$path" ]; then
+        base="$(basename "$path")"
+        mv "$path" "$HOME/.local/share/pipx/broken/${base}-${stamp}" 2>/dev/null || rm -rf "$path" || true
+    fi
+done
+rm -rf /tmp/zdroid-python-venv-test
+python3.12 -m venv /tmp/zdroid-python-venv-test
+/tmp/zdroid-python-venv-test/bin/python -m ensurepip --upgrade
+rm -rf /tmp/zdroid-python-venv-test
+pipx ensurepath || true
+"#,
+            "repair Ubuntu Python CLI tools",
+        )?;
+        self.install_host_command_bridges()?;
+        progress.progress(1, 1);
+        Ok(())
+    }
+
+    pub fn python_tools_health_check(&self) -> HealthStatus {
+        if self.rootfs_for(&self.config.container).is_none() {
+            return HealthStatus::NotInstalled {
+                hint: "Ubuntu is required before Python CLI tools can be repaired.".into(),
+            };
+        }
+        match self.run_ubuntu_shell(
+            "command -v python3.12 >/dev/null && command -v pipx >/dev/null && python3.12 -c 'import ensurepip, venv'",
+            "check Ubuntu Python CLI tools",
+        ) {
+            Ok(()) => HealthStatus::Healthy,
+            Err(error) => HealthStatus::Misconfigured {
+                reason: format!(
+                    "Python CLI tools need repair: {error:#}. This fixes pipx, venv and native build dependencies."
+                ),
+            },
+        }
+    }
+
+    fn run_ubuntu_shell(&self, script: &str, operation: &str) -> Result<()> {
+        let mut command = self.host_command(&self.proot_distro());
+        command.arg("login");
+        self.add_shared_home_option(&mut command);
+        self.add_bootstrap_bridge_bind_options(&mut command);
+        let output = command
+            .args([
+                self.config.container.as_str(),
+                "--",
+                "/bin/sh",
+                "-lc",
+                script,
+            ])
+            .output()
+            .with_context(|| operation.to_string())?;
+        if !output.status.success() {
+            bail!(
+                "{operation} failed: {}{}",
+                String::from_utf8_lossy(&output.stdout).trim(),
+                String::from_utf8_lossy(&output.stderr).trim()
+            );
+        }
+        Ok(())
+    }
+
+    fn installed_rootfs_paths(&self) -> Vec<PathBuf> {
+        let runtime = self.config.bootstrap_prefix.join("var/lib/proot-distro");
+        let mut rootfs_paths = Vec::new();
+        for root in [runtime.join("containers"), runtime.join("installed-rootfs")] {
+            let Ok(entries) = std::fs::read_dir(root) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                if !entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+                    continue;
+                }
+                let current = entry.path().join("rootfs");
+                if current.join("bin/sh").is_file() {
+                    rootfs_paths.push(current);
+                } else if entry.path().join("bin/sh").is_file() {
+                    rootfs_paths.push(entry.path());
+                }
+            }
+        }
+        rootfs_paths.sort();
+        rootfs_paths.dedup();
+        rootfs_paths
+    }
+
+    fn install_guest_bridge_wrapper(&self, rootfs: &Path, name: &str, target: &str) -> Result<()> {
+        let path = rootfs.join("usr/local/bin").join(name);
+        if path.exists() {
+            let managed = std::fs::read_to_string(&path)
+                .map(|contents| contents.contains(BRIDGE_MARKER))
+                .unwrap_or(false);
+            if !managed {
+                log::warn!(
+                    "Not replacing user-managed Managed Linux launcher at {}",
+                    path.display()
+                );
+                return Ok(());
+            }
+        }
+
+        let parent = path
+            .parent()
+            .context("Managed Linux bridge wrapper has no parent")?;
+        std::fs::create_dir_all(parent).with_context(|| {
+            format!("create Managed Linux bridge directory {}", parent.display())
+        })?;
+
+        let bootstrap_tool = self.config.bootstrap_prefix.join(target);
+        let script = format!(
+            r#"#!/bin/sh
+{BRIDGE_MARKER}
+
+tool="{tool}"
+if [ ! -x "$tool" ]; then
+    printf '%s\n' "Zdroid-B: Bootstrap {name} is not installed yet." >&2
+    printf '%s\n' "Open the Agent panel info actions or install/sign in from the Zdroid-B terminal first." >&2
+    exit 127
+fi
+
+exec /bin/sh "$tool" "$@"
+"#,
+            name = name,
+            tool = bootstrap_tool.display()
+        );
+        let temporary = path.with_extension("zdroid-tmp");
+        std::fs::write(&temporary, script).with_context(|| {
+            format!(
+                "write temporary Managed Linux bridge {}",
+                temporary.display()
+            )
+        })?;
+        std::fs::set_permissions(&temporary, std::fs::Permissions::from_mode(0o755)).with_context(
+            || {
+                format!(
+                    "chmod temporary Managed Linux bridge {}",
+                    temporary.display()
+                )
+            },
+        )?;
+        std::fs::rename(&temporary, &path)
+            .with_context(|| format!("publish Managed Linux bridge {}", path.display()))?;
+        Ok(())
+    }
+
     fn supports_oci_install(&self) -> bool {
         self.command_help(Some("install"))
             .is_some_and(|help| help.contains("--name") && help.contains("--architecture"))
@@ -273,6 +537,25 @@ impl ManagedLinuxAdapter {
         } else {
             // PRoot-Distro v4 calls the equivalent option --termux-home.
             command.arg("--termux-home");
+        }
+    }
+
+    fn supports_bind_mount(&self) -> bool {
+        self.command_help(Some("login"))
+            .is_some_and(|help| help.contains("--bind"))
+    }
+
+    fn add_bootstrap_bridge_bind_options(&self, command: &mut Command) {
+        if !self.supports_bind_mount() {
+            return;
+        }
+
+        for path in [self.config.bootstrap_prefix.clone(), self.host_home()] {
+            if path.exists() {
+                command
+                    .arg("--bind")
+                    .arg(format!("{}:{}", path.display(), path.display()));
+            }
         }
     }
 
@@ -548,6 +831,7 @@ impl ManagedLinuxAdapter {
         let mut command = self.host_command(&self.proot_distro());
         command.arg("login");
         self.add_shared_home_option(&mut command);
+        self.add_bootstrap_bridge_bind_options(&mut command);
         let status = command
             .args(["--detach", container, "--", program])
             .args(args)
@@ -641,9 +925,12 @@ impl ManagedLinuxAdapter {
             progress,
         )?;
         progress.step("Verifying Alpine musl compatibility");
+        self.install_bootstrap_command_bridges()?;
+        self.install_host_command_bridges()?;
         let mut command = self.host_command(&self.proot_distro());
         command.arg("login");
         self.add_shared_home_option(&mut command);
+        self.add_bootstrap_bridge_bind_options(&mut command);
         let output = command
             .args([
                 self.config.musl_container.as_str(),
@@ -709,10 +996,14 @@ impl RuntimeProvider for ManagedLinuxAdapter {
     fn install(&self, progress: &mut dyn ProgressSink) -> Result<()> {
         self.install_host_dependency(progress)?;
         self.install_container(&self.config.container, &self.config.image, progress)?;
+        self.install_guest_development_packages(progress)?;
         progress.step("Verifying Managed Linux runtime");
+        self.install_bootstrap_command_bridges()?;
+        self.install_host_command_bridges()?;
         let mut command = self.host_command(&self.proot_distro());
         command.arg("login");
         self.add_shared_home_option(&mut command);
+        self.add_bootstrap_bridge_bind_options(&mut command);
         let output = command
             .args([
                 self.config.container.as_str(),
@@ -766,6 +1057,7 @@ impl RuntimeProvider for ManagedLinuxAdapter {
         let mut command = self.host_command(&self.proot_distro());
         command.arg("login");
         self.add_shared_home_option(&mut command);
+        self.add_bootstrap_bridge_bind_options(&mut command);
         if let Some(cwd) = req.cwd.as_deref() {
             command.arg("--work-dir").arg(self.guest_path(cwd));
         }
@@ -843,6 +1135,10 @@ impl RuntimeProvider for ManagedLinuxAdapter {
             ),
             ("TERM".into(), EnvOp::Set(OsString::from("xterm-256color"))),
             ("COLORTERM".into(), EnvOp::Set(OsString::from("truecolor"))),
+            (
+                "ZDROID_RUNTIME".into(),
+                EnvOp::Set(OsString::from("Ubuntu 24.04 · glibc")),
+            ),
             ("LANG".into(), EnvOp::Set(OsString::from("en_US.UTF-8"))),
             ("LD_PRELOAD".into(), EnvOp::Remove),
             ("PATH".into(), EnvOp::Set(path)),
@@ -853,8 +1149,18 @@ impl RuntimeProvider for ManagedLinuxAdapter {
         ]
     }
 
-    fn env_for_terminal(&self, _data_path: &Path) -> Vec<(String, EnvOp)> {
-        Vec::new()
+    fn env_for_terminal(&self, data_path: &Path) -> Vec<(String, EnvOp)> {
+        vec![
+            (
+                "ZDROID_RUNTIME".into(),
+                EnvOp::Set(OsString::from("Ubuntu 24.04 · glibc")),
+            ),
+            (
+                "SHELL".into(),
+                EnvOp::Set(data_path.join("bin/zd-exec").into_os_string()),
+            ),
+            ("LD_PRELOAD".into(), EnvOp::Remove),
+        ]
     }
 
     fn terminal_shell(&self, data_path: &Path) -> Option<PathBuf> {

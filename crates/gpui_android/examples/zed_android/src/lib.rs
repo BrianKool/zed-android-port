@@ -37,8 +37,8 @@ use workspace::{
     workspace_windows_for_location,
 };
 use zdroid_runtime::{
-    RuntimeId, RuntimeProvider, adapters,
-    config::{ResolvedConfig, RuntimeFile},
+    HealthStatus, RuntimeId, RuntimeProvider, adapters,
+    config::{ManagedLinuxConfig, ResolvedConfig, RuntimeFile},
 };
 
 #[derive(Clone, Copy)]
@@ -166,6 +166,26 @@ fn build_active_provider(data_path: &std::path::Path) -> Option<Box<dyn RuntimeP
     let runtime_path = data_path.join("usr/etc/zd-runtime.toml");
     let file = RuntimeFile::load(&runtime_path).ok().flatten()?;
     let mut resolved = file.resolve().ok()?;
+    if matches!(&resolved, ResolvedConfig::Bootstrap(_)) {
+        let managed_file = RuntimeFile::with_defaults(RuntimeId::ManagedLinux);
+        if let Some(managed_config) = managed_file.managed_linux.clone()
+            && let Ok(adapter) = adapters::managed_linux::ManagedLinuxAdapter::new(managed_config)
+            && matches!(adapter.health_check(), HealthStatus::Healthy)
+        {
+            match managed_file.save(&runtime_path) {
+                Ok(()) => {
+                    log::info!(
+                        "zed_android: migrated active runtime from Bootstrap to Managed Linux"
+                    );
+                    resolved = managed_file.resolve().ok()?;
+                }
+                Err(err) => log::warn!(
+                    "zed_android: could not migrate active runtime to Managed Linux at {}: {err:#}",
+                    runtime_path.display()
+                ),
+            }
+        }
+    }
     if matches!(&resolved, ResolvedConfig::ExternalTermux(_)) {
         log::warn!(
             "zed_android: External Termux was selected, but its interactive stdio bridge is not implemented; using Bootstrap"
@@ -595,6 +615,18 @@ pub(crate) fn ensure_agent_cli_launchers() -> Result<()> {
     Ok(())
 }
 
+fn ensure_managed_linux_command_bridges(data_path: &Path) -> Result<()> {
+    let adapter = adapters::managed_linux::ManagedLinuxAdapter::new(ManagedLinuxConfig {
+        bootstrap_prefix: data_path.join("usr"),
+        container: "ubuntu".into(),
+        image: "ubuntu:24.04".into(),
+        musl_container: "alpine".into(),
+        musl_image: "alpine:3.21".into(),
+    })?;
+    adapter.install_bootstrap_command_bridges()?;
+    adapter.install_host_command_bridges()
+}
+
 const ZDROID_CLAUDE_MODELS: &[&str] = &[
     "claude-fable-5",
     "claude-opus-5",
@@ -785,6 +817,17 @@ fn ensure_cli_subscription_agents(fs: Arc<dyn Fs>, cx: &mut App) {
             None
         }
     };
+    if let Some(data_path) = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .and_then(|home| home.parent().map(Path::to_path_buf))
+    {
+        if let Err(err) = ensure_managed_linux_command_bridges(&data_path) {
+            log::warn!("zed_android: failed to repair Managed Linux command bridges: {err:#}");
+        }
+        if let Err(err) = gpui_android::github_credentials::ensure_gh_wrappers(&data_path) {
+            log::warn!("zed_android: failed to repair GitHub command bridge: {err:#}");
+        }
+    }
 
     // Apply the launch contract synchronously before any Project creates its
     // AgentServerStore. Persisting settings below is intentionally async, but

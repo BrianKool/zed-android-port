@@ -113,11 +113,22 @@ pub fn ensure_gh_wrappers(data_path: &Path) -> Result<()> {
     let prefix_wrapper = data_path.join("usr/.zed/bin/gh");
     install_gh_wrapper(&prefix_wrapper)?;
 
-    let rootfs_dir = data_path.join("usr/var/lib/proot-distro/installed-rootfs");
-    if let Ok(entries) = fs::read_dir(&rootfs_dir) {
-        for entry in entries.flatten() {
-            if entry.file_type().is_ok_and(|kind| kind.is_dir()) {
-                install_gh_wrapper(&entry.path().join("usr/local/bin/gh"))?;
+    let runtime_dir = data_path.join("usr/var/lib/proot-distro");
+    for root in [
+        runtime_dir.join("containers"),
+        runtime_dir.join("installed-rootfs"),
+    ] {
+        if let Ok(entries) = fs::read_dir(&root) {
+            for entry in entries.flatten() {
+                if !entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+                    continue;
+                }
+                let current_rootfs = entry.path().join("rootfs");
+                if current_rootfs.join("bin/sh").is_file() {
+                    install_gh_wrapper(&current_rootfs.join("usr/local/bin/gh"))?;
+                } else if entry.path().join("bin/sh").is_file() {
+                    install_gh_wrapper(&entry.path().join("usr/local/bin/gh"))?;
+                }
             }
         }
     }

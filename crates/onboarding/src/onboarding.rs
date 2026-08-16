@@ -5,8 +5,8 @@ use db::kvp::KeyValueStore;
 use fs::Fs;
 use gpui::{
     Action, AnyElement, App, AppContext, AsyncWindowContext, Context, DismissEvent, Entity,
-    EventEmitter, FocusHandle, Focusable, Global, IntoElement, KeyContext, Render, ScrollHandle,
-    SharedString, Subscription, Task, WeakEntity, Window, actions,
+    EventEmitter, FocusHandle, Focusable, FontWeight, Global, IntoElement, KeyContext, Render,
+    ScrollHandle, SharedString, Subscription, Task, WeakEntity, Window, actions,
 };
 use notifications::status_toast::StatusToast;
 use project::agent_server_store::AllAgentServersSettings;
@@ -613,6 +613,7 @@ impl Render for EssentialSetupModal {
                     .color(Color::Muted),
                 )
             })
+            .child(render_android_runtime_information())
             .when_some(self.state.error.clone(), |this, error| {
                 this.child(
                     v_flex()
@@ -636,6 +637,103 @@ impl Render for EssentialSetupModal {
                 )
             })
     }
+}
+
+#[cfg(target_os = "android")]
+fn render_android_runtime_information() -> impl IntoElement {
+    v_flex()
+        .id("zdroid-essential-setup-runtime-info")
+        .gap_3()
+        .p_3()
+        .border_1()
+        .border_color(gpui::transparent_black())
+        .rounded_md()
+        .bg(gpui::transparent_black())
+        .max_h(rems_from_px(260.0))
+        .overflow_y_scroll()
+        .child(
+            Label::new("While Zdroid-B is setting up")
+                .size(LabelSize::Small)
+                .weight(FontWeight::MEDIUM),
+        )
+        .child(
+            Label::new(
+                "You can leave the app open or in the background. The main notification keeps the setup alive and reports the current task.",
+            )
+            .size(LabelSize::XSmall)
+            .color(Color::Muted),
+        )
+        .child(render_android_runtime_info_group(
+            "Runtime model",
+            &[
+                "Zdroid-B installs the Android-native Bootstrap plus Ubuntu/glibc compatibility during first setup.",
+                "Bootstrap owns Android-native tools, Git credentials, Node.js, npm, Codex and Claude integrations.",
+                "Ubuntu is used for Linux ARM64 tools, Python packages, local servers and software that expects glibc.",
+                "Projects live under the shared Zdroid home, so both layers work on the same files.",
+            ],
+        ))
+        .child(render_android_runtime_info_group(
+            "Daily workflow",
+            &[
+                "Open or clone a project, then use the editor, Git panel and terminal together.",
+                "Use the terminal for project commands such as npm install, npm run dev, tests, git, gh and pip.",
+                "Use the Agent panel for Codex or Claude after installing and signing in to their CLI tools.",
+            ],
+        ))
+        .child(render_android_runtime_info_group(
+            "Useful commands",
+            &[
+                "pkg update",
+                "pkg upgrade",
+                "pkg install nodejs-lts git",
+                "npm install -g @openai/codex",
+                "npm install -g @anthropic-ai/claude-code",
+                "git config --global user.name \"Your Name\"",
+                "git config --global user.email \"you@example.com\"",
+            ],
+        ))
+        .child(render_android_runtime_info_group(
+            "App structure",
+            &[
+                "Top bar: app menus, current workspace and panel actions.",
+                "Editor: code files, tabs and mobile-friendly text controls.",
+                "Bottom bar: project tree, Git, search, diagnostics, terminal and Agent panel.",
+                "Runtime settings: switch or repair Standard / Full Linux later from Android Runtime settings.",
+            ],
+        ))
+        .child(render_android_runtime_info_group(
+            "Compatibility note",
+            &[
+                "Zdroid-B is not plain Ubuntu: Android/Bionic tools and Ubuntu/glibc tools share files but have different binary compatibility.",
+                "If a Linux binary fails, check whether it needs Android/Bionic, musl, glibc or Ubuntu before installing extra compatibility layers.",
+                "Python tools such as pip install graphifyy should run in Ubuntu; Codex and Claude commands use the Bootstrap agent bridge.",
+            ],
+        ))
+}
+
+#[cfg(target_os = "android")]
+fn render_android_runtime_info_group(
+    title: &'static str,
+    lines: &[&'static str],
+) -> impl IntoElement {
+    v_flex()
+        .gap_1()
+        .child(
+            Label::new(title)
+                .size(LabelSize::XSmall)
+                .weight(FontWeight::MEDIUM),
+        )
+        .children(lines.iter().map(|line| {
+            h_flex()
+                .items_start()
+                .gap_2()
+                .child(Label::new("-").size(LabelSize::XSmall).color(Color::Muted))
+                .child(
+                    Label::new(*line)
+                        .size(LabelSize::XSmall)
+                        .color(Color::Muted),
+                )
+        }))
 }
 
 #[cfg(target_os = "android")]
