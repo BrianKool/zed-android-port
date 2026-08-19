@@ -1,4 +1,5 @@
 pub mod active_file_name;
+mod background_operation;
 pub mod dock;
 pub mod history_manager;
 pub mod invalid_item_view;
@@ -44,6 +45,7 @@ pub use remote::{
 pub use toast_layer::{ToastAction, ToastLayer, ToastView};
 
 use anyhow::{Context as _, Result, anyhow};
+pub use background_operation::BackgroundOperationModal;
 use client::{
     ChannelId, Client, ErrorExt, ParticipantIndex, Status, TypedEnvelope, User, UserStore,
     proto::{self, ErrorCode, PanelId, PeerId},

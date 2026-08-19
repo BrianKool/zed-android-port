@@ -1031,6 +1031,7 @@ class MainActivity : GameActivity(), ImeHost {
                 setTextColor(0xFFE6E6E6.toInt())
                 textSize = 16f
                 gravity = android.view.Gravity.CENTER
+                maxLines = 4
             }
             panel.addView(
                 spinner,
@@ -1045,19 +1046,20 @@ class MainActivity : GameActivity(), ImeHost {
             panel.addView(
                 label,
                 LinearLayout.LayoutParams(
-                    LinearLayout.LayoutParams.WRAP_CONTENT,
+                    LinearLayout.LayoutParams.MATCH_PARENT,
                     LinearLayout.LayoutParams.WRAP_CONTENT,
                 ),
             )
             overlay.addView(
                 panel,
                 FrameLayout.LayoutParams(
-                    FrameLayout.LayoutParams.WRAP_CONTENT,
+                    FrameLayout.LayoutParams.MATCH_PARENT,
                     FrameLayout.LayoutParams.WRAP_CONTENT,
                 ).apply {
                     gravity = android.view.Gravity.CENTER
-                    leftMargin = (20 * density).toInt()
-                    rightMargin = (20 * density).toInt()
+                    val horizontalMargin = (resources.displayMetrics.widthPixels * 0.05f).toInt()
+                    leftMargin = horizontalMargin
+                    rightMargin = horizontalMargin
                 },
             )
             (window.decorView as? ViewGroup)?.addView(overlay)
@@ -1376,15 +1378,24 @@ class MainActivity : GameActivity(), ImeHost {
                         Intent.FLAG_GRANT_WRITE_URI_PERMISSION or
                         Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION
                 )
-                // Keep project import / clone destination selection inside
-                // Zdroid's own SAF root. Android DocumentsUI may still show
-                // other providers in its side rail, but this starts users in
-                // the only root that maps cleanly back to a POSIX path.
+                // Open Project and Import Folder start in shared storage so a
+                // Download/Documents folder can be used in place. Clone
+                // destination selection remains inside Zdroid's private root.
+                val initialAuthority = if (importForeignProviders || forceImport) {
+                    "com.android.externalstorage.documents"
+                } else {
+                    "com.zdroid.documents"
+                }
+                val initialRoot = if (importForeignProviders || forceImport) {
+                    "primary"
+                } else {
+                    File(filesDir, "home").absolutePath
+                }
                 putExtra(
                     DocumentsContract.EXTRA_INITIAL_URI,
                     DocumentsContract.buildRootUri(
-                        "com.zdroid.documents",
-                        File(filesDir, "home").absolutePath
+                        initialAuthority,
+                        initialRoot
                     )
                 )
             }
@@ -1709,7 +1720,11 @@ class MainActivity : GameActivity(), ImeHost {
 
     private fun importAndReturnDocument(documentUri: Uri) {
         showProjectImportOverlay("Importing file into Zdroid...")
+        val taskId = "saf-file-import-${System.nanoTime()}"
+        val taskDescription = "Importing external file"
+        AgentForegroundService.startTask(this, taskId, taskDescription)
         Thread({
+            var successful = false
             try {
                 val imported = importDocumentFile(documentUri)
                 val encodedPath = Uri.encode(imported.absolutePath)
@@ -1718,6 +1733,7 @@ class MainActivity : GameActivity(), ImeHost {
                     Toast.makeText(this, "File imported", Toast.LENGTH_SHORT).show()
                 }
                 onPickerResult("content://com.zdroid.documents/document/$encodedPath")
+                successful = true
             } catch (t: Throwable) {
                 Log.e(TAG, "Failed to import SAF document $documentUri", t)
                 runOnUiThread {
@@ -1730,6 +1746,7 @@ class MainActivity : GameActivity(), ImeHost {
                 onPickerResult("zdroid-error:${Uri.encode(t.message ?: t.javaClass.simpleName)}")
             } finally {
                 hideProjectImportOverlay()
+                AgentForegroundService.finishTask(this, taskId, taskDescription, successful)
             }
         }, "zdroid-saf-file-import").start()
     }
@@ -1738,7 +1755,11 @@ class MainActivity : GameActivity(), ImeHost {
      * through our own provider URI so the Rust side can open it normally. */
     private fun importAndReturnTree(treeUri: Uri) {
         showProjectImportOverlay("Importing folder into Zdroid...")
+        val taskId = "saf-folder-import-${System.nanoTime()}"
+        val taskDescription = "Importing external folder"
+        AgentForegroundService.startTask(this, taskId, taskDescription)
         Thread({
+            var successful = false
             try {
                 val imported = importDocumentTree(treeUri)
                 val encodedPath = Uri.encode(imported.absolutePath)
@@ -1747,6 +1768,7 @@ class MainActivity : GameActivity(), ImeHost {
                     Toast.makeText(this, "Project imported", Toast.LENGTH_SHORT).show()
                 }
                 onPickerResult("content://com.zdroid.documents/tree/$encodedPath")
+                successful = true
             } catch (t: Throwable) {
                 Log.e(TAG, "Failed to import SAF tree $treeUri", t)
                 runOnUiThread {
@@ -1759,6 +1781,7 @@ class MainActivity : GameActivity(), ImeHost {
                 onPickerResult("zdroid-error:${Uri.encode(t.message ?: t.javaClass.simpleName)}")
             } finally {
                 hideProjectImportOverlay()
+                AgentForegroundService.finishTask(this, taskId, taskDescription, successful)
             }
         }, "zdroid-saf-import").start()
     }

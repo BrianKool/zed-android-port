@@ -160,6 +160,7 @@ struct MasterProcess {
 impl MasterProcess {
     pub fn new(
         askpass_script_path: &std::ffi::OsStr,
+        askpass_socket_path: Option<&std::ffi::OsStr>,
         additional_args: Vec<String>,
         socket_path: &std::path::Path,
         destination: &str,
@@ -183,6 +184,10 @@ impl MasterProcess {
             .env("SSH_ASKPASS", askpass_script_path)
             .args(additional_args)
             .args(args);
+
+        if let Some(askpass_socket_path) = askpass_socket_path {
+            master_process.env("ZED_ASKPASS_SOCKET", askpass_socket_path);
+        }
 
         master_process.arg(format!("ControlPath={}", socket_path.display()));
 
@@ -680,8 +685,13 @@ impl SshRemoteConnection {
             // for establish the connection and keep it open, allowing other ssh
             // commands to reuse it via a control socket.
             let socket_path = temp_dir.path().join("ssh.sock");
+            #[cfg(target_os = "android")]
+            let askpass_socket_path = Some(askpass.socket_path().as_ref().to_owned());
+            #[cfg(not(target_os = "android"))]
+            let askpass_socket_path: Option<std::ffi::OsString> = None;
             let mut master_process = MasterProcess::new(
                 askpass.script_path().as_ref(),
+                askpass_socket_path.as_deref(),
                 connection_options.additional_args(),
                 &socket_path,
                 &destination,
@@ -1963,12 +1973,7 @@ fn build_command_posix(
         // forwarding so non-Android Zed clients aren't affected.
         let drop = matches!(
             k.as_str(),
-            "LD_PRELOAD"
-                | "PREFIX"
-                | "TMPDIR"
-                | "HOME"
-                | "SSL_CERT_FILE"
-                | "CURL_CA_BUNDLE"
+            "LD_PRELOAD" | "PREFIX" | "TMPDIR" | "HOME" | "SSL_CERT_FILE" | "CURL_CA_BUNDLE"
         ) || k.starts_with("TERMUX__")
             || k.starts_with("TERMUX_APP__");
         if drop {

@@ -25,8 +25,9 @@ const IO_TIMEOUT: Duration = Duration::from_secs(5);
 static SERVER_STARTED: OnceLock<()> = OnceLock::new();
 
 pub fn terminal_env(data_path: &Path) -> Vec<(String, util::env::EnvOp)> {
-    let helper = data_path.join(HELPER_NAME);
-    let socket = data_path.join(SOCKET_NAME);
+    let data_path = crate::askpass_install::runtime_shared_data_path(data_path);
+    let helper = data_path.join("usr/.zed/bin").join(HELPER_NAME);
+    let socket = data_path.join("usr/tmp").join(SOCKET_NAME);
     vec![
         ("GIT_CONFIG_COUNT".into(), util::env::EnvOp::Set("1".into())),
         (
@@ -52,7 +53,16 @@ pub fn start(android_app: &AndroidApp, data_path: &Path) -> Result<()> {
         return Ok(());
     }
 
-    let socket_path = data_path.join(SOCKET_NAME);
+    let shared_data_path = crate::askpass_install::runtime_shared_data_path(data_path);
+    let socket_path = shared_data_path.join("usr/tmp").join(SOCKET_NAME);
+    if let Some(parent) = socket_path.parent() {
+        fs::create_dir_all(parent).with_context(|| {
+            format!(
+                "create GitHub credential socket directory {}",
+                parent.display()
+            )
+        })?;
+    }
     if socket_path.exists() {
         fs::remove_file(&socket_path)
             .with_context(|| format!("remove stale credential socket {}", socket_path.display()))?;
@@ -338,6 +348,29 @@ fn is_github_https_request(request: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn terminal_git_credentials_use_runtime_shared_paths() {
+        let environment = terminal_env(Path::new("/data/user/0/com.zdroid/files"));
+        let value = environment
+            .iter()
+            .find(|(key, _)| key == "GIT_CONFIG_VALUE_0")
+            .map(|(_, value)| value)
+            .expect("credential helper environment");
+
+        match value {
+            util::env::EnvOp::Set(value) => {
+                let value = value.to_string_lossy();
+                assert!(
+                    value.contains("/data/data/com.zdroid/files/usr/.zed/bin/zed-askpass-helper")
+                );
+                assert!(
+                    value.contains("/data/data/com.zdroid/files/usr/tmp/github-credential.sock")
+                );
+            }
+            util::env::EnvOp::Remove => panic!("credential helper must be configured"),
+        }
+    }
 
     #[test]
     fn bootstrap_gh_wrapper_uses_android_shell_entrypoint() {

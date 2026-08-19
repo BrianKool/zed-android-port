@@ -3901,7 +3901,7 @@ async fn run_git_command(
                 .env("GIT_CONFIG_VALUE_0", gpg_wrapper);
         }
 
-        #[cfg(target_os = "windows")]
+        #[cfg(any(target_os = "windows", target_os = "android"))]
         command.env("ZED_ASKPASS_SOCKET", ask_pass.socket_path());
         let git_process = command.spawn()?;
 

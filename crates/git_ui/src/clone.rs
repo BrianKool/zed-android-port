@@ -1,13 +1,14 @@
 use askpass::{AskPassDelegate, AskPassSession};
-use gpui::{App, Context, DismissEvent, WeakEntity, Window};
+use futures::FutureExt;
+use gpui::{App, Context, WeakEntity, Window};
 use notifications::status_toast::StatusToast;
-use std::io::Read;
+use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use ui::{Color, Icon, IconName, IconSize, SharedString};
+use ui::{Color, Icon, IconName, SharedString};
 use util::ResultExt;
 use workspace::{self, Workspace};
 
@@ -16,6 +17,20 @@ enum CloneOutcome {
     Completed,
     Cancelled,
 }
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct GitCloneProgress {
+    message: String,
+    percent: Option<u8>,
+}
+
+#[derive(Default)]
+struct GitCloneOutput {
+    stderr: String,
+    progress: Option<GitCloneProgress>,
+}
+
+static NEXT_CLONE_TASK_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
 fn show_clone_error(workspace: &mut Workspace, message: String, cx: &mut Context<Workspace>) {
     let toast = StatusToast::new(format!("Git Clone failed: {message}"), cx, |this, _| {
@@ -40,8 +55,13 @@ fn redacted_repo_url(url: &str) -> String {
 }
 
 fn clone_error_tail(stderr: &str) -> String {
-    let trimmed = stderr.trim();
-    let lines = trimmed.lines().rev().take(6).collect::<Vec<_>>();
+    let lines = stderr
+        .split(['\r', '\n'])
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && parse_git_progress(line).is_none())
+        .rev()
+        .take(6)
+        .collect::<Vec<_>>();
     lines
         .into_iter()
         .rev()
@@ -49,6 +69,35 @@ fn clone_error_tail(stderr: &str) -> String {
         .join("\n")
         .trim()
         .to_owned()
+}
+
+fn parse_git_progress(line: &str) -> Option<GitCloneProgress> {
+    const PHASES: [&str; 5] = [
+        "Enumerating objects:",
+        "Counting objects:",
+        "Compressing objects:",
+        "Receiving objects:",
+        "Resolving deltas:",
+    ];
+    const CHECKOUT_PHASES: [&str; 2] = ["Updating files:", "Checking out files:"];
+
+    let line = line.trim();
+    let line = line.strip_prefix("remote: ").unwrap_or(line);
+    if !PHASES
+        .iter()
+        .chain(CHECKOUT_PHASES.iter())
+        .any(|phase| line.starts_with(phase))
+    {
+        return None;
+    }
+    let percent = line
+        .split_once('%')
+        .and_then(|(before, _)| before.split_whitespace().next_back())
+        .and_then(|value| value.parse::<u8>().ok());
+    Some(GitCloneProgress {
+        message: line.to_owned(),
+        percent,
+    })
 }
 
 /// Spawns `git clone --progress <url>` in `cwd`, polls for exit or
@@ -62,6 +111,8 @@ fn run_git_clone(
     cwd: &Path,
     cancel: &AtomicBool,
     askpass_script: &std::ffi::OsStr,
+    #[cfg(target_os = "android")] askpass_socket: &std::ffi::OsStr,
+    output: Arc<Mutex<GitCloneOutput>>,
 ) -> anyhow::Result<CloneOutcome> {
     let safe_url = redacted_repo_url(url);
     log::info!(
@@ -69,7 +120,10 @@ fn run_git_clone(
         cwd.display(),
         std::env::var("PATH").unwrap_or_default()
     );
-    let mut child = Command::new("git")
+    let mut command = Command::new("git");
+    #[cfg(target_os = "android")]
+    command.arg("-c").arg("core.symlinks=false");
+    let command = command
         .arg("clone")
         .arg("--progress")
         .arg(url)
@@ -78,23 +132,32 @@ fn run_git_clone(
         .env("SSH_ASKPASS", askpass_script)
         .env("SSH_ASKPASS_REQUIRE", "force")
         .env("GIT_TERMINAL_PROMPT", "0")
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|err| {
-            anyhow::anyhow!(
-                "spawn git clone for {safe_url} in {} failed: {err} (PATH={})",
-                cwd.display(),
-                std::env::var("PATH").unwrap_or_default()
-            )
-        })?;
-    let stderr_output = Arc::new(Mutex::new(String::new()));
+        .stderr(Stdio::piped());
+    #[cfg(target_os = "android")]
+    command.env("ZED_ASKPASS_SOCKET", askpass_socket);
+    let mut child = command.spawn().map_err(|err| {
+        anyhow::anyhow!(
+            "spawn git clone for {safe_url} in {} failed: {err} (PATH={})",
+            cwd.display(),
+            std::env::var("PATH").unwrap_or_default()
+        )
+    })?;
     let mut stderr_reader = if let Some(mut stderr) = child.stderr.take() {
-        let stderr_output = stderr_output.clone();
+        let output = output.clone();
         Some(std::thread::spawn(move || {
-            let mut output = String::new();
-            let _ = stderr.read_to_string(&mut output);
-            if let Ok(mut stderr_output) = stderr_output.lock() {
-                *stderr_output = output;
+            let mut reader = BufReader::new(&mut stderr);
+            let mut chunk = Vec::new();
+            while reader.read_until(b'\r', &mut chunk).unwrap_or(0) > 0 {
+                let text = String::from_utf8_lossy(&chunk);
+                if let Ok(mut output) = output.lock() {
+                    output.stderr.push_str(&text);
+                    for line in text.split(['\r', '\n']) {
+                        if let Some(progress) = parse_git_progress(line) {
+                            output.progress = Some(progress);
+                        }
+                    }
+                }
+                chunk.clear();
             }
         }))
     } else {
@@ -104,11 +167,17 @@ fn run_git_clone(
         if cancel.load(Ordering::Relaxed) {
             let _ = child.kill();
             let _ = child.wait();
+            if let Some(stderr_reader) = stderr_reader.take() {
+                let _ = stderr_reader.join();
+            }
             log::info!("git clone: cancelled url={safe_url} cwd={}", cwd.display());
             return Ok(CloneOutcome::Cancelled);
         }
         match child.try_wait()? {
             Some(status) if status.success() => {
+                if let Some(stderr_reader) = stderr_reader.take() {
+                    let _ = stderr_reader.join();
+                }
                 log::info!("git clone: completed url={safe_url} cwd={}", cwd.display());
                 return Ok(CloneOutcome::Completed);
             }
@@ -116,10 +185,10 @@ fn run_git_clone(
                 if let Some(stderr_reader) = stderr_reader.take() {
                     let _ = stderr_reader.join();
                 }
-                let stderr_tail = stderr_output
+                let stderr_tail = output
                     .lock()
                     .ok()
-                    .map(|output| clone_error_tail(&output))
+                    .map(|output| clone_error_tail(&output.stderr))
                     .unwrap_or_default();
                 log::error!(
                     "git clone: failed url={safe_url} cwd={} status={status} stderr={stderr_tail}",
@@ -228,6 +297,8 @@ fn clone_and_open_with_destination(
                     }
                 };
             let askpass_script = askpass_session.script_path().as_ref().to_owned();
+            #[cfg(target_os = "android")]
+            let askpass_socket = askpass_session.socket_path().as_ref().to_owned();
 
             let repo_name = repo_url
                 .split('/')
@@ -235,63 +306,99 @@ fn clone_and_open_with_destination(
                 .map(|name| name.strip_suffix(".git").unwrap_or(name))
                 .unwrap_or("repository")
                 .to_owned();
-
-            // Cancel flag wired from the progress toast's Cancel action
-            // through to `run_git_clone`'s per-poll check. Replaces the
-            // previous silent `fs.git_clone(...).await` so the user gets
-            // visual feedback during long clones and can actually abort
-            // (vs. clicking the welcome button repeatedly thinking it
-            // didn't fire). On cancel we `child.kill()` + remove the
-            // partially-cloned destination — `<destination_dir>/<repo_name>`
-            // is freshly created by git itself during this call, so
-            // `remove_dir_all` only ever touches files we just produced.
-            let cancel = Arc::new(AtomicBool::new(false));
-            let cancel_for_button = cancel.clone();
-
-            let progress_toast = workspace
-                .update(cx, |workspace, cx| {
-                    let toast = StatusToast::new(
-                        format!("Cloning {repo_name}…"),
-                        cx,
-                        move |this, _cx| {
-                            let cancel_clone = cancel_for_button.clone();
-                            this.icon(
-                                Icon::new(IconName::CloudDownload)
-                                    .size(IconSize::Small)
-                                    .color(Color::Info),
-                            )
-                            .auto_dismiss(false)
-                            .action("Cancel", move |_, _| {
-                                cancel_clone.store(true, Ordering::Relaxed);
-                            })
-                        },
-                    );
-                    workspace.toggle_status_toast(toast.clone(), cx);
-                    toast
-                })
+            let task_id = format!(
+                "git-clone-{}",
+                NEXT_CLONE_TASK_ID.fetch_add(1, Ordering::Relaxed)
+            );
+            let task_description = format!("Cloning {repo_name}");
+            cx.update(|_, cx| cx.start_background_task(&task_id, &task_description))
                 .ok()?;
+            let loading_modal = workspace
+                .update_in(cx, |workspace, window, cx| {
+                    workspace::BackgroundOperationModal::show(
+                        workspace,
+                        "Cloning repository",
+                        format!(
+                            "Downloading {repo_name}. You can leave Zdroid-B and return later."
+                        ),
+                        window,
+                        cx,
+                    )
+                })
+                .ok()
+                .flatten();
+
+            // The blocking dialog is the single source of clone progress and
+            // cancellation. Git writes progress to stderr using carriage
+            // returns, so the worker records the latest phase for the UI loop.
+            let cancel = Arc::new(AtomicBool::new(false));
+            if let Some(modal) = &loading_modal {
+                modal.update(cx, |modal, cx| modal.set_cancel_flag(cancel.clone(), cx));
+            }
 
             let clone_outcome = {
                 let url_for_worker = repo_url.to_string();
                 let cwd_for_worker = destination_dir.clone();
                 let cancel_for_worker = cancel.clone();
-                cx.background_executor()
+                let output = Arc::new(Mutex::new(GitCloneOutput::default()));
+                let output_for_worker = output.clone();
+                let clone_task = cx
+                    .background_executor()
                     .spawn(async move {
                         run_git_clone(
                             &url_for_worker,
                             &cwd_for_worker,
                             &cancel_for_worker,
                             &askpass_script,
+                            #[cfg(target_os = "android")]
+                            &askpass_socket,
+                            output_for_worker,
                         )
                     })
-                    .await
+                    .fuse();
+                futures::pin_mut!(clone_task);
+                let mut last_progress = None;
+                loop {
+                    let timer = cx
+                        .background_executor()
+                        .timer(Duration::from_millis(200))
+                        .fuse();
+                    futures::pin_mut!(timer);
+                    futures::select_biased! {
+                        outcome = clone_task => break outcome,
+                        _ = timer => {
+                            let progress = output
+                                .lock()
+                                .ok()
+                                .and_then(|output| output.progress.clone());
+                            if progress != last_progress {
+                                if let Some(progress) = &progress {
+                                    if let Some(modal) = &loading_modal {
+                                        modal.update(cx, |modal, cx| {
+                                            modal.set_progress(
+                                                progress.message.clone(),
+                                                progress.percent,
+                                                cx,
+                                            );
+                                        });
+                                    }
+                                    cx.update(|_, cx| {
+                                        cx.start_background_task(
+                                            &task_id,
+                                            &format!("{task_description}: {}", progress.message),
+                                        );
+                                    })
+                                    .ok();
+                                }
+                                last_progress = progress;
+                            }
+                        }
+                    }
+                }
             };
 
             // Keep the socket-backed AskPass proxy alive until git exits.
             drop(askpass_session);
-
-            // Always dismiss the progress toast — completion, cancel, or error.
-            let _ = progress_toast.update(cx, |_, cx| cx.emit(DismissEvent));
 
             match clone_outcome {
                 Ok(CloneOutcome::Completed) => {
@@ -305,6 +412,13 @@ fn clone_and_open_with_destination(
                             cloned_dir.display()
                         );
                     }
+                    if let Some(modal) = &loading_modal {
+                        modal.update(cx, |modal, cx| modal.complete(cx));
+                    }
+                    cx.update(|_, cx| {
+                        cx.finish_background_task(&task_id, &task_description, false)
+                    })
+                    .ok();
                     return None;
                 }
                 Err(error) => {
@@ -325,6 +439,13 @@ fn clone_and_open_with_destination(
                             show_clone_error(workspace, error.to_string(), cx);
                         })
                         .log_err();
+                    if let Some(modal) = &loading_modal {
+                        modal.update(cx, |modal, cx| modal.complete(cx));
+                    }
+                    cx.update(|_, cx| {
+                        cx.finish_background_task(&task_id, &task_description, false)
+                    })
+                    .ok();
                     return None;
                 }
             }
@@ -334,6 +455,21 @@ fn clone_and_open_with_destination(
                     workspace.project().read(cx).worktrees(cx).next().is_some()
                 })
                 .ok()?;
+
+            if has_worktrees {
+                if let Some(modal) = &loading_modal {
+                    modal.update(cx, |modal, cx| modal.complete(cx));
+                }
+                cx.update(|_, cx| cx.finish_background_task(&task_id, &task_description, true))
+                    .ok();
+            } else if let Some(modal) = &loading_modal {
+                modal.update(cx, |modal, cx| {
+                    modal.set_message(
+                        "Updating project files. Large repositories may take a moment.",
+                        cx,
+                    )
+                });
+            }
 
             let prompt_answer = if has_worktrees {
                 cx.update(|window, cx| {
@@ -357,26 +493,30 @@ fn clone_and_open_with_destination(
 
             match prompt_answer {
                 0 => {
-                    workspace
-                        .update_in(cx, |workspace, window, cx| {
-                            let create_task = workspace.project().update(cx, |project, cx| {
+                    let create_task = workspace
+                        .update_in(cx, |workspace, _window, cx| {
+                            workspace.project().update(cx, |project, cx| {
                                 project.create_worktree(destination_dir.as_path(), true, cx)
-                            });
-
-                            let workspace_weak = cx.weak_entity();
-                            let on_success = on_success.clone();
-                            cx.spawn_in(window, async move |_window, cx| {
-                                if create_task.await.log_err().is_some() {
-                                    workspace_weak
-                                        .update_in(cx, |workspace, window, cx| {
-                                            (on_success)(workspace, window, cx);
-                                        })
-                                        .ok();
-                                }
                             })
-                            .detach();
                         })
                         .ok()?;
+                    let created = create_task.await.log_err().is_some();
+                    if created {
+                        workspace
+                            .update_in(cx, |workspace, window, cx| {
+                                (on_success)(workspace, window, cx);
+                            })
+                            .ok();
+                    }
+                    if !has_worktrees {
+                        if let Some(modal) = &loading_modal {
+                            modal.update(cx, |modal, cx| modal.complete(cx));
+                        }
+                        cx.update(|_, cx| {
+                            cx.finish_background_task(&task_id, &task_description, created)
+                        })
+                        .ok();
+                    }
                 }
                 1 => {
                     workspace
@@ -428,7 +568,7 @@ fn clone_and_open_with_destination(
 
 #[cfg(test)]
 mod tests {
-    use super::redacted_repo_url;
+    use super::{clone_error_tail, parse_git_progress, redacted_repo_url};
 
     #[test]
     fn redacts_credentials_and_url_suffixes_from_clone_logs() {
@@ -439,6 +579,26 @@ mod tests {
         assert_eq!(
             redacted_repo_url("git@github.com:acme/repo.git"),
             "git@github.com:acme/repo.git"
+        );
+    }
+
+    #[test]
+    fn parses_checkout_progress() {
+        let progress = parse_git_progress("Updating files:  61% (2650/4344)").unwrap();
+        assert_eq!(progress.percent, Some(61));
+        assert_eq!(progress.message, "Updating files:  61% (2650/4344)");
+    }
+
+    #[test]
+    fn clone_error_omits_progress_lines() {
+        let stderr = concat!(
+            "Receiving objects: 50% (5/10)\r",
+            "Updating files: 100% (10/10), done.\n",
+            "error: unable to create symlink AGENTS.md: File name too long\n",
+        );
+        assert_eq!(
+            clone_error_tail(stderr),
+            "error: unable to create symlink AGENTS.md: File name too long"
         );
     }
 }

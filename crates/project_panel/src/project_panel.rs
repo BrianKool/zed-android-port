@@ -55,7 +55,10 @@ use std::{
     ops::Neg,
     ops::Range,
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
     time::{Duration, Instant},
 };
 use theme_settings::ThemeSettings;
@@ -65,7 +68,7 @@ use ui::{
     ScrollAxes, ScrollableHandle, Scrollbars, StickyCandidate, Tooltip, WithScrollbar, prelude::*,
 };
 use util::{
-    ResultExt, TakeUntilExt, TryFutureExt,
+    ResultExt, TakeUntilExt,
     markdown::MarkdownInlineCode,
     maybe,
     paths::{PathStyle, compare_paths},
@@ -91,6 +94,7 @@ use crate::{
 
 const PROJECT_PANEL_KEY: &str = "ProjectPanel";
 const NEW_ENTRY_ID: ProjectEntryId = ProjectEntryId::MAX;
+static NEXT_IMPORT_TASK_ID: AtomicU64 = AtomicU64::new(1);
 
 struct VisibleEntriesForWorktree {
     worktree_id: WorktreeId,
@@ -4707,7 +4711,36 @@ impl ProjectPanel {
         }
 
         cx.spawn_in(window, async move |this, cx| {
-            async move {
+            let task_id = format!(
+                "project-import-{}",
+                NEXT_IMPORT_TASK_ID.fetch_add(1, Ordering::Relaxed)
+            );
+            let task_description = if open_file_after_drop {
+                "Importing file into project"
+            } else {
+                "Importing folder into project"
+            };
+            cx.update(|_, cx| cx.start_background_task(&task_id, task_description))
+                .ok();
+            let loading_modal = this
+                .update_in(cx, |this, window, cx| {
+                    this.workspace
+                        .update(cx, |workspace, cx| {
+                            workspace::BackgroundOperationModal::show(
+                                workspace,
+                                task_description,
+                                "Copying selected content. You can leave Zdroid-B and return later.",
+                                window,
+                                cx,
+                            )
+                        })
+                        .ok()
+                        .flatten()
+                })
+                .ok()
+                .flatten();
+
+            let result: anyhow::Result<bool> = async {
                 let notification_id =
                     workspace::notifications::NotificationId::Named("project-panel-import".into());
                 this.update(cx, |this, cx| {
@@ -4766,7 +4799,7 @@ impl ProjectPanel {
                             })
                             .ok();
                     })?;
-                    return Ok(());
+                    return Ok(false);
                 }
 
                 let (worktree_id, task) = worktree.update(cx, |worktree, cx| {
@@ -4799,7 +4832,7 @@ impl ProjectPanel {
                                 .ok();
                         })
                         .ok();
-                        return Ok(());
+                        return Ok(false);
                     }
                 };
                 let imported_count = opened_entries.len();
@@ -4848,10 +4881,20 @@ impl ProjectPanel {
                             );
                         })
                         .ok();
-                })
+                })?;
+                Ok(true)
             }
-            .log_err()
-            .await
+            .await;
+
+            let successful = matches!(result, Ok(true));
+            if let Some(modal) = loading_modal {
+                modal.update(cx, |modal, cx| modal.complete(cx));
+            }
+            cx.update(|_, cx| {
+                cx.finish_background_task(&task_id, task_description, successful)
+            })
+            .ok();
+            result.log_err();
         })
         .detach();
     }

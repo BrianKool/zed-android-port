@@ -14,7 +14,10 @@ use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{
+    Arc,
+    atomic::{AtomicU64, Ordering},
+};
 
 use android_activity::AndroidApp;
 use anyhow::{Context as _, Result};
@@ -40,6 +43,8 @@ use zdroid_runtime::{
     HealthStatus, RuntimeId, RuntimeProvider, adapters,
     config::{ManagedLinuxConfig, ResolvedConfig, RuntimeFile},
 };
+
+static NEXT_OPEN_PROJECT_TASK_ID: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Clone, Copy)]
 struct AndroidDnsResolver {
@@ -420,7 +425,10 @@ exit 127
     std::fs::set_permissions(&terminal_launcher, permissions)
         .context("chmod Codex terminal launcher")?;
 
-    Ok(terminal_launcher)
+    // Agent Panel must launch the canonical Bootstrap-host wrapper. The
+    // terminal alias above exists only for PATH compatibility; returning it
+    // here lets Managed Linux translate `$PREFIX/bin/codex` into a guest path.
+    Ok(launcher)
 }
 
 fn ensure_claude_acp_launcher() -> Result<PathBuf> {
@@ -573,8 +581,7 @@ if [ -f "$managed_cli" ]; then
 elif [ -f "$global_cli" ]; then
     resolved_cli="$global_cli"
 else
-    real_cli="$PREFIX/bin/claude"
-    resolved_cli="$(readlink -f "$real_cli" 2>/dev/null || true)"
+    resolved_cli=""
 fi
 if [ -z "${resolved_cli:-}" ] || [ ! -f "$resolved_cli" ]; then
     echo 'Zdroid-B: A compatible Claude CLI is not installed. Use Install Claude in Agent Info; unversioned npm releases from 2.1.113 onward are native binaries that cannot run in Android/Bionic.' >&2
@@ -634,7 +641,11 @@ exit 127
         "zed_android: Claude ACP compatibility launcher = {}",
         compatibility_launcher.display()
     );
-    Ok(compatibility_launcher)
+    // Agent Panel must launch the canonical Bootstrap-host wrapper. Keep the
+    // compatibility alias for registry/terminal lookups, but never persist it
+    // as the custom ACP command because Managed Linux may translate it into a
+    // nonexistent guest `/usr/bin` path.
+    Ok(launcher)
 }
 
 /// Recreate launchers that live inside `$PREFIX` after Bootstrap atomically
@@ -1223,7 +1234,8 @@ fn android_main(app: AndroidApp) {
             // Construct the expected path anyway so set_askpass_program isn't
             // skipped — if the binary materializes later (next boot
             // after the install issue is resolved) it'll be picked up.
-            data_path.join("zed-askpass-helper")
+            gpui_android::askpass_install::runtime_shared_data_path(&data_path)
+                .join("usr/.zed/bin/zed-askpass-helper")
         }
     };
     if askpass_path.is_file() {
@@ -2548,6 +2560,43 @@ fn boot(cx: &mut App, data_path: &std::path::Path, dns_resolver: AndroidDnsResol
             };
             info!("zed_android: Open picker selected paths={picked:?}");
 
+            let task_id = format!(
+                "open-project-{}",
+                NEXT_OPEN_PROJECT_TASK_ID.fetch_add(1, Ordering::Relaxed)
+            );
+            let task_description = "Opening project";
+            cx.update(|cx| cx.start_background_task(&task_id, task_description));
+            let loading_modal = if let Some(mw) = target_multi_workspace.as_ref() {
+                mw.update(cx, |mw, window, cx| {
+                    let workspace = mw.workspace().clone();
+                    workspace.update(cx, |workspace, cx| {
+                        workspace::BackgroundOperationModal::show(
+                            workspace,
+                            "Opening project",
+                            "Updating project files. Large folders may take a moment; you can leave Zdroid-B and return later.",
+                            window,
+                            cx,
+                        )
+                    })
+                })
+                .ok()
+                .flatten()
+            } else if let Some(ws) = target_workspace.as_ref() {
+                ws.update(cx, |workspace, window, cx| {
+                    workspace::BackgroundOperationModal::show(
+                        workspace,
+                        "Opening project",
+                        "Updating project files. Large folders may take a moment; you can leave Zdroid-B and return later.",
+                        window,
+                        cx,
+                    )
+                })
+                .ok()
+                .flatten()
+            } else {
+                None
+            };
+
             // The first-launch onboarding path (show_onboarding_view →
             // workspace::open_new) opens a plain `Workspace` window, not
             // a `MultiWorkspace`. Returning-launch path is also `Workspace`
@@ -2556,7 +2605,7 @@ fn boot(cx: &mut App, data_path: &std::path::Path, dns_resolver: AndroidDnsResol
             // fall through to plain Workspace; the previous code silently
             // no-op'd ("no active MultiWorkspace for Open" log + return)
             // when invoked on the welcome screen of a fresh install.
-            if let Some(mw) = target_multi_workspace {
+            let successful = if let Some(mw) = target_multi_workspace {
                 let task = mw.update(cx, |mw, window, cx| {
                     mw.open_project(picked, workspace::OpenMode::Activate, window, cx)
                 });
@@ -2566,14 +2615,17 @@ fn boot(cx: &mut App, data_path: &std::path::Path, dns_resolver: AndroidDnsResol
                             error!("zed_android: open_project failed: {err:#}");
                             let message = format!("{err:#}");
                             show_open_project_error(Some(&mw), None, &message, cx);
+                            false
                         } else {
                             info!("zed_android: open_project completed");
+                            true
                         }
                     }
                     Err(err) => {
                         error!("zed_android: open_project update failed: {err:#}");
                         let message = format!("{err:#}");
                         show_open_project_error(Some(&mw), None, &message, cx);
+                        false
                     }
                 }
             } else if let Some(ws) = target_workspace {
@@ -2593,11 +2645,13 @@ fn boot(cx: &mut App, data_path: &std::path::Path, dns_resolver: AndroidDnsResol
                             "zed_android: workspace open_paths completed items={}",
                             opened_items.len()
                         );
+                        true
                     }
                     Err(err) => {
                         error!("zed_android: workspace open_paths update failed: {err:#}");
                         let message = format!("{err:#}");
                         show_open_project_error(None, Some(&ws), &message, cx);
+                        false
                     }
                 }
             } else {
@@ -2613,7 +2667,15 @@ fn boot(cx: &mut App, data_path: &std::path::Path, dns_resolver: AndroidDnsResol
                 let message = "No active Zdroid workspace is available for the selected project.";
                 error!("zed_android: {message}");
                 show_open_project_error(None, None, message, cx);
+                false
+            };
+
+            if let Some(modal) = loading_modal {
+                modal.update(cx, |modal, cx| modal.complete(cx));
             }
+            cx.update(|cx| {
+                cx.finish_background_task(&task_id, task_description, successful)
+            });
         })
         .detach();
     });

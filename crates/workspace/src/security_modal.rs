@@ -91,6 +91,7 @@ impl Render for SecurityModal {
         };
 
         let trust_label = self.build_trust_label();
+        let compact = cfg!(target_os = "android") && window.viewport_size().width < px(520.0);
 
         // The editable trust-scope field is shown only when a single project is
         // being prompted for (Delta opens one worktree per thread).
@@ -166,12 +167,16 @@ impl Render for SecurityModal {
                                                         .to_string(),
                                                 };
                                                 Some(
-                                                    h_flex()
+                                                    div()
+                                                        .w_full()
+                                                        .min_w_0()
                                                         .pl(
                                                             IconSize::default().rems() + rems(0.5),
                                                         )
                                                         .child(
-                                                            Label::new(label).color(Color::Muted),
+                                                            Label::new(label)
+                                                                .color(Color::Muted)
+                                                                .line_clamp(3),
                                                         ),
                                                 )
                                             },
@@ -212,6 +217,37 @@ impl Render for SecurityModal {
                         match trust_input {
                             // Single project: the editable scope field replaces
                             // the static folder name, inline with the checkbox.
+                            Some(input) if compact => this.child(
+                                v_flex()
+                                    .w_full()
+                                    .min_w_0()
+                                    .gap_2()
+                                    .child(
+                                        Checkbox::new(
+                                            "trust-parents",
+                                            ToggleState::from(self.trust_parents),
+                                        )
+                                        .label("Trust all projects in parent folder")
+                                        .on_click(cx.listener(
+                                            |security_modal, state: &ToggleState, _, cx| {
+                                                let trust_parents = state.selected();
+                                                security_modal.trust_parents = trust_parents;
+                                                let input =
+                                                    security_modal.trust_path_input.clone();
+                                                let editor = input.read(cx).editor().clone();
+                                                editor.set_read_only(!trust_parents, cx);
+                                                if !trust_parents {
+                                                    input.update(cx, |input, cx| {
+                                                        input.set_error(None::<SharedString>, cx)
+                                                    });
+                                                }
+                                                cx.notify();
+                                                cx.stop_propagation();
+                                            },
+                                        )),
+                                    )
+                                    .child(div().w_full().min_w_0().child(input)),
+                            ),
                             Some(input) => this.child(
                                 // Top-aligned so the field's validation error
                                 // grows downward without shifting the checkbox;
@@ -267,13 +303,13 @@ impl Render for SecurityModal {
                     }),
             )
             .footer(
-                h_flex()
+                v_flex()
                     .px_3()
                     .pb_3()
-                    .gap_1()
-                    .justify_end()
+                    .gap_2()
                     .child(
                         Button::new("rm", "Stay in Restricted Mode")
+                            .when(compact, |button| button.full_width())
                             .key_binding(
                                 KeyBinding::for_action(
                                     &ToggleWorktreeSecurity,
@@ -289,6 +325,7 @@ impl Render for SecurityModal {
                     )
                     .child(
                         Button::new("tc", "Trust and Continue")
+                            .when(compact, |button| button.full_width())
                             .style(ButtonStyle::Filled)
                             .layer(ui::ElevationIndex::ModalSurface)
                             .key_binding(
@@ -299,7 +336,8 @@ impl Render for SecurityModal {
                                 security_modal.trust_and_dismiss(cx);
                                 cx.stop_propagation();
                             })),
-                    ),
+                    )
+                    .when(!compact, |footer| footer.flex_row().justify_end()),
             )
             .into_any_element()
     }

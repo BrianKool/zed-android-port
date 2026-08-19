@@ -1365,7 +1365,7 @@ impl GitCloneModal {
         self.github_state = GithubRepositoriesState::Loading;
         let credentials = cx.read_credentials(github_auth::GITHUB_CREDENTIALS_KEY);
         let http_client = cx.http_client();
-        cx.spawn(async move |this, cx| {
+        cx.spawn_in(window, async move |this, cx| {
             let result: anyhow::Result<_> = async {
                 let Some((_, token)) = credentials.await? else {
                     return Ok(None);
@@ -1377,7 +1377,8 @@ impl GitCloneModal {
             }
             .await;
 
-            this.update(cx, |this, cx| {
+            let signed_out = matches!(&result, Ok(None));
+            this.update_in(cx, |this, window, cx| {
                 this.github_state = match result {
                     Ok(Some((login, repositories))) => GithubRepositoriesState::Ready {
                         login: login.into(),
@@ -1386,8 +1387,14 @@ impl GitCloneModal {
                     Ok(None) => GithubRepositoriesState::SignedOut,
                     Err(error) => GithubRepositoriesState::Error(error.to_string().into()),
                 };
+                if signed_out {
+                    cx.defer_in(window, |_, window, cx| {
+                        window.dispatch_action(Box::new(OpenGithubAccounts), cx);
+                    });
+                }
                 cx.notify();
             })
+            .ok();
         })
         .detach();
         cx.notify();

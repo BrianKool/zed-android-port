@@ -279,14 +279,29 @@ impl ManagedLinuxAdapter {
             )
         })?;
 
+        // Older builds created per-package Graphify wrappers here. User tools
+        // now flow through the generic zd-runtime binary farm instead.
+        for name in ["graphify", "graphify-mcp"] {
+            let path = bridge_dir.join(name);
+            let managed = std::fs::read_to_string(&path)
+                .map(|contents| contents.contains(HOST_TO_GUEST_MARKER))
+                .unwrap_or(false);
+            if managed {
+                std::fs::remove_file(&path).with_context(|| {
+                    format!(
+                        "remove obsolete Managed Linux host bridge {}",
+                        path.display()
+                    )
+                })?;
+            }
+        }
+
         for (name, target) in [
             ("python", "python3"),
             ("python3", "python3"),
             ("pip", "pip"),
             ("pip3", "pip3"),
             ("uv", "uv"),
-            ("graphify", "graphify"),
-            ("graphify-mcp", "graphify-mcp"),
         ] {
             self.install_host_bridge_wrapper(&bridge_dir, &zd_exec, name, target)?;
         }
@@ -367,7 +382,7 @@ exec "$zd_exec" -lc 'export PATH="$HOME/.local/bin:/root/.local/bin:/usr/local/b
             r#"set -eu
 mkdir -p "$HOME/.local/share/pipx/broken"
 stamp="$(date +%s)-$$"
-for path in "$HOME/.local/share/pipx/shared" "$HOME/.local/share/pipx/venvs/graphifyy" "$HOME/.local/share/pipx/trash"; do
+for path in "$HOME/.local/share/pipx/shared" "$HOME/.local/share/pipx/trash"; do
     if [ -e "$path" ]; then
         base="$(basename "$path")"
         mv "$path" "$HOME/.local/share/pipx/broken/${base}-${stamp}" 2>/dev/null || rm -rf "$path" || true
@@ -537,23 +552,11 @@ exec /bin/sh "$tool" "$@"
         }
     }
 
-    fn supports_bind_mount(&self) -> bool {
-        self.command_help(Some("login"))
-            .is_some_and(|help| help.contains("--bind"))
-    }
-
-    fn add_bootstrap_bridge_bind_options(&self, command: &mut Command) {
-        if !self.supports_bind_mount() {
-            return;
-        }
-
-        for path in [self.config.bootstrap_prefix.clone(), self.host_home()] {
-            if path.exists() {
-                command
-                    .arg("--bind")
-                    .arg(format!("{}:{}", path.display(), path.display()));
-            }
-        }
+    fn add_bootstrap_bridge_bind_options(&self, _command: &mut Command) {
+        // PRoot-Distro always exposes the Termux-style PREFIX, and the
+        // shared-home option above exposes HOME. Rebinding either path emits
+        // an overlap warning on every command and does not add visibility.
+        // Runtime-shared temporary files live below PREFIX/tmp as well.
     }
 
     fn guest_path(&self, path: &Path) -> PathBuf {
@@ -573,7 +576,11 @@ exec /bin/sh "$tool" "$@"
 
         matches!(
             relative.to_string_lossy().as_ref(),
-            "../usr/bin/node" | "../usr/bin/npm"
+            "../usr/bin/node"
+                | "../usr/bin/npm"
+                | "../usr/bin/codex"
+                | "../usr/bin/claude"
+                | "../usr/bin/claude-agent-acp"
         ) || relative.strip_prefix("../usr/.zed/bin").is_ok()
             || relative
                 .strip_prefix(".local/bin")
@@ -596,6 +603,10 @@ exec /bin/sh "$tool" "$@"
             ["/data/data/", "/data/user/0/"].iter().any(|root| {
                 argument.contains(&format!("{root}com.zdroid/files/usr/bin/node"))
                     || argument.contains(&format!("{root}com.zdroid/files/usr/bin/npm"))
+                    || argument.contains(&format!("{root}com.zdroid/files/usr/bin/codex"))
+                    || argument.contains(&format!("{root}com.zdroid/files/usr/bin/claude"))
+                    || argument
+                        .contains(&format!("{root}com.zdroid/files/usr/bin/claude-agent-acp"))
                     || argument.contains(&format!("{root}com.zdroid/files/usr/.zed/bin/"))
                     || argument.contains(&format!("{root}com.zdroid/files/home/.local/bin/zdroid-"))
             })
@@ -1065,10 +1076,19 @@ impl RuntimeProvider for ManagedLinuxAdapter {
             "COLORTERM",
             "LANG",
             "GIT_ASKPASS",
+            "SSH_ASKPASS",
             "SSH_AUTH_SOCK",
             "ZDROID_RUNTIME",
         ] {
             if let Some(value) = req.env.get(key) {
+                let mut assignment = OsString::from(key);
+                assignment.push("=");
+                assignment.push(value);
+                command.arg("--env").arg(assignment);
+            }
+        }
+        for (key, value) in &req.env {
+            if key.starts_with("GIT_CONFIG_") || key == "GIT_TERMINAL_PROMPT" {
                 let mut assignment = OsString::from(key);
                 assignment.push("=");
                 assignment.push(value);
@@ -1130,7 +1150,7 @@ impl RuntimeProvider for ManagedLinuxAdapter {
             ("HOME".into(), EnvOp::Set(self.host_home().into_os_string())),
             (
                 "TMPDIR".into(),
-                EnvOp::Set(data_path.join("tmp").into_os_string()),
+                EnvOp::Set(self.config.bootstrap_prefix.join("tmp").into_os_string()),
             ),
             ("TERM".into(), EnvOp::Set(OsString::from("xterm-256color"))),
             ("COLORTERM".into(), EnvOp::Set(OsString::from("truecolor"))),
@@ -1307,6 +1327,23 @@ mod tests {
     }
 
     #[test]
+    fn stores_runtime_temp_files_under_the_shared_bootstrap_prefix() {
+        let adapter = test_adapter();
+        let operations = adapter.env_for_zed_process(Path::new("/data/user/0/com.zdroid/files"));
+        let (_, operation) = operations
+            .into_iter()
+            .find(|(key, _)| key == "TMPDIR")
+            .expect("TMPDIR operation");
+
+        match operation {
+            EnvOp::Set(path) => {
+                assert_eq!(path, OsString::from("/data/data/com.zdroid/files/usr/tmp"))
+            }
+            EnvOp::Remove => panic!("TMPDIR must be set"),
+        }
+    }
+
+    #[test]
     fn only_routes_bootstrap_node_npm_and_zed_launchers_to_host() {
         let adapter = test_adapter();
         assert!(
@@ -1322,16 +1359,26 @@ mod tests {
             "/data/data/com.zdroid/files/usr/.zed/bin/zdroid-claude-agent-acp",
         )));
         assert!(
-            adapter.should_spawn_on_host(Path::new("/data/data/com.zdroid/files/usr/.zed/bin/gh",))
+            adapter.should_spawn_on_host(Path::new("/data/data/com.zdroid/files/usr/bin/codex",))
+        );
+        assert!(
+            adapter
+                .should_spawn_on_host(Path::new("/data/user/0/com.zdroid/files/usr/bin/claude",))
         );
         assert!(adapter.should_spawn_on_host(Path::new(
-            "/data/data/com.zdroid/files/usr/.zed/bin/graphify",
+            "/data/user/0/com.zdroid/files/usr/bin/claude-agent-acp",
         )));
+        assert!(
+            adapter.should_spawn_on_host(Path::new("/data/data/com.zdroid/files/usr/.zed/bin/gh",))
+        );
         assert!(
             !adapter.should_spawn_on_host(Path::new("/data/data/com.zdroid/files/usr/bin/git",))
         );
         assert!(!adapter.should_spawn_on_host(Path::new(
             "/data/data/com.zdroid/files/home/projects/demo/run.sh",
+        )));
+        assert!(!adapter.should_spawn_on_host(Path::new(
+            "/data/data/com.zdroid/files/home/.local/bin/graphify",
         )));
     }
 

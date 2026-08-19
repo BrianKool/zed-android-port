@@ -4,7 +4,7 @@ pub use encrypted_password::{EncryptedPassword, IKnowWhatIAmDoingAndIHaveReadThe
 
 use net::async_net::UnixListener;
 use smol::lock::Mutex;
-#[cfg(not(target_os = "windows"))]
+#[cfg(all(not(target_os = "windows"), not(target_os = "android")))]
 use util::fs::make_file_executable;
 
 use std::ffi::OsStr;
@@ -24,7 +24,7 @@ use gpui::{AsyncApp, BackgroundExecutor, Task};
 use smol::fs;
 use util::{ResultExt as _, debug_panic, maybe};
 
-#[cfg(not(target_os = "windows"))]
+#[cfg(all(not(target_os = "windows"), not(target_os = "android")))]
 use util::{paths::PathExt, shell::ShellKind};
 
 /// Path to the program used for askpass
@@ -40,9 +40,12 @@ use util::{paths::PathExt, shell::ShellKind};
 /// re-spawned from a non-Activity context — execve aborts with `Error
 /// changing dalvik-cache ownership: Permission denied` under SELinux
 /// `untrusted_app_27`. The helper binary lives at
-/// `$PREFIX/bin/zed-askpass-helper` and implements the same socket
+/// `$PREFIX/.zed/bin/zed-askpass-helper` and implements the same socket
 /// protocol as `main()` below.
 static ASKPASS_PROGRAM: OnceLock<std::path::PathBuf> = OnceLock::new();
+
+#[cfg(all(not(target_os = "windows"), not(target_os = "android")))]
+const ASKPASS_SHELL_SHEBANG: &str = "#!/bin/sh";
 
 #[derive(PartialEq, Eq)]
 pub enum AskPassResult {
@@ -96,10 +99,10 @@ pub struct AskPassSession {
     executor: BackgroundExecutor,
 }
 
-#[cfg(not(target_os = "windows"))]
+#[cfg(all(not(target_os = "windows"), not(target_os = "android")))]
 const ASKPASS_SCRIPT_NAME: &str = "askpass.sh";
 
-#[cfg(not(target_os = "windows"))]
+#[cfg(all(not(target_os = "windows"), not(target_os = "android")))]
 const GPG_WRAPPER_SCRIPT_NAME: &str = "gpg-wrapper.sh";
 
 impl AskPassSession {
@@ -204,8 +207,9 @@ impl AskPassSession {
     }
 
     /// Returns the value to set as SSH_ASKPASS.
-    /// On Unix this is the path to the generated shell script.
-    /// On Windows this is the path to cli.exe directly — no script needed.
+    /// On desktop Unix this is the path to the generated shell script.
+    /// On Windows and Android this is a native helper executable; callers must
+    /// also set `ZED_ASKPASS_SOCKET` from [`Self::socket_path`].
     pub fn script_path(&self) -> impl AsRef<OsStr> {
         self.askpass_task.script_path()
     }
@@ -213,19 +217,18 @@ impl AskPassSession {
     /// Path to a script suitable for git's `gpg.program`, routing GnuPG
     /// passphrase prompts through Zed's askpass UI. `None` if unavailable.
     pub fn gpg_wrapper_path(&self) -> Option<&std::path::Path> {
-        #[cfg(not(target_os = "windows"))]
+        #[cfg(all(not(target_os = "windows"), not(target_os = "android")))]
         return self.askpass_task.gpg_wrapper_path();
-        #[cfg(target_os = "windows")]
+        #[cfg(any(target_os = "windows", target_os = "android"))]
         return None;
     }
 
     /// Returns the socket path to set as ZED_ASKPASS_SOCKET.
     ///
-    /// On Windows, SSH_ASKPASS points directly to cli.exe. SSH passes only
-    /// the prompt string as argv[1] with no mechanism for extra arguments,
-    /// so the socket path is communicated via this environment variable instead.
-    /// cli.exe must check ZED_ASKPASS_SOCKET before clap parses args.
-    #[cfg(target_os = "windows")]
+    /// On Windows and Android, SSH_ASKPASS points directly to a native helper.
+    /// SSH passes only the prompt as argv[1], so the socket path is communicated
+    /// via this environment variable instead.
+    #[cfg(any(target_os = "windows", target_os = "android"))]
     pub fn socket_path(&self) -> impl AsRef<OsStr> {
         self.askpass_task.socket_path()
     }
@@ -233,14 +236,13 @@ impl AskPassSession {
 
 pub struct PasswordProxy {
     _task: Task<()>,
-    /// On Unix: path to the generated .sh askpass script (set as SSH_ASKPASS).
-    /// On Windows: path to cli.exe (set as SSH_ASKPASS directly — no script needed).
+    /// On desktop Unix: generated .sh script. On Windows and Android: native helper.
     askpass_script_path: std::path::PathBuf,
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(all(not(target_os = "windows"), not(target_os = "android")))]
     gpg_wrapper_script_path: Option<std::path::PathBuf>,
-    /// On Windows only: path to the Unix socket, passed as ZED_ASKPASS_SOCKET
-    /// so cli.exe can find it without --askpass argument parsing.
-    #[cfg(target_os = "windows")]
+    /// On Windows and Android: passed through ZED_ASKPASS_SOCKET so the native
+    /// helper can connect without a generated executable script.
+    #[cfg(any(target_os = "windows", target_os = "android"))]
     askpass_socket_path: std::path::PathBuf,
 }
 
@@ -271,9 +273,9 @@ impl PasswordProxy {
 
         // Unix: SSH_ASKPASS = path to generated .sh script in temp dir.
         // Windows: SSH_ASKPASS = path to cli.exe directly. No script is written.
-        #[cfg(not(target_os = "windows"))]
+        #[cfg(all(not(target_os = "windows"), not(target_os = "android")))]
         let askpass_script_path = temp_dir.path().join(ASKPASS_SCRIPT_NAME);
-        #[cfg(target_os = "windows")]
+        #[cfg(any(target_os = "windows", target_os = "android"))]
         let askpass_script_path = askpass_program.to_path_buf();
 
         let askpass_socket_path = askpass_socket.clone();
@@ -283,7 +285,7 @@ impl PasswordProxy {
         // Unix where we control the pinentry via loopback mode. We compute the path
         // before the socket task takes ownership of `temp_dir`, and write the file
         // afterwards.
-        #[cfg(not(target_os = "windows"))]
+        #[cfg(all(not(target_os = "windows"), not(target_os = "android")))]
         let (gpg_wrapper_script_path, gpg_wrapper_script) =
             match generate_gpg_wrapper_script(askpass_program, &askpass_socket_path) {
                 Ok(script) => (
@@ -336,7 +338,7 @@ impl PasswordProxy {
 
         // Unix only: write the shell script and mark it executable.
         // On Windows cli.exe is invoked directly, so no script is needed.
-        #[cfg(not(target_os = "windows"))]
+        #[cfg(all(not(target_os = "windows"), not(target_os = "android")))]
         {
             let askpass_script = generate_askpass_script(askpass_program, &askpass_socket_path)?;
             fs::write(&askpass_script_path, askpass_script)
@@ -350,7 +352,7 @@ impl PasswordProxy {
         }
 
         // Write the gpg wrapper script (computed above) and mark it executable.
-        #[cfg(not(target_os = "windows"))]
+        #[cfg(all(not(target_os = "windows"), not(target_os = "android")))]
         let gpg_wrapper_script_path =
             if let Some((path, script)) = gpg_wrapper_script_path.zip(gpg_wrapper_script) {
                 match async {
@@ -377,9 +379,9 @@ impl PasswordProxy {
         Ok(Self {
             _task,
             askpass_script_path,
-            #[cfg(not(target_os = "windows"))]
+            #[cfg(all(not(target_os = "windows"), not(target_os = "android")))]
             gpg_wrapper_script_path,
-            #[cfg(target_os = "windows")]
+            #[cfg(any(target_os = "windows", target_os = "android"))]
             askpass_socket_path,
         })
     }
@@ -388,12 +390,12 @@ impl PasswordProxy {
         &self.askpass_script_path
     }
 
-    #[cfg(target_os = "windows")]
+    #[cfg(any(target_os = "windows", target_os = "android"))]
     pub fn socket_path(&self) -> impl AsRef<OsStr> {
         &self.askpass_socket_path
     }
 
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(all(not(target_os = "windows"), not(target_os = "android")))]
     pub fn gpg_wrapper_path(&self) -> Option<&std::path::Path> {
         self.gpg_wrapper_script_path.as_deref()
     }
@@ -465,7 +467,7 @@ pub fn set_askpass_program(path: std::path::PathBuf) {
 
 /// Generates the Unix shell askpass script.
 /// Not used on Windows — cli.exe is invoked directly as SSH_ASKPASS.
-#[cfg(not(target_os = "windows"))]
+#[cfg(all(not(target_os = "windows"), not(target_os = "android")))]
 fn generate_askpass_script(
     askpass_program: &std::path::Path,
     askpass_socket: &std::path::Path,
@@ -483,14 +485,17 @@ fn generate_askpass_script(
         .try_shell_safe(shell_kind)
         .context("Failed to shell-escape Askpass socket path")?;
     let print_args = "printf '%s\\0' \"$@\"";
-    let shebang = "#!/bin/sh";
+    // Android has no /bin/sh in the app-visible filesystem. Git executes this
+    // temporary script directly, so a desktop shebang fails with ENOENT before
+    // the native helper can contact the AskPass socket.
+    let shebang = ASKPASS_SHELL_SHEBANG;
     Ok(format!(
         "{shebang}\n{print_args} | {askpass_program} --askpass={askpass_socket} 2> /dev/null \n",
     ))
 }
 
 #[inline]
-#[cfg(not(target_os = "windows"))]
+#[cfg(all(not(target_os = "windows"), not(target_os = "android")))]
 fn generate_gpg_wrapper_script(
     askpass_program: &std::path::Path,
     askpass_socket: &std::path::Path,
@@ -531,8 +536,10 @@ fn generate_gpg_wrapper_script(
     // from stdout, so we buffer stdin to replay it into both attempts and buffer
     // the first attempt's output, forwarding it only if it succeeds. The
     // passphrase goes to fd 3 via a pipe.
+    let shebang = ASKPASS_SHELL_SHEBANG;
+
     Ok(format!(
-        r#"#!/bin/sh
+        r#"{shebang}
 for arg in "$@"; do
     case "$arg" in
         # Long-form signing options.
@@ -578,7 +585,7 @@ printf '%s\n' "$passphrase" |
 
 /// Finds the real `gpg` (or `gpg2`) executable on `PATH`.
 #[inline]
-#[cfg(not(target_os = "windows"))]
+#[cfg(all(not(target_os = "windows"), not(target_os = "android")))]
 fn find_gpg_program() -> Option<std::path::PathBuf> {
     ["gpg", "gpg2"]
         .into_iter()

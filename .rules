@@ -163,6 +163,22 @@ Release Notes:
 - Fetch crash reports: `script/sentry-fetch <issue-id>`
 - Generate investigation prompt from crash: `script/crash-to-prompt <issue-id>`
 
+# Zdroid-B runtime boundary contract
+
+Zdroid-B presents one terminal and one shared home, but internally combines an Android/Bionic Bootstrap host with an Ubuntu/glibc guest. Changes that cross this boundary must preserve all of these invariants:
+
+* Agent Panel server commands must use canonical host launchers under `$PREFIX/.zed/bin/zdroid-*`. Never persist or return `$PREFIX/bin/codex`, `$PREFIX/bin/claude`, or `$PREFIX/bin/claude-agent-acp` as an `AgentServerCommand`; those are terminal and legacy compatibility aliases only.
+* User-facing terminal actions must invoke bare commands such as `codex`, `claude`, `git`, and `gh`. Do not hardcode app-private executable paths in terminal-auth metadata or Welcome actions. The active terminal PATH and bridge layer own runtime selection.
+* Every executable under `$PREFIX/.zed/bin` is host-owned and must execute outside Ubuntu. Managed Linux must never translate one of these paths into `/root/../usr/.zed/bin/...`.
+* Compatibility aliases for `node`, `npm`, `codex`, `claude`, and `claude-agent-acp` under `$PREFIX/bin` must also route to the Bootstrap host. Keep this support for existing installations and persisted settings, but do not use these aliases as new internal canonical paths.
+* Translate project and working-directory paths into the guest when needed; do not translate a host executable path. Preserve the shared HOME and credential environment across the boundary.
+* Git must be launched by the bare name `git`. GitHub credentials, AskPass, SSH variables, and Git config environment must work from the editor, Git panel, Bootstrap aliases, and Ubuntu terminal without separate user logins.
+* Classify every generated or temporary executable script by where the kernel will launch it. Android-host scripts, including per-operation AskPass and GPG wrappers, must use `/system/bin/sh`; only scripts installed and executed inside the Ubuntu rootfs may use `/bin/sh` or `/bin/bash`. Audits must include runtime-generated scripts, not only persistent launchers committed to the repository.
+* Ubuntu-installed user tools are generic. Discover and execute them through `zd-runtime`/`zd-exec`; never add a tool-specific bridge or hardcoded package rule merely to make one CLI work.
+* Code that recognizes Android app-private paths must handle both `/data/data/com.zdroid/files/...` and `/data/user/0/com.zdroid/files/...` aliases.
+* Any launcher, PATH, cwd, Git, credential, or runtime-router change requires regression coverage for canonical launchers, legacy aliases, host/guest routing, and false positives for ordinary Ubuntu tools. Validate the Android release build; Windows host compilation alone cannot validate Unix-only runtime code.
+* Do not work around a runtime-boundary failure in only one UI flow. Find every producer and consumer of that command or path, including Agent settings repair, terminal auth, Welcome actions, persisted settings migration, and runtime bridges.
+
 # Rules Hygiene
 
 These `.rules` files are read by every agent session. Keep them high-signal.

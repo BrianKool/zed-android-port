@@ -62,9 +62,11 @@ class AgentForegroundService : Service() {
                     batchTaskDescriptions.clear()
                 }
                 val previousDescription = activeTasks[taskId]
-                if (!activeTasks.containsKey(taskId)) batchTaskCount += 1
+                if (!activeTasks.containsKey(taskId)) {
+                    batchTaskCount += 1
+                    batchTaskDescriptions.add(description)
+                }
                 activeTasks[taskId] = description
-                batchTaskDescriptions.add(description)
                 startForeground(RUNNING_NOTIFICATION_ID, runningNotification())
                 if (isWaitingForUser(description)) {
                     if (previousDescription != description) {

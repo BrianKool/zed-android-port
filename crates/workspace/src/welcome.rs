@@ -804,27 +804,27 @@ impl WelcomePage {
             .child(command(
                 "agent-command-codex-install",
                 "Install Codex",
-                "\"$PREFIX/.zed/bin/codex\" --version",
-                Some("\"$PREFIX/.zed/bin/codex\" --version"),
+                "codex --version",
+                Some("codex --version"),
             ))
             .child(command(
                 "agent-command-codex-login",
                 "Login to Codex",
-                "\"$PREFIX/.zed/bin/codex\" login",
-                Some("\"$PREFIX/.zed/bin/codex\" login"),
+                "codex login",
+                Some("codex login"),
             ))
             .child(Label::new("Claude Code").size(LabelSize::Small))
             .child(command(
                 "agent-command-claude-install",
                 "Install Claude",
-                "\"$PREFIX/bin/npm\" install --prefix \"$HOME/.local/share/zdroid/claude-code\" --no-save --force @anthropic-ai/claude-code@2.1.112 @agentclientprotocol/claude-agent-acp@0.64.2 && test -f \"$HOME/.local/share/zdroid/claude-code/node_modules/@anthropic-ai/claude-code/cli.js\" && ln -sf \"$PREFIX/.zed/bin/claude\" \"$PREFIX/bin/claude\" && \"$PREFIX/.zed/bin/claude\" --version",
-                Some("\"$PREFIX/bin/npm\" install --prefix \"$HOME/.local/share/zdroid/claude-code\" --no-save --force @anthropic-ai/claude-code@2.1.112 @agentclientprotocol/claude-agent-acp@0.64.2 && test -f \"$HOME/.local/share/zdroid/claude-code/node_modules/@anthropic-ai/claude-code/cli.js\" && ln -sf \"$PREFIX/.zed/bin/claude\" \"$PREFIX/bin/claude\" && \"$PREFIX/.zed/bin/claude\" --version"),
+                "claude --version",
+                Some("claude --version"),
             ))
             .child(command(
                 "agent-command-claude-login",
                 "Login to Claude",
-                "\"$PREFIX/.zed/bin/claude\"",
-                Some("\"$PREFIX/.zed/bin/claude\""),
+                "claude",
+                Some("claude"),
             ))
     }
 

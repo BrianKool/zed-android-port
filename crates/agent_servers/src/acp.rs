@@ -1078,7 +1078,7 @@ impl AcpConnection {
             // ACP server so it observes the new credentials.
             let value = serde_json::json!({
                 "label": "Sign in to Codex",
-                "command": "/data/data/com.zdroid/files/usr/.zed/bin/codex",
+                "command": "codex",
                 "args": ["login"],
                 "env": {},
             });
@@ -1091,7 +1091,7 @@ impl AcpConnection {
         } else if cfg!(target_os = "android") && agent_id.0.as_ref() == "claude-acp" {
             let value = serde_json::json!({
                 "label": "Sign in to Claude",
-                "command": "/data/data/com.zdroid/files/usr/.zed/bin/claude",
+                "command": "claude",
                 "args": [],
                 "env": {},
             });
