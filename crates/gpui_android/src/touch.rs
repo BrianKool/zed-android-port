@@ -58,6 +58,12 @@ use crate::window::AndroidWindowState;
 /// a moving finger is still a tap candidate.
 const DRAG_THRESHOLD_PX: f64 = 8.0;
 
+/// Maximum delay between two taps for them to count as a double tap.
+const DOUBLE_TAP_TIMEOUT: Duration = Duration::from_millis(300);
+
+/// Maximum distance between consecutive taps for tap counting.
+const DOUBLE_TAP_SLOP_PX: f64 = 24.0;
+
 /// Time the primary finger must stay still (below `DRAG_THRESHOLD_PX`)
 /// before we commit to a long-press → word-select transition. Matches
 /// Android's `ViewConfiguration.getLongPressTimeout()` default (500ms).
@@ -300,6 +306,7 @@ struct PointerState {
     down_time: Instant,
     down_pos: Point<Pixels>,
     last_pos: Point<Pixels>,
+    click_count: usize,
     /// Sum of per-MOVE absolute deltas in logical pixels since
     /// `down_pos`. Crosses `DRAG_THRESHOLD_PX` to commit the gesture
     /// to scroll instead of tap.
@@ -310,6 +317,9 @@ struct PointerState {
 pub(crate) struct TouchState {
     pointers: HashMap<i32, PointerState>,
     phase: GesturePhase,
+    current_click_count: usize,
+    last_tap_at: Option<Instant>,
+    last_tap_position: Point<Pixels>,
     /// Last centroid in logical pixels. Scroll deltas are computed as
     /// `cur_centroid - scroll_centroid` directly (no scale-factor divide;
     /// input is already in logical units).
@@ -359,18 +369,29 @@ impl TouchState {
             TouchAction::Down => {
                 // First finger lands. Discard any stale state from a
                 // previous gesture the OS didn't bother to Cancel, then
-                // latch this pointer. Always emit `click_count=1` —
-                // tap-tap-counting is dropped on touch; word-select
-                // comes from long-press, not tap repetition.
+                // latch this pointer. Preserve tap repetition so Zed's
+                // normal double-click behavior (for example permanent
+                // project-panel tabs) also works with fingers.
                 self.reset();
                 let primary = &event.pointers[0];
                 let position = primary.pos;
+                let click_count = if self.last_tap_at.is_some_and(|last_tap| {
+                    last_tap.elapsed() <= DOUBLE_TAP_TIMEOUT
+                        && (position - self.last_tap_position).magnitude()
+                            <= DOUBLE_TAP_SLOP_PX
+                }) {
+                    self.current_click_count.saturating_add(1).min(2)
+                } else {
+                    1
+                };
+                self.current_click_count = click_count;
                 self.pointers.insert(
                     primary.id,
                     PointerState {
                         down_time: Instant::now(),
                         down_pos: position,
                         last_pos: position,
+                        click_count,
                         accumulated_motion: 0.0,
                     },
                 );
@@ -379,7 +400,7 @@ impl TouchState {
                     button: MouseButton::Left,
                     position,
                     modifiers,
-                    click_count: 1,
+                    click_count,
                     first_mouse: false,
                 }));
             }
@@ -681,6 +702,8 @@ impl TouchState {
                         // target switches mid-drag when the finger crosses
                         // a pane boundary (editor↔terminal split, etc.).
                         let anchor = pstate.down_pos;
+                        self.last_tap_at = None;
+                        self.current_click_count = 0;
                         self.phase = GesturePhase::SingleFingerScroll;
                         out.push(PlatformInput::MouseUp(MouseUpEvent {
                             button: MouseButton::Left,
@@ -766,10 +789,16 @@ impl TouchState {
                 // phase we're closing out.
                 let position = event.pointers[0].pos;
                 let was_long_press = matches!(self.phase, GesturePhase::LongPressSelection);
+                let click_count = self
+                    .pointers
+                    .get(&event.pointers[0].id)
+                    .map_or(self.current_click_count.max(1), |pointer| {
+                        pointer.click_count.max(1)
+                    });
                 let close = match self.phase {
                     // Plain tap: emit `Up(Left, count=1)` to match the
                     // `Down(Left, count=1)` from `TouchAction::Down`.
-                    GesturePhase::SingleFingerDown => Some(1usize),
+                    GesturePhase::SingleFingerDown => Some(click_count),
                     // Long-press resolved: emit `Up(Left, count=2)` to
                     // match the `Down(Left, count=2)` from the long-
                     // press transition, locking the selection.
@@ -785,6 +814,10 @@ impl TouchState {
                     // canceled or resolved at commit-time; nothing to emit.
                     _ => None,
                 };
+                if matches!(self.phase, GesturePhase::SingleFingerDown) {
+                    self.last_tap_at = Some(Instant::now());
+                    self.last_tap_position = position;
+                }
                 self.reset();
                 if let Some(click_count) = close {
                     let mut close_modifiers = modifiers;

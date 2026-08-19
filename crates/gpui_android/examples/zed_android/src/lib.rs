@@ -239,12 +239,12 @@ fn zdroid_bootstrap_paths() -> Result<(PathBuf, PathBuf)> {
 /// integrated terminal. Codex must use an Android-targeted binary: the regular
 /// Linux-musl npm binary cannot reliably use Android's netd resolver.
 fn ensure_codex_acp_launcher() -> Result<PathBuf> {
-    let (prefix, home) = zdroid_bootstrap_paths()?;
-    let launcher = home.join(".local/bin/zdroid-codex-acp-cli");
-    let parent = launcher.parent().context("Codex launcher has no parent")?;
-    std::fs::create_dir_all(parent).context("create Codex launcher directory")?;
+    let (prefix, _home) = zdroid_bootstrap_paths()?;
+    let managed_bin = prefix.join(".zed/bin");
+    std::fs::create_dir_all(&managed_bin).context("create Codex launcher directory")?;
+    let launcher = managed_bin.join("zdroid-codex-acp-cli");
 
-    let browser_launcher = home.join(".local/bin/zdroid-open-url");
+    let browser_launcher = managed_bin.join("zdroid-open-url");
     std::fs::write(
         &browser_launcher,
         r#"#!/system/bin/sh
@@ -269,7 +269,7 @@ exec /system/bin/am broadcast \
     // Rust's `open` crate prefers Termux's helper on Android and can ignore
     // BROWSER entirely. Shadow it in the managed PATH so Codex never targets
     // com.termux/.app.TermuxOpenReceiver from inside the Zdroid sandbox.
-    let termux_open_url_launcher = home.join(".local/bin/termux-open-url");
+    let termux_open_url_launcher = managed_bin.join("termux-open-url");
     std::fs::write(
         &termux_open_url_launcher,
         format!(
@@ -383,20 +383,36 @@ fi
 exec "$codex_bin" "$@"
 "#,
         browser_launcher = browser_launcher.to_string_lossy(),
-        managed_bin = parent.to_string_lossy(),
+        managed_bin = managed_bin.to_string_lossy(),
         prefix = prefix.to_string_lossy(),
     );
     std::fs::write(&launcher, script).context("write Codex ACP launcher")?;
     let mut permissions = std::fs::metadata(&launcher)?.permissions();
     permissions.set_mode(0o700);
     std::fs::set_permissions(&launcher, permissions).context("chmod Codex ACP launcher")?;
-    let terminal_launcher = prefix.join(".zed/bin/codex");
+    let stale_terminal_launcher = prefix.join(".zed/bin/codex");
+    if stale_terminal_launcher.exists() {
+        std::fs::remove_file(&stale_terminal_launcher)
+            .context("remove stale Codex .zed/bin terminal launcher")?;
+    }
+    let terminal_launcher = prefix.join("bin/codex");
     if let Some(parent) = terminal_launcher.parent() {
         std::fs::create_dir_all(parent).context("create Codex terminal launcher directory")?;
     }
     let terminal_script = format!(
-        "#!/system/bin/sh\nexec {} \"$@\"\n",
-        launcher.to_string_lossy()
+        r#"#!/system/bin/sh
+prefix="{prefix}"
+launcher="{launcher}"
+for shell in "$prefix/bin/sh" "$prefix/bin/bash" /system/bin/sh /bin/sh; do
+    if [ -x "$shell" ]; then
+        exec "$shell" "$launcher" "$@"
+    fi
+done
+printf '%s\n' 'Zdroid-B: no shell available to start Codex.' >&2
+exit 127
+"#,
+        launcher = launcher.to_string_lossy(),
+        prefix = prefix.to_string_lossy(),
     );
     std::fs::write(&terminal_launcher, terminal_script).context("write Codex terminal launcher")?;
     let mut permissions = std::fs::metadata(&terminal_launcher)?.permissions();
@@ -404,7 +420,7 @@ exec "$codex_bin" "$@"
     std::fs::set_permissions(&terminal_launcher, permissions)
         .context("chmod Codex terminal launcher")?;
 
-    Ok(launcher)
+    Ok(terminal_launcher)
 }
 
 fn ensure_claude_acp_launcher() -> Result<PathBuf> {
@@ -412,11 +428,9 @@ fn ensure_claude_acp_launcher() -> Result<PathBuf> {
     if let Err(err) = ensure_claude_model_catalog(&home) {
         log::warn!("zed_android: could not update Claude model catalog: {err:#}");
     }
-    let launcher = home.join(".local/bin/zdroid-claude-agent-acp");
-    let parent = launcher
-        .parent()
-        .context("Claude ACP launcher has no parent")?;
-    std::fs::create_dir_all(parent).context("create Claude ACP launcher directory")?;
+    let managed_bin = prefix.join(".zed/bin");
+    std::fs::create_dir_all(&managed_bin).context("create Claude ACP launcher directory")?;
+    let launcher = managed_bin.join("zdroid-claude-agent-acp");
 
     // This release asks the Claude SDK for the account's live model list and
     // exposes full model versions through ACP. Pin it so a registry cache from
@@ -428,7 +442,7 @@ HOME="__ZDROID_HOME__"
 export PREFIX HOME
 NODE="$PREFIX/bin/node"
 NPM="$PREFIX/bin/npm"
-claude_cli="$PREFIX/.zed/bin/claude"
+claude_cli="$PREFIX/bin/claude"
 root="$HOME/.local/share/zdroid/claude-code"
 setup_dir="$HOME/.local/share/zdroid/agent-setup"
 setup_status="$setup_dir/claude-acp.status"
@@ -537,7 +551,12 @@ exec "$NODE" "$resolved_acp" "$@"
     // that command before it sees our Custom-server replacement. Keep a small
     // compatibility entry on the bootstrap PATH so either launch route reaches
     // the same Android-aware wrapper instead of failing with status 127.
-    let terminal_launcher = prefix.join(".zed/bin/claude");
+    let stale_terminal_launcher = prefix.join(".zed/bin/claude");
+    if stale_terminal_launcher.exists() {
+        std::fs::remove_file(&stale_terminal_launcher)
+            .context("remove stale Claude .zed/bin terminal launcher")?;
+    }
+    let terminal_launcher = prefix.join("bin/claude");
     if let Some(parent) = terminal_launcher.parent() {
         std::fs::create_dir_all(parent).context("create Claude terminal launcher directory")?;
     }
@@ -591,8 +610,19 @@ exec "$NODE" "$resolved_cli" "$@"
         std::fs::create_dir_all(parent).context("create Claude ACP compatibility directory")?;
     }
     let compatibility_script = format!(
-        "#!/system/bin/sh\nexec {} \"$@\"\n",
-        launcher.to_string_lossy()
+        r#"#!/system/bin/sh
+prefix="{prefix}"
+launcher="{launcher}"
+for shell in "$prefix/bin/sh" "$prefix/bin/bash" /system/bin/sh /bin/sh; do
+    if [ -x "$shell" ]; then
+        exec "$shell" "$launcher" "$@"
+    fi
+done
+printf '%s\n' 'Zdroid-B: no shell available to start Claude ACP.' >&2
+exit 127
+"#,
+        launcher = launcher.to_string_lossy(),
+        prefix = prefix.to_string_lossy(),
     );
     std::fs::write(&compatibility_launcher, compatibility_script)
         .context("write Claude ACP compatibility launcher")?;
@@ -604,7 +634,7 @@ exec "$NODE" "$resolved_cli" "$@"
         "zed_android: Claude ACP compatibility launcher = {}",
         compatibility_launcher.display()
     );
-    Ok(launcher)
+    Ok(compatibility_launcher)
 }
 
 /// Recreate launchers that live inside `$PREFIX` after Bootstrap atomically

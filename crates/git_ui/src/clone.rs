@@ -1,10 +1,11 @@
 use askpass::{AskPassDelegate, AskPassSession};
 use gpui::{App, Context, DismissEvent, WeakEntity, Window};
 use notifications::status_toast::StatusToast;
+use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::Command;
-use std::sync::Arc;
+use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use ui::{Color, Icon, IconName, IconSize, SharedString};
 use util::ResultExt;
@@ -38,6 +39,18 @@ fn redacted_repo_url(url: &str) -> String {
     format!("{scheme}://{host}{path}")
 }
 
+fn clone_error_tail(stderr: &str) -> String {
+    let trimmed = stderr.trim();
+    let lines = trimmed.lines().rev().take(6).collect::<Vec<_>>();
+    lines
+        .into_iter()
+        .rev()
+        .collect::<Vec<_>>()
+        .join("\n")
+        .trim()
+        .to_owned()
+}
+
 /// Spawns `git clone --progress <url>` in `cwd`, polls for exit or
 /// cancellation. On cancel, sends `kill()` (SIGKILL on Unix) and waits
 /// so we don't leave a zombie. The caller is responsible for
@@ -65,6 +78,7 @@ fn run_git_clone(
         .env("SSH_ASKPASS", askpass_script)
         .env("SSH_ASKPASS_REQUIRE", "force")
         .env("GIT_TERMINAL_PROMPT", "0")
+        .stderr(Stdio::piped())
         .spawn()
         .map_err(|err| {
             anyhow::anyhow!(
@@ -73,6 +87,19 @@ fn run_git_clone(
                 std::env::var("PATH").unwrap_or_default()
             )
         })?;
+    let stderr_output = Arc::new(Mutex::new(String::new()));
+    let mut stderr_reader = if let Some(mut stderr) = child.stderr.take() {
+        let stderr_output = stderr_output.clone();
+        Some(std::thread::spawn(move || {
+            let mut output = String::new();
+            let _ = stderr.read_to_string(&mut output);
+            if let Ok(mut stderr_output) = stderr_output.lock() {
+                *stderr_output = output;
+            }
+        }))
+    } else {
+        None
+    };
     loop {
         if cancel.load(Ordering::Relaxed) {
             let _ = child.kill();
@@ -86,11 +113,23 @@ fn run_git_clone(
                 return Ok(CloneOutcome::Completed);
             }
             Some(status) => {
+                if let Some(stderr_reader) = stderr_reader.take() {
+                    let _ = stderr_reader.join();
+                }
+                let stderr_tail = stderr_output
+                    .lock()
+                    .ok()
+                    .map(|output| clone_error_tail(&output))
+                    .unwrap_or_default();
                 log::error!(
-                    "git clone: failed url={safe_url} cwd={} status={status}",
-                    cwd.display()
+                    "git clone: failed url={safe_url} cwd={} status={status} stderr={stderr_tail}",
+                    cwd.display(),
                 );
-                anyhow::bail!("git clone exited with {status}")
+                if stderr_tail.is_empty() {
+                    anyhow::bail!("git clone exited with {status}")
+                } else {
+                    anyhow::bail!("git clone exited with {status}: {stderr_tail}")
+                }
             }
             None => {
                 // Block one background-pool thread for ~200ms between

@@ -257,13 +257,9 @@ impl ManagedLinuxAdapter {
 
     pub fn install_bootstrap_command_bridges(&self) -> Result<()> {
         for rootfs in self.installed_rootfs_paths() {
-            for (name, target) in [
-                ("codex", ".zed/bin/codex"),
-                ("claude", ".zed/bin/claude"),
-                ("gh", ".zed/bin/gh"),
-            ] {
-                self.install_guest_bridge_wrapper(&rootfs, name, target)?;
-            }
+            self.install_guest_bridge_wrapper(&rootfs, "codex", "bin/codex")?;
+            self.install_guest_bridge_wrapper(&rootfs, "claude", "bin/claude")?;
+            self.install_guest_bridge_wrapper(&rootfs, "gh", ".zed/bin/gh")?;
         }
         Ok(())
     }
@@ -286,10 +282,11 @@ impl ManagedLinuxAdapter {
         for (name, target) in [
             ("python", "python3"),
             ("python3", "python3"),
-            ("pip", "python3 -m pip"),
-            ("pip3", "python3 -m pip"),
+            ("pip", "pip"),
+            ("pip3", "pip3"),
             ("uv", "uv"),
             ("graphify", "graphify"),
+            ("graphify-mcp", "graphify-mcp"),
         ] {
             self.install_host_bridge_wrapper(&bridge_dir, &zd_exec, name, target)?;
         }
@@ -328,7 +325,7 @@ if [ ! -x "$zd_exec" ]; then
     exit 127
 fi
 
-exec "$zd_exec" {target} "$@"
+exec "$zd_exec" -lc 'export PATH="$HOME/.local/bin:/root/.local/bin:/usr/local/bin:/usr/bin:/bin:$PATH"; target="$1"; shift; case "$target" in pip|pip3) exec python3 -m pip "$@";; *) exec "$target" "$@";; esac' zdroid-bridge {target} "$@"
 "#,
             name = name,
             target = target,
@@ -577,12 +574,13 @@ exec /bin/sh "$tool" "$@"
         matches!(
             relative.to_string_lossy().as_ref(),
             "../usr/bin/node" | "../usr/bin/npm"
-        ) || relative
-            .strip_prefix(".local/bin")
-            .ok()
-            .and_then(Path::file_name)
-            .and_then(|name| name.to_str())
-            .is_some_and(|name| name.starts_with("zdroid-"))
+        ) || relative.strip_prefix("../usr/.zed/bin").is_ok()
+            || relative
+                .strip_prefix(".local/bin")
+                .ok()
+                .and_then(Path::file_name)
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with("zdroid-"))
     }
 
     fn shell_invokes_host_tool(&self, req: &SpawnRequest) -> bool {
@@ -598,6 +596,7 @@ exec /bin/sh "$tool" "$@"
             ["/data/data/", "/data/user/0/"].iter().any(|root| {
                 argument.contains(&format!("{root}com.zdroid/files/usr/bin/node"))
                     || argument.contains(&format!("{root}com.zdroid/files/usr/bin/npm"))
+                    || argument.contains(&format!("{root}com.zdroid/files/usr/.zed/bin/"))
                     || argument.contains(&format!("{root}com.zdroid/files/home/.local/bin/zdroid-"))
             })
         })
@@ -1308,7 +1307,7 @@ mod tests {
     }
 
     #[test]
-    fn only_routes_bootstrap_node_npm_and_agent_launchers_to_host() {
+    fn only_routes_bootstrap_node_npm_and_zed_launchers_to_host() {
         let adapter = test_adapter();
         assert!(
             adapter.should_spawn_on_host(Path::new("/data/user/0/com.zdroid/files/usr/bin/node",))
@@ -1317,7 +1316,16 @@ mod tests {
             adapter.should_spawn_on_host(Path::new("/data/data/com.zdroid/files/usr/bin/npm",))
         );
         assert!(adapter.should_spawn_on_host(Path::new(
-            "/data/data/com.zdroid/files/home/.local/bin/zdroid-claude-agent-acp",
+            "/data/data/com.zdroid/files/usr/.zed/bin/zdroid-codex-acp-cli",
+        )));
+        assert!(adapter.should_spawn_on_host(Path::new(
+            "/data/data/com.zdroid/files/usr/.zed/bin/zdroid-claude-agent-acp",
+        )));
+        assert!(
+            adapter.should_spawn_on_host(Path::new("/data/data/com.zdroid/files/usr/.zed/bin/gh",))
+        );
+        assert!(adapter.should_spawn_on_host(Path::new(
+            "/data/data/com.zdroid/files/usr/.zed/bin/graphify",
         )));
         assert!(
             !adapter.should_spawn_on_host(Path::new("/data/data/com.zdroid/files/usr/bin/git",))
@@ -1335,6 +1343,24 @@ mod tests {
             args: vec![
                 OsString::from("-c"),
                 OsString::from("/data/user/0/com.zdroid/files/usr/bin/node /tmp/agent.js"),
+            ],
+            cwd: None,
+            env: HashMap::new(),
+            interactive: false,
+            stdio: [0, 1, 2],
+        };
+
+        assert!(adapter.shell_invokes_host_tool(&request));
+    }
+
+    #[test]
+    fn detects_zed_launcher_inside_shell_command() {
+        let adapter = test_adapter();
+        let request = SpawnRequest {
+            program: "bash".into(),
+            args: vec![
+                OsString::from("-lc"),
+                OsString::from("/data/user/0/com.zdroid/files/usr/.zed/bin/codex --version"),
             ],
             cwd: None,
             env: HashMap::new(),

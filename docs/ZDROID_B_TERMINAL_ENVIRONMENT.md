@@ -79,6 +79,44 @@ gh
 This lets a user install a Python tool in Ubuntu while still using the same
 Codex, Claude and GitHub account state that the Agent Panel uses.
 
+## Executable Wrapper Rules
+
+Zdroid-managed executable wrappers must live under:
+
+```text
+/data/data/com.zdroid/files/usr/.zed/bin
+```
+
+Do not generate managed launchers under:
+
+```text
+/data/data/com.zdroid/files/home/.local/bin
+```
+
+`$HOME` is shared with projects, user-installed tools, caches and credentials.
+On some Android devices it may be mounted or treated in ways that make direct
+execution unreliable. `$PREFIX/.zed/bin` is the app-managed executable bridge
+area.
+
+Current rules:
+
+- Bootstrap terminal-facing Codex and Claude launchers are created in
+  `$PREFIX/bin`.
+- Full Linux terminal-facing Codex and Claude launchers are created in
+  Ubuntu's `/usr/local/bin`, but they bridge back to the same Bootstrap-managed
+  launchers used by the Agent Panel.
+- Internal ACP and runtime bridge launchers are created in `$PREFIX/.zed/bin`.
+- Ubuntu routes any `$PREFIX/.zed/bin/*` command back to the Android Bootstrap
+  host before executing it.
+- Codex and Claude share the same Zdroid-managed launcher and `$HOME`, so
+  terminal login and Agent Panel login reuse the same subscription credentials.
+- Git itself remains runtime-native: Bootstrap uses Bootstrap Git; Ubuntu uses
+  Ubuntu Git.
+- GitHub credentials are shared through the Zdroid credential bridge, so `git`
+  and `gh` can reuse the account that was connected from the GitHub account UI.
+- Legacy `$HOME/.local/bin/zdroid-*` launchers may still be recognized for old
+  installs, but new Zdroid-managed launchers should not be written there.
+
 ## Check The Active Runtime
 
 Open a terminal and run:
@@ -251,4 +289,3 @@ earlier than normal web browsing.
   why it is necessary.
 - If a Linux binary is incompatible, check whether it is Android/Bionic,
   Linux/glibc, Linux/musl or static ARM64 before forcing an install.
-

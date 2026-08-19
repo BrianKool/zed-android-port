@@ -151,8 +151,36 @@ fn install_gh_wrapper(path: &Path) -> Result<()> {
     let parent = path.parent().context("GitHub CLI wrapper has no parent")?;
     fs::create_dir_all(parent)
         .with_context(|| format!("create GitHub CLI wrapper directory {}", parent.display()))?;
-    write_private_file(path, GH_WRAPPER.as_bytes(), 0o700)
+    write_private_file(path, gh_wrapper_contents(path).as_bytes(), 0o700)
         .with_context(|| format!("install GitHub CLI credential wrapper {}", path.display()))
+}
+
+fn gh_wrapper_contents(path: &Path) -> String {
+    let bootstrap_gh = Path::new("usr").join(".zed").join("bin").join("gh");
+    if path.ends_with(&bootstrap_gh) {
+        format!(
+            r#"#!/system/bin/sh
+# ZDROID_GH_CREDENTIAL_BRIDGE_ANDROID_HOST
+
+if [ -z "${{ZDROID_GH_WRAPPER_BASH:-}}" ]; then
+    for zdroid_bash in "${{PREFIX:-}}/bin/bash" \
+        "/data/data/com.zdroid/files/usr/bin/bash" \
+        "/data/user/0/com.zdroid/files/usr/bin/bash"; do
+        if [ -x "$zdroid_bash" ]; then
+            export ZDROID_GH_WRAPPER_BASH=1
+            exec "$zdroid_bash" "$0" "$@"
+        fi
+    done
+    printf '%s\n' 'Zdroid-B: bash is required before GitHub CLI credentials can run.' >&2
+    exit 127
+fi
+unset ZDROID_GH_WRAPPER_BASH
+
+{GH_WRAPPER_BODY}"#
+        )
+    } else {
+        format!("#!/usr/bin/env bash\n{GH_WRAPPER_BODY}")
+    }
 }
 
 fn write_private_file(path: &Path, contents: &[u8], mode: u32) -> Result<()> {
@@ -164,7 +192,7 @@ fn write_private_file(path: &Path, contents: &[u8], mode: u32) -> Result<()> {
     fs::rename(&temporary, path).with_context(|| format!("publish private file {}", path.display()))
 }
 
-const GH_WRAPPER: &str = r#"#!/usr/bin/env bash
+const GH_WRAPPER_BODY: &str = r#"
 # ZDROID_GH_CREDENTIAL_BRIDGE_V1
 
 if [ -x /usr/bin/gh ]; then
@@ -305,4 +333,28 @@ fn is_github_https_request(request: &str) -> bool {
         }
     }
     protocol == Some("https") && matches!(host, Some("github.com" | "github.com:443"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bootstrap_gh_wrapper_uses_android_shell_entrypoint() {
+        let wrapper = gh_wrapper_contents(Path::new("/data/data/com.zdroid/files/usr/.zed/bin/gh"));
+
+        assert!(wrapper.starts_with("#!/system/bin/sh"));
+        assert!(wrapper.contains("/data/data/com.zdroid/files/usr/bin/bash"));
+        assert!(wrapper.contains("ZDROID_GH_CREDENTIAL_BRIDGE_V1"));
+    }
+
+    #[test]
+    fn ubuntu_gh_wrapper_uses_linux_bash_entrypoint() {
+        let wrapper = gh_wrapper_contents(Path::new(
+            "/data/data/com.zdroid/files/usr/var/lib/proot-distro/containers/ubuntu/rootfs/usr/local/bin/gh",
+        ));
+
+        assert!(wrapper.starts_with("#!/usr/bin/env bash"));
+        assert!(wrapper.contains("ZDROID_GH_CREDENTIAL_BRIDGE_V1"));
+    }
 }
