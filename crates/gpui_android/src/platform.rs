@@ -1474,16 +1474,30 @@ impl Platform for AndroidPlatform {
         &self,
         options: PathPromptOptions,
     ) -> oneshot::Receiver<Result<Option<Vec<PathBuf>>>> {
-        // Fire ACTION_OPEN_DOCUMENT_TREE via MainActivity. The result
+        // Fire the matching Android SAF picker via MainActivity. The result
         // arrives async through the JNI callback in `saf.rs`.
         let import_foreign_trees = options.files && options.directories;
+        let force_import_tree = options
+            .prompt
+            .as_ref()
+            .is_some_and(|prompt| prompt.as_ref() == "Import Folder");
         log::info!(
-            "AndroidPlatform::prompt_for_paths invoked prompt={:?} import_foreign_trees={}",
+            "AndroidPlatform::prompt_for_paths invoked prompt={:?} import_foreign_trees={} force_import_tree={}",
             options.prompt,
-            import_foreign_trees
+            import_foreign_trees,
+            force_import_tree
         );
         let (tx, rx) = oneshot::channel();
-        crate::saf::pick_folder(&self.android_app, tx, import_foreign_trees);
+        if options.files && !options.directories {
+            crate::saf::pick_file(&self.android_app, tx);
+        } else {
+            crate::saf::pick_folder(
+                &self.android_app,
+                tx,
+                import_foreign_trees,
+                force_import_tree,
+            );
+        }
         rx
     }
 

@@ -42,14 +42,29 @@ pub(crate) fn pick_folder(
     android_app: &AndroidApp,
     sender: PendingPathsSender,
     import_foreign_trees: bool,
+    force_import_tree: bool,
 ) {
     log::info!(
-        "saf: pick_folder requested import_foreign_trees={}",
-        import_foreign_trees
+        "saf: pick_folder requested import_foreign_trees={} force_import_tree={}",
+        import_foreign_trees,
+        force_import_tree
     );
     set_pending(Pending::Paths(sender));
-    if let Err(err) = launch_open_tree(android_app, import_foreign_trees) {
+    if let Err(err) = launch_open_tree(android_app, import_foreign_trees, force_import_tree) {
         log::warn!("saf: launchOpenTree failed: {err:#}");
+        if let Some(Pending::Paths(sender)) = PENDING.lock().unwrap().take() {
+            let _ = sender.send(Err(err));
+        }
+    }
+}
+
+/// Launch `ACTION_OPEN_DOCUMENT` and resolve the sender with the picked
+/// file path, or `Ok(None)` if the user cancelled.
+pub(crate) fn pick_file(android_app: &AndroidApp, sender: PendingPathsSender) {
+    log::info!("saf: pick_file requested");
+    set_pending(Pending::Paths(sender));
+    if let Err(err) = launch_open_document(android_app) {
+        log::warn!("saf: launchOpenDocument failed: {err:#}");
         if let Some(Pending::Paths(sender)) = PENDING.lock().unwrap().take() {
             let _ = sender.send(Err(err));
         }
@@ -96,23 +111,43 @@ fn send_cancel(p: Option<Pending>) {
     }
 }
 
-fn launch_open_tree(android_app: &AndroidApp, import_foreign_trees: bool) -> Result<()> {
+fn launch_open_tree(
+    android_app: &AndroidApp,
+    import_foreign_trees: bool,
+    force_import_tree: bool,
+) -> Result<()> {
     log::info!(
-        "saf: calling MainActivity.launchOpenTree(import_foreign_trees={})",
-        import_foreign_trees
+        "saf: calling MainActivity.launchOpenTree(import_foreign_trees={} force_import_tree={})",
+        import_foreign_trees,
+        force_import_tree
     );
     let vm = unsafe { JavaVM::from_raw(android_app.vm_as_ptr().cast())? };
     let mut env = vm.attach_current_thread()?;
     let activity = unsafe { JObject::from_raw(android_app.activity_as_ptr() as _) };
     let import_foreign_trees: jboolean = if import_foreign_trees { 1 } else { 0 };
+    let force_import_tree: jboolean = if force_import_tree { 1 } else { 0 };
     let result = env.call_method(
         &activity,
         "launchOpenTree",
-        "(Z)V",
-        &[JValue::Bool(import_foreign_trees)],
+        "(ZZ)V",
+        &[
+            JValue::Bool(import_foreign_trees),
+            JValue::Bool(force_import_tree),
+        ],
     );
     clear_java_exception(&mut env, "MainActivity.launchOpenTree", result)?;
     log::info!("saf: MainActivity.launchOpenTree() returned");
+    Ok(())
+}
+
+fn launch_open_document(android_app: &AndroidApp) -> Result<()> {
+    log::info!("saf: calling MainActivity.launchOpenDocument()");
+    let vm = unsafe { JavaVM::from_raw(android_app.vm_as_ptr().cast())? };
+    let mut env = vm.attach_current_thread()?;
+    let activity = unsafe { JObject::from_raw(android_app.activity_as_ptr() as _) };
+    let result = env.call_method(&activity, "launchOpenDocument", "()V", &[]);
+    clear_java_exception(&mut env, "MainActivity.launchOpenDocument", result)?;
+    log::info!("saf: MainActivity.launchOpenDocument() returned");
     Ok(())
 }
 
@@ -195,6 +230,9 @@ fn handle_tree_result(uri: &str) -> Result<Option<PathBuf>> {
 fn handle_document_result(uri: &str) -> Result<Option<PathBuf>> {
     if uri.is_empty() {
         return Ok(None);
+    }
+    if let Some(message) = uri.strip_prefix("zdroid-error:") {
+        anyhow::bail!("{}", percent_decode(message));
     }
     if let Some(rest) =
         uri.strip_prefix("content://com.android.externalstorage.documents/document/")

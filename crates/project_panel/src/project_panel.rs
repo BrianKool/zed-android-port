@@ -349,6 +349,10 @@ actions!(
         NewDirectory,
         /// Creates a new file.
         NewFile,
+        /// Imports an external file into the selected folder.
+        ImportFile,
+        /// Imports an external folder into the selected folder.
+        ImportFolder,
         /// Copies the selected file or directory.
         Copy,
         /// Duplicates the selected file or directory.
@@ -1122,6 +1126,11 @@ impl ProjectPanel {
                     } else {
                         menu.action("New File", Box::new(NewFile))
                             .action("New Folder", Box::new(NewDirectory))
+                            .when(cfg!(target_os = "android") && is_local, |menu| {
+                                menu.separator()
+                                    .action("Import File...", Box::new(ImportFile))
+                                    .action("Import Folder...", Box::new(ImportFolder))
+                            })
                             .separator()
                             .when(is_local, |menu| {
                                 menu.action(
@@ -3688,6 +3697,84 @@ impl ProjectPanel {
         self.paste(&Paste {}, window, cx);
     }
 
+    fn import_file(&mut self, _: &ImportFile, window: &mut Window, cx: &mut Context<Self>) {
+        self.import_external_paths(false, window, cx);
+    }
+
+    fn import_folder(&mut self, _: &ImportFolder, window: &mut Window, cx: &mut Context<Self>) {
+        self.import_external_paths(true, window, cx);
+    }
+
+    fn import_external_paths(&mut self, folder: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(entry_id) = self
+            .selection
+            .map(|selection| selection.entry_id)
+            .or(self.state.last_worktree_root_id)
+        else {
+            return;
+        };
+
+        let paths = cx.prompt_for_paths(PathPromptOptions {
+            files: true,
+            directories: folder,
+            multiple: false,
+            prompt: Some(if folder {
+                "Import Folder".into()
+            } else {
+                "Import File".into()
+            }),
+        });
+
+        cx.spawn_in(window, async move |this, cx| match paths.await {
+            Ok(Ok(Some(paths))) if !paths.is_empty() => {
+                this.update_in(cx, |this, window, cx| {
+                    this.drop_external_files(&paths, entry_id, window, cx);
+                })
+                .ok();
+            }
+            Ok(Ok(_)) => {}
+            Ok(Err(error)) => {
+                this.update(cx, |this, cx| {
+                    let message = format!("Import failed: {error:#}");
+                    let toast = StatusToast::new(message, cx, |this, _| {
+                        this.icon(
+                            Icon::new(IconName::XCircle)
+                                .size(IconSize::Small)
+                                .color(Color::Error),
+                        )
+                        .dismiss_button(true)
+                    });
+                    this.workspace
+                        .update(cx, |workspace, cx| {
+                            workspace.toggle_status_toast(toast, cx);
+                        })
+                        .ok();
+                })
+                .ok();
+            }
+            Err(error) => {
+                this.update(cx, |this, cx| {
+                    let message = format!("Import picker failed: {error}");
+                    let toast = StatusToast::new(message, cx, |this, _| {
+                        this.icon(
+                            Icon::new(IconName::XCircle)
+                                .size(IconSize::Small)
+                                .color(Color::Error),
+                        )
+                        .dismiss_button(true)
+                    });
+                    this.workspace
+                        .update(cx, |workspace, cx| {
+                            workspace.toggle_status_toast(toast, cx);
+                        })
+                        .ok();
+                })
+                .ok();
+            }
+        })
+        .detach();
+    }
+
     fn copy_path(
         &mut self,
         _: &zed_actions::workspace::CopyPath,
@@ -4621,6 +4708,22 @@ impl ProjectPanel {
 
         cx.spawn_in(window, async move |this, cx| {
             async move {
+                let notification_id =
+                    workspace::notifications::NotificationId::Named("project-panel-import".into());
+                this.update(cx, |this, cx| {
+                    this.workspace
+                        .update(cx, |workspace, cx| {
+                            workspace.show_toast(
+                                workspace::Toast::new(
+                                    notification_id.clone(),
+                                    "Importing into project...",
+                                ),
+                                cx,
+                            );
+                        })
+                        .ok();
+                })?;
+
                 for (filename, original_path) in &paths_to_replace {
                     let prompt_message = format!(
                         concat!(
@@ -4650,6 +4753,19 @@ impl ProjectPanel {
                 }
 
                 if paths.is_empty() {
+                    this.update(cx, |this, cx| {
+                        this.workspace
+                            .update(cx, |workspace, cx| {
+                                workspace.show_toast(
+                                    workspace::Toast::new(
+                                        notification_id.clone(),
+                                        "Import canceled",
+                                    ),
+                                    cx,
+                                );
+                            })
+                            .ok();
+                    })?;
                     return Ok(());
                 }
 
@@ -4660,9 +4776,33 @@ impl ProjectPanel {
                     )
                 });
 
-                let opened_entries: Vec<_> = task
-                    .await
-                    .with_context(|| "failed to copy external paths")?;
+                let opened_entries: Vec<_> = match task.await {
+                    Ok(entries) => entries,
+                    Err(error) => {
+                        this.update(cx, |this, cx| {
+                            let toast = StatusToast::new(
+                                format!("Import failed: {error:#}"),
+                                cx,
+                                |this, _| {
+                                    this.icon(
+                                        Icon::new(IconName::XCircle)
+                                            .size(IconSize::Small)
+                                            .color(Color::Error),
+                                    )
+                                    .dismiss_button(true)
+                                },
+                            );
+                            this.workspace
+                                .update(cx, |workspace, cx| {
+                                    workspace.toggle_status_toast(toast, cx);
+                                })
+                                .ok();
+                        })
+                        .ok();
+                        return Ok(());
+                    }
+                };
+                let imported_count = opened_entries.len();
                 this.update_in(cx, |this, window, cx| {
                     let mut did_open = false;
                     if open_file_after_drop && !opened_entries.is_empty() {
@@ -4697,6 +4837,17 @@ impl ProjectPanel {
                         .collect();
 
                     this.undo_manager.record(changes).log_err();
+                    this.workspace
+                        .update(cx, |workspace, cx| {
+                            workspace.show_toast(
+                                workspace::Toast::new(
+                                    notification_id,
+                                    format!("Imported {imported_count} item(s) into project"),
+                                ),
+                                cx,
+                            );
+                        })
+                        .ok();
                 })
             }
             .log_err()
@@ -7098,6 +7249,8 @@ impl Render for ProjectPanel {
                         el.on_action(cx.listener(Self::reveal_in_finder))
                             .on_action(cx.listener(Self::open_system))
                             .on_action(cx.listener(Self::open_in_terminal))
+                            .on_action(cx.listener(Self::import_file))
+                            .on_action(cx.listener(Self::import_folder))
                     },
                 )
                 .when(project.is_via_remote_server(), |el| {

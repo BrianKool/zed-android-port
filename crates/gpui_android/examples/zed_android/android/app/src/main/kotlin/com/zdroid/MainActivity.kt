@@ -188,6 +188,7 @@ class MainActivity : GameActivity(), ImeHost {
     private var splashRemoved: Boolean = false
     private var importOverlay: FrameLayout? = null
     private var openTreeImportsForeignProviders: Boolean = false
+    private var openTreeForceImport: Boolean = false
 
     /// Focusable invisible view that owns the IME `InputConnection`.
     /// Installed in `onCreate`. Rust signals show/hide via JNI calls
@@ -995,7 +996,7 @@ class MainActivity : GameActivity(), ImeHost {
             .start()
     }
 
-    private fun showProjectImportOverlay() {
+    private fun showProjectImportOverlay(message: String = "Importing project into Zdroid...") {
         runOnUiThread {
             if (importOverlay != null) return@runOnUiThread
             val density = resources.displayMetrics.density
@@ -1026,7 +1027,7 @@ class MainActivity : GameActivity(), ImeHost {
                 isIndeterminate = true
             }
             val label = TextView(this).apply {
-                text = "Importing project into Zdroid..."
+                text = message
                 setTextColor(0xFFE6E6E6.toInt())
                 textSize = 16f
                 gravity = android.view.Gravity.CENTER
@@ -1361,10 +1362,14 @@ class MainActivity : GameActivity(), ImeHost {
         }
     }
 
-    fun launchOpenTree(importForeignProviders: Boolean) {
-        Log.i(TAG, "launchOpenTree(importForeignProviders=$importForeignProviders) invoked")
+    fun launchOpenTree(importForeignProviders: Boolean, forceImport: Boolean) {
+        Log.i(
+            TAG,
+            "launchOpenTree(importForeignProviders=$importForeignProviders forceImport=$forceImport) invoked"
+        )
         runOnUiThread {
             openTreeImportsForeignProviders = importForeignProviders
+            openTreeForceImport = forceImport
             val intent = Intent(Intent.ACTION_OPEN_DOCUMENT_TREE).apply {
                 addFlags(
                     Intent.FLAG_GRANT_READ_URI_PERMISSION or
@@ -1389,6 +1394,36 @@ class MainActivity : GameActivity(), ImeHost {
             } catch (t: Throwable) {
                 Log.e(TAG, "OPEN_DOCUMENT_TREE dispatch threw", t)
                 openTreeImportsForeignProviders = false
+                openTreeForceImport = false
+                onPickerResult("")
+            }
+        }
+    }
+
+    @Suppress("unused") // called from Rust via JNI
+    fun launchOpenDocument() {
+        Log.i(TAG, "launchOpenDocument() invoked")
+        runOnUiThread {
+            val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+                addCategory(Intent.CATEGORY_OPENABLE)
+                type = "*/*"
+                addFlags(
+                    Intent.FLAG_GRANT_READ_URI_PERMISSION or
+                        Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION
+                )
+                putExtra(
+                    DocumentsContract.EXTRA_INITIAL_URI,
+                    DocumentsContract.buildRootUri(
+                        "com.android.externalstorage.documents",
+                        "primary"
+                    )
+                )
+            }
+            try {
+                startActivityForResult(intent, REQ_OPEN_DOCUMENT)
+                Log.i(TAG, "startActivityForResult OPEN_DOCUMENT dispatched")
+            } catch (t: Throwable) {
+                Log.e(TAG, "OPEN_DOCUMENT dispatch threw", t)
                 onPickerResult("")
             }
         }
@@ -1614,13 +1649,18 @@ class MainActivity : GameActivity(), ImeHost {
 
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
-        if (requestCode != REQ_OPEN_TREE && requestCode != REQ_CREATE_DOCUMENT) {
+        if (
+            requestCode != REQ_OPEN_TREE &&
+            requestCode != REQ_OPEN_DOCUMENT &&
+            requestCode != REQ_CREATE_DOCUMENT
+        ) {
             return
         }
         if (resultCode != Activity.RESULT_OK) {
             Log.i(TAG, "picker cancelled (req=$requestCode resultCode=$resultCode)")
             if (requestCode == REQ_OPEN_TREE) {
                 openTreeImportsForeignProviders = false
+                openTreeForceImport = false
             }
             onPickerResult("")
             return
@@ -1638,12 +1678,18 @@ class MainActivity : GameActivity(), ImeHost {
             }
         }
         val shouldImportTree = requestCode == REQ_OPEN_TREE &&
-            openTreeImportsForeignProviders &&
+            (openTreeImportsForeignProviders || openTreeForceImport) &&
             uri != null &&
-            !isDirectlyAccessibleTree(uri)
+            (openTreeForceImport || !isDirectlyAccessibleTree(uri))
+        val shouldImportDocument = requestCode == REQ_OPEN_DOCUMENT &&
+            uri != null &&
+            !isZdroidDocument(uri)
         openTreeImportsForeignProviders = false
+        openTreeForceImport = false
         if (shouldImportTree) {
             importAndReturnTree(uri)
+        } else if (shouldImportDocument) {
+            importAndReturnDocument(uri)
         } else {
             onPickerResult(uri?.toString() ?: "")
         }
@@ -1659,10 +1705,39 @@ class MainActivity : GameActivity(), ImeHost {
         uri.authority == "com.android.externalstorage.documents" ||
             uri.authority == "com.zdroid.documents"
 
+    private fun isZdroidDocument(uri: Uri): Boolean = uri.authority == "com.zdroid.documents"
+
+    private fun importAndReturnDocument(documentUri: Uri) {
+        showProjectImportOverlay("Importing file into Zdroid...")
+        Thread({
+            try {
+                val imported = importDocumentFile(documentUri)
+                val encodedPath = Uri.encode(imported.absolutePath)
+                Log.i(TAG, "Imported SAF document $documentUri to ${imported.absolutePath}")
+                runOnUiThread {
+                    Toast.makeText(this, "File imported", Toast.LENGTH_SHORT).show()
+                }
+                onPickerResult("content://com.zdroid.documents/document/$encodedPath")
+            } catch (t: Throwable) {
+                Log.e(TAG, "Failed to import SAF document $documentUri", t)
+                runOnUiThread {
+                    Toast.makeText(
+                        this,
+                        "Could not import file: ${t.message ?: "unknown error"}",
+                        Toast.LENGTH_LONG,
+                    ).show()
+                }
+                onPickerResult("zdroid-error:${Uri.encode(t.message ?: t.javaClass.simpleName)}")
+            } finally {
+                hideProjectImportOverlay()
+            }
+        }, "zdroid-saf-file-import").start()
+    }
+
     /** Import a foreign SAF tree into Zdroid's private home, then return it
      * through our own provider URI so the Rust side can open it normally. */
     private fun importAndReturnTree(treeUri: Uri) {
-        showProjectImportOverlay()
+        showProjectImportOverlay("Importing folder into Zdroid...")
         Thread({
             try {
                 val imported = importDocumentTree(treeUri)
@@ -1704,6 +1779,19 @@ class MainActivity : GameActivity(), ImeHost {
         } catch (t: Throwable) {
             destination.deleteRecursively()
             throw t
+        }
+        return destination
+    }
+
+    private fun importDocumentFile(documentUri: Uri): File {
+        val displayName = queryDisplayName(documentUri).ifBlank { "imported-file" }
+        val safeName = sanitizeDocumentName(displayName)
+        val importsRoot = File(filesDir, "home/imported-files").apply { mkdirs() }
+        val destination = uniqueDestination(importsRoot, safeName)
+        val input = contentResolver.openInputStream(documentUri)
+            ?: error("Could not read $displayName")
+        input.use { source ->
+            FileOutputStream(destination).use { sink -> source.copyTo(sink) }
         }
         return destination
     }
@@ -1777,6 +1865,7 @@ class MainActivity : GameActivity(), ImeHost {
         private const val REQ_CREATE_DOCUMENT = 0xA2
         private const val REQ_STORAGE_PERMS = 0xA3
         private const val REQ_NOTIFICATION_PERMISSION = 0xA4
+        private const val REQ_OPEN_DOCUMENT = 0xA5
         /// Software cursor side length in dp. Scaled by display
         /// density at instantiation time to give the sprite a
         /// consistent visual size across devices.

@@ -377,8 +377,7 @@ impl TouchState {
                 let position = primary.pos;
                 let click_count = if self.last_tap_at.is_some_and(|last_tap| {
                     last_tap.elapsed() <= DOUBLE_TAP_TIMEOUT
-                        && (position - self.last_tap_position).magnitude()
-                            <= DOUBLE_TAP_SLOP_PX
+                        && (position - self.last_tap_position).magnitude() <= DOUBLE_TAP_SLOP_PX
                 }) {
                     self.current_click_count.saturating_add(1).min(2)
                 } else {
@@ -431,6 +430,7 @@ impl TouchState {
                         down_pos: new_pos,
                         last_pos: new_pos,
                         accumulated_motion: 0.0,
+                        click_count: 1,
                     },
                 );
 
