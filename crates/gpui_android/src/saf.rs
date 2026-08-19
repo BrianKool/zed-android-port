@@ -30,7 +30,8 @@ type PendingPathsSender = oneshot::Sender<Result<Option<Vec<PathBuf>>>>;
 type PendingPathSender = oneshot::Sender<Result<Option<PathBuf>>>;
 
 enum Pending {
-    Paths(PendingPathsSender),
+    TreePaths(PendingPathsSender),
+    FilePaths(PendingPathsSender),
     NewPath(PendingPathSender),
 }
 
@@ -49,10 +50,10 @@ pub(crate) fn pick_folder(
         import_foreign_trees,
         force_import_tree
     );
-    set_pending(Pending::Paths(sender));
+    set_pending(Pending::TreePaths(sender));
     if let Err(err) = launch_open_tree(android_app, import_foreign_trees, force_import_tree) {
         log::warn!("saf: launchOpenTree failed: {err:#}");
-        if let Some(Pending::Paths(sender)) = PENDING.lock().unwrap().take() {
+        if let Some(Pending::TreePaths(sender)) = PENDING.lock().unwrap().take() {
             let _ = sender.send(Err(err));
         }
     }
@@ -62,10 +63,10 @@ pub(crate) fn pick_folder(
 /// file path, or `Ok(None)` if the user cancelled.
 pub(crate) fn pick_file(android_app: &AndroidApp, sender: PendingPathsSender) {
     log::info!("saf: pick_file requested");
-    set_pending(Pending::Paths(sender));
+    set_pending(Pending::FilePaths(sender));
     if let Err(err) = launch_open_document(android_app) {
         log::warn!("saf: launchOpenDocument failed: {err:#}");
-        if let Some(Pending::Paths(sender)) = PENDING.lock().unwrap().take() {
+        if let Some(Pending::FilePaths(sender)) = PENDING.lock().unwrap().take() {
             let _ = sender.send(Err(err));
         }
     }
@@ -101,7 +102,7 @@ fn set_pending(pending: Pending) {
 
 fn send_cancel(p: Option<Pending>) {
     match p {
-        Some(Pending::Paths(s)) => {
+        Some(Pending::TreePaths(s) | Pending::FilePaths(s)) => {
             let _ = s.send(Ok(None));
         }
         Some(Pending::NewPath(s)) => {
@@ -201,8 +202,11 @@ pub extern "system" fn Java_com_zdroid_MainActivity_onPickerResult<'local>(
     log::info!("saf: onPickerResult uri={uri:?}");
     let pending = PENDING.lock().unwrap().take();
     match pending {
-        Some(Pending::Paths(sender)) => {
+        Some(Pending::TreePaths(sender)) => {
             let _ = sender.send(handle_tree_result(&uri).map(|p| p.map(|p| vec![p])));
+        }
+        Some(Pending::FilePaths(sender)) => {
+            let _ = sender.send(handle_document_result(&uri).map(|p| p.map(|p| vec![p])));
         }
         Some(Pending::NewPath(sender)) => {
             let _ = sender.send(handle_document_result(&uri));
