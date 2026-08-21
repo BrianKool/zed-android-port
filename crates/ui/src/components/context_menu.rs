@@ -1936,6 +1936,18 @@ impl ContextMenu {
 
         div()
             .id(("context-menu-child", ix))
+            .when(cfg!(target_os = "android"), |item| {
+                item.on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |menu, _, _, cx| {
+                        // Touch does not emit a desktop hover event. Move the
+                        // keyboard selection to the touched row so the first
+                        // item and tapped item are not both drawn as active.
+                        menu.selected_index = Some(ix);
+                        cx.notify();
+                    }),
+                )
+            })
             .when_some(documentation_aside.clone(), |this, documentation_aside| {
                 this.occlude()
                     .on_hover(cx.listener(move |menu, hovered, _, cx| {

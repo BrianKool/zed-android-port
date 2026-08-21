@@ -2773,6 +2773,18 @@ impl SettingsWindow {
             if settings_ui_file.is_server() {
                 continue;
             }
+            if cfg!(target_os = "android")
+                && matches!(
+                    &settings_ui_file,
+                    SettingsUiFile::Project((_, path)) if !path.is_empty()
+                )
+            {
+                // Nested .zed/settings.json files are valid setting scopes, but
+                // exposing every fixture/subdirectory as a top-level file makes
+                // the phone Settings UI look as if Zdroid generated sections.
+                // Keep the project-root scope available on Android.
+                continue;
+            }
 
             if let Some(worktree_id) = settings_ui_file.worktree_id() {
                 let directory_name = all_projects(self.original_window.as_ref(), cx)

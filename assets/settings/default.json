@@ -255,6 +255,13 @@
   // Keep Android agent and setup-terminal work running when Zdroid-B is
   // backgrounded. A persistent notification is shown while enabled.
   "background_execution": true,
+  // Notify when all active Zdroid-B tasks have completed.
+  "notify_task_completion": true,
+  // Notify when an AI agent is waiting for your answer.
+  "notify_agent_attention": true,
+  // Alert while Zdroid-B is visible. Disabled by default to avoid duplicate
+  // vibration while the user is already looking at the task or conversation.
+  "notify_while_app_visible": false,
   // Whether the cursor blinks in the editor.
   "cursor_blink": true,
   // Cursor shape for the default editor.

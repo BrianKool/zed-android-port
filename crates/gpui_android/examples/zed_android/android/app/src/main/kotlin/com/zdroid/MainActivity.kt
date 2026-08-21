@@ -65,6 +65,18 @@ class MainActivity : GameActivity(), ImeHost {
     private var initialPermissionFlowSettled = false
     private var initialNotificationStage = 0
 
+    override fun onStart() {
+        super.onStart()
+        isAppVisible = true
+        AgentForegroundService.onAppVisibilityChanged(this, true)
+    }
+
+    override fun onStop() {
+        isAppVisible = false
+        AgentForegroundService.onAppVisibilityChanged(this, false)
+        super.onStop()
+    }
+
     @Suppress("unused")
     fun startAgentBackgroundTask(taskId: String, description: String) {
         runOnUiThread {
@@ -1411,6 +1423,20 @@ class MainActivity : GameActivity(), ImeHost {
         }
     }
 
+    @Suppress("unused")
+    fun setNotificationPreferences(
+        taskCompletion: Boolean,
+        agentAttention: Boolean,
+        whileAppVisible: Boolean,
+    ) {
+        AgentForegroundService.setNotificationPreferences(
+            this,
+            taskCompletion,
+            agentAttention,
+            whileAppVisible,
+        )
+    }
+
     @Suppress("unused") // called from Rust via JNI
     fun launchOpenDocument() {
         Log.i(TAG, "launchOpenDocument() invoked")
@@ -1881,6 +1907,10 @@ class MainActivity : GameActivity(), ImeHost {
     private external fun onPickerResult(uriString: String)
 
     companion object {
+        @Volatile
+        var isAppVisible: Boolean = false
+            private set
+
         private const val TAG = "zed_android_saf"
         private const val TAG_CAPTURE = "zed_android_capture"
         private const val TAG_UPDATE = "zed_android_update"

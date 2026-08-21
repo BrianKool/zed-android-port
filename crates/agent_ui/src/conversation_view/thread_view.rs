@@ -1084,16 +1084,17 @@ impl ThreadView {
         this
     }
 
-    /// Schedule a throttled save of the thread state (draft prompt, scroll position, etc.).
-    /// Multiple calls within `SERIALIZATION_THROTTLE_TIME` are coalesced into a single save.
+    /// Schedule a throttled save of draft and viewport state. This uses the
+    /// native agent's persistence path directly so a scroll does not emit a
+    /// model notification and redraw the active conversation.
     fn schedule_save(&mut self, cx: &mut Context<Self>) {
         self._save_task = Some(cx.spawn(async move |this, cx| {
             cx.background_executor()
                 .timer(SERIALIZATION_THROTTLE_TIME)
                 .await;
             this.update(cx, |this, cx| {
-                if let Some(thread) = this.as_native_thread(cx) {
-                    thread.update(cx, |_thread, cx| cx.notify());
+                if let Some(connection) = this.as_native_connection(cx) {
+                    connection.save_session_ui_state(&this.session_id, cx);
                 }
             })
             .ok();
@@ -7710,16 +7711,9 @@ impl ThreadView {
 
         let entry_view_state = self.entry_view_state.read(cx);
         let (is_open, is_constrained) = entry_view_state.thinking_block_state(key, cx);
-        let should_auto_scroll = entry_view_state.is_auto_expanded_thinking_block(key);
         let scroll_handle = entry_view_state
             .entry(entry_ix)
             .and_then(|entry| entry.scroll_handle_for_assistant_message_chunk(chunk_ix));
-
-        if should_auto_scroll {
-            if let Some(ref handle) = scroll_handle {
-                handle.scroll_to_bottom();
-            }
-        }
 
         let panel_bg = cx.theme().colors().panel_background;
 
@@ -11194,8 +11188,6 @@ impl ThreadView {
             .entry(subagent_view.session_id.clone())
             .or_default()
             .clone();
-
-        scroll_handle.scroll_to_bottom();
 
         let rendered_entries: Vec<AnyElement> = entries
             .get(entry_range)

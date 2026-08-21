@@ -115,6 +115,8 @@ impl Focusable for StatusBar {
 impl Render for StatusBar {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let sidebar = SidebarStatus::query(&self.multi_workspace, cx);
+        let compact_android =
+            cfg!(target_os = "android") && window.viewport_size().width.as_f32() < 600.0;
 
         h_flex()
             .id("status-bar")
@@ -151,6 +153,7 @@ impl Render for StatusBar {
             .justify_between()
             .gap(DynamicSpacing::Base08.rems(cx))
             .p(DynamicSpacing::Base04.rems(cx))
+            .when(compact_android, |el| el.pb(DynamicSpacing::Base08.rems(cx)))
             .bg(cx.theme().colors().status_bar_background)
             .map(|el| match window.window_decorations() {
                 Decorations::Server => el,

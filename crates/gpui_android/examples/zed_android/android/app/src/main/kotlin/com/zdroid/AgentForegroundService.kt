@@ -27,6 +27,7 @@ class AgentForegroundService : Service() {
 
     override fun onCreate() {
         super.onCreate()
+        activeInstance = this
         ensureNotificationChannels(this)
     }
 
@@ -69,7 +70,7 @@ class AgentForegroundService : Service() {
                 activeTasks[taskId] = description
                 startForeground(RUNNING_NOTIFICATION_ID, runningNotification())
                 if (isWaitingForUser(description)) {
-                    if (previousDescription != description) {
+                    if (previousDescription != description && shouldNotifyAttention()) {
                         notificationManager.notify(
                             attentionNotificationId(taskId),
                             attentionNotification(description),
@@ -88,7 +89,7 @@ class AgentForegroundService : Service() {
                 }
                 if (wasActive && !successful) batchHadFailure = true
                 if (activeTasks.isEmpty()) {
-                    if (wasActive) {
+                    if (wasActive && shouldNotifyCompletion()) {
                         notificationManager.notify(
                             COMPLETION_NOTIFICATION_ID,
                             completionNotification(
@@ -128,6 +129,7 @@ class AgentForegroundService : Service() {
     }
 
     override fun onDestroy() {
+        if (activeInstance === this) activeInstance = null
         releaseSessionLocks()
         super.onDestroy()
     }
@@ -218,6 +220,15 @@ class AgentForegroundService : Service() {
     private fun isWaitingForUser(description: String): Boolean =
         description.contains("waiting", ignoreCase = true)
 
+    private fun alertsAllowedWhileVisible(): Boolean =
+        !MainActivity.isAppVisible || isNotifyWhileAppVisibleEnabled(this)
+
+    private fun shouldNotifyAttention(): Boolean =
+        isAgentAttentionEnabled(this) && alertsAllowedWhileVisible()
+
+    private fun shouldNotifyCompletion(): Boolean =
+        isTaskCompletionEnabled(this) && alertsAllowedWhileVisible()
+
     private fun attentionNotificationId(taskId: String): Int =
         ATTENTION_NOTIFICATION_ID_BASE + (taskId.hashCode() and 0x0fff)
 
@@ -291,6 +302,10 @@ class AgentForegroundService : Service() {
         private const val PREFERENCES = "zdroid_background"
         private const val PREF_ENABLED = "enabled"
         private const val PREF_WAKE_LOCK = "wake_lock"
+        private const val PREF_TASK_COMPLETION = "notify_task_completion"
+        private const val PREF_AGENT_ATTENTION = "notify_agent_attention"
+        private const val PREF_WHILE_APP_VISIBLE = "notify_while_app_visible"
+        @Volatile private var activeInstance: AgentForegroundService? = null
 
         fun isBackgroundExecutionEnabled(context: Context): Boolean =
             context.getSharedPreferences(PREFERENCES, Context.MODE_PRIVATE)
@@ -385,6 +400,56 @@ class AgentForegroundService : Service() {
                     setShowBadge(true)
                 },
             )
+        }
+
+        private fun isTaskCompletionEnabled(context: Context): Boolean =
+            context.getSharedPreferences(PREFERENCES, Context.MODE_PRIVATE)
+                .getBoolean(PREF_TASK_COMPLETION, true)
+
+        private fun isAgentAttentionEnabled(context: Context): Boolean =
+            context.getSharedPreferences(PREFERENCES, Context.MODE_PRIVATE)
+                .getBoolean(PREF_AGENT_ATTENTION, true)
+
+        private fun isNotifyWhileAppVisibleEnabled(context: Context): Boolean =
+            context.getSharedPreferences(PREFERENCES, Context.MODE_PRIVATE)
+                .getBoolean(PREF_WHILE_APP_VISIBLE, false)
+
+        fun setNotificationPreferences(
+            context: Context,
+            taskCompletion: Boolean,
+            agentAttention: Boolean,
+            whileAppVisible: Boolean,
+        ) {
+            context.getSharedPreferences(PREFERENCES, Context.MODE_PRIVATE)
+                .edit()
+                .putBoolean(PREF_TASK_COMPLETION, taskCompletion)
+                .putBoolean(PREF_AGENT_ATTENTION, agentAttention)
+                .putBoolean(PREF_WHILE_APP_VISIBLE, whileAppVisible)
+                .apply()
+
+            val manager = context.getSystemService(NotificationManager::class.java)
+            if (!taskCompletion || (!whileAppVisible && MainActivity.isAppVisible)) {
+                manager.cancel(COMPLETION_NOTIFICATION_ID)
+            }
+            if (!agentAttention || (!whileAppVisible && MainActivity.isAppVisible)) {
+                activeInstance?.activeTasks?.keys?.forEach { taskId ->
+                    manager.cancel(
+                        ATTENTION_NOTIFICATION_ID_BASE + (taskId.hashCode() and 0x0fff),
+                    )
+                }
+            }
+        }
+
+        fun onAppVisibilityChanged(context: Context, visible: Boolean) {
+            if (!visible || isNotifyWhileAppVisibleEnabled(context)) return
+
+            val manager = context.getSystemService(NotificationManager::class.java)
+            manager.cancel(COMPLETION_NOTIFICATION_ID)
+            activeInstance?.activeTasks?.keys?.forEach { taskId ->
+                manager.cancel(
+                    ATTENTION_NOTIFICATION_ID_BASE + (taskId.hashCode() and 0x0fff),
+                )
+            }
         }
     }
 }

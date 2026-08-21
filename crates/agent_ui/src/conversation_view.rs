@@ -1139,6 +1139,15 @@ impl ConversationView {
         self.reset(window, cx);
     }
 
+    fn force_refresh_connection(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let key = self.connection_key.clone();
+        let server = self.agent.clone();
+        self.connection_store.update(cx, |store, cx| {
+            store.force_restart_connection(key, server, cx);
+        });
+        self.reset(window, cx);
+    }
+
     fn request_elicitation_subscription(
         connection: &Rc<dyn AgentConnection>,
         cx: &mut Context<Self>,
@@ -3844,6 +3853,20 @@ impl Render for ConversationView {
                                                 |bar, delta| bar.opacity(delta),
                                             ),
                                     ),
+                            )
+                            .child(
+                                Label::new(
+                                    "Signed in from the terminal? Refresh to load the latest credentials.",
+                                )
+                                .size(LabelSize::Small)
+                                .color(Color::Muted),
+                            )
+                            .child(
+                                Button::new("refresh-agent-credentials", "Refresh Credentials")
+                                    .style(ButtonStyle::Outlined)
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.force_refresh_connection(window, cx);
+                                    })),
                             ),
                     )
                     .into_any()

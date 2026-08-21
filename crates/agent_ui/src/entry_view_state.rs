@@ -109,10 +109,6 @@ impl EntryViewState {
         self.auto_expanded_thinking_block = None;
     }
 
-    pub(crate) fn is_auto_expanded_thinking_block(&self, key: (usize, usize)) -> bool {
-        self.auto_expanded_thinking_block == Some(key)
-    }
-
     pub(crate) fn auto_expand_streaming_thought(&mut self, thread: &AcpThread, cx: &App) -> bool {
         let thinking_display = AgentSettings::get_global(cx).thinking_display;
 

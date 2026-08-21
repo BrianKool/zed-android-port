@@ -432,6 +432,7 @@ fn general_page(cx: &App) -> SettingsPage {
                 metadata: None,
                 files: USER,
             }),
+            SettingsPageItem::SectionHeader("Android Notifications"),
             SettingsPageItem::SettingItem(SettingItem {
                 title: "Background Execution",
                 description: "Keep Zdroid-B agent and setup-terminal tasks running while the app is backgrounded. Shows a persistent Android notification.",
@@ -443,6 +444,54 @@ fn general_page(cx: &App) -> SettingsPage {
                     },
                     write: |settings_content, value, _| {
                         settings_content.workspace.background_execution = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Task Completion",
+                description: "Notify when all active Zdroid-B tasks have finished.",
+                field: Box::new(SettingField {
+                    organization_override: None,
+                    json_path: Some("notify_task_completion"),
+                    pick: |settings_content| {
+                        settings_content.workspace.notify_task_completion.as_ref()
+                    },
+                    write: |settings_content, value, _| {
+                        settings_content.workspace.notify_task_completion = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Agent Needs Attention",
+                description: "Notify when an AI agent is waiting for your answer.",
+                field: Box::new(SettingField {
+                    organization_override: None,
+                    json_path: Some("notify_agent_attention"),
+                    pick: |settings_content| {
+                        settings_content.workspace.notify_agent_attention.as_ref()
+                    },
+                    write: |settings_content, value, _| {
+                        settings_content.workspace.notify_agent_attention = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Alert While App Is Visible",
+                description: "Allow task and agent alerts while Zdroid-B is already on screen.",
+                field: Box::new(SettingField {
+                    organization_override: None,
+                    json_path: Some("notify_while_app_visible"),
+                    pick: |settings_content| {
+                        settings_content.workspace.notify_while_app_visible.as_ref()
+                    },
+                    write: |settings_content, value, _| {
+                        settings_content.workspace.notify_while_app_visible = value;
                     },
                 }),
                 metadata: None,

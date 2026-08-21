@@ -99,6 +99,19 @@ pub struct WorkspaceSettingsContent {
     ///
     /// Default: true
     pub background_execution: Option<bool>,
+    /// Notify when all active Zdroid-B tasks have completed.
+    ///
+    /// Default: true
+    pub notify_task_completion: Option<bool>,
+    /// Notify when an AI agent is waiting for the user to answer.
+    ///
+    /// Default: true
+    pub notify_agent_attention: Option<bool>,
+    /// Allow completion and agent-attention alerts while Zdroid-B is visible.
+    /// The persistent background-session notification is unaffected.
+    ///
+    /// Default: false
+    pub notify_while_app_visible: Option<bool>,
     /// Aliases for the command palette. When you type a key in this map,
     /// it will be assumed to equal the value.
     ///

@@ -85,6 +85,50 @@ pub fn set_background_execution_enabled(enabled: bool) {
     }
 }
 
+pub fn set_notification_preferences(
+    task_completion: bool,
+    agent_attention: bool,
+    while_app_visible: bool,
+) {
+    let Some(android_app) = ANDROID_APP.get() else {
+        log::warn!("storage: AndroidApp unavailable for notification preferences");
+        return;
+    };
+    if let Err(err) = set_notification_preferences_inner(
+        android_app,
+        task_completion,
+        agent_attention,
+        while_app_visible,
+    ) {
+        log::warn!("storage: notification preferences failed: {err:#}");
+    }
+}
+
+fn set_notification_preferences_inner(
+    android_app: &AndroidApp,
+    task_completion: bool,
+    agent_attention: bool,
+    while_app_visible: bool,
+) -> Result<()> {
+    let vm = unsafe { JavaVM::from_raw(android_app.vm_as_ptr().cast())? };
+    let mut env = vm
+        .attach_current_thread()
+        .context("attach_current_thread for notification preferences")?;
+    let activity = unsafe { JObject::from_raw(android_app.activity_as_ptr() as _) };
+    env.call_method(
+        &activity,
+        "setNotificationPreferences",
+        "(ZZZ)V",
+        &[
+            task_completion.into(),
+            agent_attention.into(),
+            while_app_visible.into(),
+        ],
+    )
+    .context("MainActivity.setNotificationPreferences")?;
+    Ok(())
+}
+
 fn set_background_execution_enabled_inner(android_app: &AndroidApp, enabled: bool) -> Result<()> {
     let vm = unsafe { JavaVM::from_raw(android_app.vm_as_ptr().cast())? };
     let mut env = vm

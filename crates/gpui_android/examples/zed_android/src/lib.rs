@@ -1799,6 +1799,21 @@ fn boot(cx: &mut App, data_path: &std::path::Path, dns_resolver: AndroidDnsResol
     .detach();
     info!("zed_android: background execution observer registered");
 
+    let apply_notification_preferences = |cx: &gpui::App| {
+        let settings = workspace::WorkspaceSettings::get_global(cx);
+        gpui_android::storage::set_notification_preferences(
+            settings.notify_task_completion,
+            settings.notify_agent_attention,
+            settings.notify_while_app_visible,
+        );
+    };
+    apply_notification_preferences(cx);
+    cx.observe_global::<SettingsStore>(move |cx| {
+        apply_notification_preferences(cx);
+    })
+    .detach();
+    info!("zed_android: notification preferences observer registered");
+
     // Drive the vim-mode soft-keyboard routing gate. In a vim command
     // mode (Normal / Visual / operator-pending / Helix) soft-keyboard
     // text has to arrive as key *events* so vim's keymap reads `j`/`d`/

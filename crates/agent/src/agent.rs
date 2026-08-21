@@ -2082,6 +2082,22 @@ impl NativeAgentConnection {
             .map(|session| session.thread.clone())
     }
 
+    /// Persists draft and viewport state without notifying the active thread or
+    /// refreshing the thread archive. This keeps scroll-only saves from causing
+    /// a second render of a conversation that is already on screen.
+    pub fn save_session_ui_state(&self, session_id: &acp::SessionId, cx: &mut App) {
+        self.0.update(cx, |agent, cx| {
+            let Some(thread) = agent
+                .sessions
+                .get(session_id)
+                .map(|session| session.thread.clone())
+            else {
+                return;
+            };
+            agent.save_thread(thread, cx);
+        });
+    }
+
     /// Forwards to [`NativeAgent::ensure_skills_scan_started`]. The
     /// agent panel calls this from its three user-interaction trigger
     /// points (input box focus, slash-autocomplete invocation, and
