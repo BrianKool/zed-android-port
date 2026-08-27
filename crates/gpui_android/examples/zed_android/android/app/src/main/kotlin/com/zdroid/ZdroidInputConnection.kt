@@ -176,6 +176,18 @@ class ZdroidInputConnection(private val hostView: View) : BaseInputConnection(ho
         return true
     }
 
+    override fun performContextMenuAction(id: Int): Boolean {
+        val command = when (id) {
+            android.R.id.cut -> COMMAND_CUT
+            android.R.id.copy -> COMMAND_COPY
+            android.R.id.paste, android.R.id.pasteAsPlainText -> COMMAND_PASTE
+            else -> return super.performContextMenuAction(id)
+        }
+        Log.i(TAG, "IC.performContextMenuAction w=$windowId id=$id command=$command")
+        NativeBridge.nativeSelectionCommand(windowId, command)
+        return true
+    }
+
     // ---- Read path ----
     // The IME queries these to know the current text + selection
     // state so it can refine predictions, position candidates, etc.
@@ -225,4 +237,10 @@ class ZdroidInputConnection(private val hostView: View) : BaseInputConnection(ho
 
     private fun quote(s: String): String =
         "\"" + s.replace("\\", "\\\\").replace("\"", "\\\"") + "\""
+
+    companion object {
+        private const val COMMAND_CUT = 1
+        private const val COMMAND_COPY = 2
+        private const val COMMAND_PASTE = 3
+    }
 }

@@ -123,17 +123,17 @@ fn build_keystroke(code: Keycode, mut modifiers: Modifiers, capslock: Capslock) 
         } else {
             modifiers.shift
         };
-        let typed = if shifted {
-            apply_shift(ch)
-        } else {
-            ch
-        };
+        let typed = if shifted { apply_shift(ch) } else { ch };
         // X11 resolves `key` through the shift level: shift-8 IS "*". Leaving
         // `key` as the unshifted char makes symbol bindings unmatchable and
         // collides with the digit's own binding (vim's "*" search lost to
         // "8" = vim::Number, which wins on later-added precedence). Letters
         // keep the lowercase key; their shift survives the drop below.
-        let key = if typed.is_ascii_alphabetic() { ch } else { typed };
+        let key = if typed.is_ascii_alphabetic() {
+            ch
+        } else {
+            typed
+        };
         (key.to_string(), Some(typed.to_string()))
     } else {
         (format!("{code:?}").to_lowercase(), None)

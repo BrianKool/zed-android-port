@@ -645,6 +645,28 @@ pub struct ThreadView {
     pub(crate) thread_search_bar: Option<Entity<super::thread_search_bar::ThreadSearchBar>>,
     pub(crate) thread_search_visible: bool,
 }
+
+fn replace_included_personnel_context(text: &str, context: &str) -> String {
+    const OPEN: &str = "<included_personnel ";
+    const CLOSE: &str = "</included_personnel>";
+
+    let mut result = text.to_string();
+    while let Some(start) = result.find(OPEN) {
+        let Some(relative_end) = result[start..].find(CLOSE) else {
+            result.truncate(start);
+            break;
+        };
+        let end = start + relative_end + CLOSE.len();
+        result.replace_range(start..end, "");
+    }
+
+    let trimmed = result.trim_end();
+    if trimmed.is_empty() {
+        context.trim().to_string()
+    } else {
+        format!("{trimmed}\n\n{}", context.trim())
+    }
+}
 impl Focusable for ThreadView {
     fn focus_handle(&self, _cx: &App) -> FocusHandle {
         self.focus_handle.clone()
@@ -1130,8 +1152,14 @@ impl ThreadView {
         }
 
         match event {
-            MessageEditorEvent::Send => self.send(window, cx),
-            MessageEditorEvent::SendImmediately => self.interrupt_and_send(window, cx),
+            MessageEditorEvent::Send => {
+                self.send(window, cx);
+                self.set_editor_is_collapsed(true, cx);
+            }
+            MessageEditorEvent::SendImmediately => {
+                self.interrupt_and_send(window, cx);
+                self.set_editor_is_collapsed(true, cx);
+            }
             MessageEditorEvent::Cancel => {
                 if !self.close_thread_search(window, cx) {
                     self.cancel_generation(cx);
@@ -1286,8 +1314,9 @@ impl ThreadView {
                 });
             }
             ViewEvent::MessageEditorEvent(_editor, MessageEditorEvent::Focus) => {
-                if let Some(AgentThreadEntry::UserMessage(user_message)) =
-                    self.thread.read(cx).entries().get(event.entry_index)
+                if !cfg!(target_os = "android")
+                    && let Some(AgentThreadEntry::UserMessage(user_message)) =
+                        self.thread.read(cx).entries().get(event.entry_index)
                     && self.thread.read(cx).supports_truncate(cx)
                     && user_message.client_id.is_some()
                     && !self.is_subagent()
@@ -2020,7 +2049,7 @@ impl ThreadView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.is_loading_contents {
+        if self.is_loading_contents || cfg!(target_os = "android") {
             return;
         }
         let thread = self.thread.clone();
@@ -2988,12 +3017,54 @@ impl ThreadView {
 
     // thread stuff
 
-    pub fn restore_checkpoint(&mut self, client_id: &ClientUserMessageId, cx: &mut Context<Self>) {
-        self.thread
-            .update(cx, |thread, cx| {
-                thread.restore_checkpoint(client_id.clone(), cx)
-            })
-            .detach_and_log_err(cx);
+    pub fn restore_checkpoint(
+        &mut self,
+        client_id: &ClientUserMessageId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let changed_paths = self.thread.update(cx, |thread, cx| {
+            thread.checkpoint_changed_paths(client_id.clone(), cx)
+        });
+        let client_id = client_id.clone();
+        cx.spawn_in(window, async move |this, cx| {
+            let changed_paths = changed_paths.await?;
+            let detail = if changed_paths.is_empty() {
+                "No tracked file changes were detected. Messages and terminal sessions after this point will still be removed.".to_string()
+            } else {
+                let mut detail = String::from(
+                    "These files will be restored, and all later messages and terminal sessions will be removed:\n\n",
+                );
+                for path in changed_paths.iter().take(12) {
+                    detail.push_str("- ");
+                    detail.push_str(path);
+                    detail.push('\n');
+                }
+                if changed_paths.len() > 12 {
+                    detail.push_str(&format!("- ...and {} more\n", changed_paths.len() - 12));
+                }
+                detail
+            };
+            let prompt = cx.update(|window, cx| {
+                window.prompt(
+                    gpui::PromptLevel::Critical,
+                    "Rollback code and conversation to this point?",
+                    Some(&detail),
+                    &["Rollback", "Cancel"],
+                    cx,
+                )
+            })?;
+            if prompt.await == Ok(0) {
+                this.update(cx, |this, cx| {
+                    this.thread.update(cx, |thread, cx| {
+                        thread.restore_checkpoint(client_id, cx)
+                    })
+                })?
+                .await?;
+            }
+            anyhow::Ok(())
+        })
+        .detach_and_log_err(cx);
     }
 
     pub fn clear_thread_error(&mut self, cx: &mut Context<Self>) {
@@ -4401,7 +4472,7 @@ impl ThreadView {
                     div()
                         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                         .child(
-                            IconButton::new("restore-message-editor", IconName::ChevronUp)
+                            IconButton::new("restore-message-editor", IconName::ArrowUp)
                                 .icon_size(IconSize::Small)
                                 .icon_color(Color::Muted)
                                 .tooltip(Tooltip::text("Expand Message Editor"))
@@ -4449,6 +4520,13 @@ impl ThreadView {
                             .relative()
                             .w_full()
                             .min_h_0()
+                            .when(cfg!(target_os = "android"), |this| {
+                                this.on_mouse_down(MouseButton::Left, |_, window, _cx| {
+                                    if !window.soft_keyboard_visible() {
+                                        window.toggle_soft_keyboard();
+                                    }
+                                })
+                            })
                             .when(fills_container, |this| this.flex_1())
                             .pt_1()
                             .pr_2p5()
@@ -4459,17 +4537,26 @@ impl ThreadView {
                                         .absolute()
                                         .top_0()
                                         .right_0()
+                                        .h_7()
+                                        .w(px(56.))
+                                        .flex_none()
+                                        .justify_end()
+                                        .overflow_hidden()
                                         .opacity(0.5)
                                         .hover(|s| s.opacity(1.0))
                                         .child(
                                             div()
+                                                .w_7()
+                                                .h_7()
+                                                .flex_none()
+                                                .overflow_hidden()
                                                 .on_mouse_down(MouseButton::Left, |_, _, cx| {
                                                     cx.stop_propagation()
                                                 })
                                                 .child(
                                                     IconButton::new(
                                                         "collapse-message-editor",
-                                                        IconName::ChevronDown,
+                                                        IconName::ArrowDown,
                                                     )
                                                     .icon_size(IconSize::Small)
                                                     .icon_color(Color::Muted)
@@ -4485,6 +4572,10 @@ impl ThreadView {
                                         )
                                         .child(
                                             div()
+                                                .w_7()
+                                                .h_7()
+                                                .flex_none()
+                                                .overflow_hidden()
                                                 .on_mouse_down(MouseButton::Left, |_, _, cx| {
                                                     cx.stop_propagation()
                                                 })
@@ -4526,13 +4617,6 @@ impl ThreadView {
                             .flex_wrap()
                             .gap_y_1()
                             .justify_between()
-                            .when(cfg!(target_os = "android"), |this| {
-                                this.on_mouse_down(MouseButton::Left, |_, window, _cx| {
-                                    if window.soft_keyboard_visible() {
-                                        window.toggle_soft_keyboard();
-                                    }
-                                })
-                            })
                             .child(
                                 h_flex()
                                     .min_w_0()
@@ -5643,6 +5727,7 @@ impl ThreadView {
         let supports_images = session_capabilities.supports_images();
         let supports_embedded_context = session_capabilities.supports_embedded_context();
         let available_skills = session_capabilities.completion_skills();
+        let personnel = crate::company::load_companies(cx).personnel;
         drop(session_capabilities);
 
         let has_editor_selection = workspace
@@ -5698,7 +5783,7 @@ impl ThreadView {
                         }),
                 )
                 .item(
-                    ContextMenuEntry::new("Threads")
+                    ContextMenuEntry::new("Include Conversation")
                         .icon(IconName::Thread)
                         .icon_color(Color::Muted)
                         .icon_size(IconSize::XSmall)
@@ -5712,6 +5797,48 @@ impl ThreadView {
                             }
                         }),
                 )
+                .when(!personnel.is_empty(), |this| {
+                    this.submenu_with_colored_icon(
+                        "Include Personnel",
+                        IconName::UserRoundPen,
+                        Color::Muted,
+                        {
+                            let message_editor = message_editor.clone();
+                            let personnel = personnel.clone();
+                            move |mut menu, _window, _cx| {
+                                for person in &personnel {
+                                    let person = person.clone();
+                                    let message_editor = message_editor.clone();
+                                    menu = menu.item(
+                                        ContextMenuEntry::new(person.name.clone())
+                                            .icon(IconName::Person)
+                                            .icon_color(Color::Muted)
+                                            .handler(move |window, cx| {
+                                                let context = format!(
+                                                    "\n<included_personnel name=\"{}\">\nPersona: {}\nSkills: {}\nRules: {}\nBoundaries: {}\nWorkflow: {}\n</included_personnel>\n",
+                                                    person.name,
+                                                    person.persona,
+                                                    person.skills,
+                                                    person.rules,
+                                                    person.boundaries,
+                                                    person.workflow,
+                                                );
+                                                message_editor.focus_handle(cx).focus(window, cx);
+                                                message_editor.update(cx, |editor, cx| {
+                                                    let updated = replace_included_personnel_context(
+                                                        &editor.text(cx),
+                                                        &context,
+                                                    );
+                                                    editor.set_text(&updated, window, cx);
+                                                });
+                                            }),
+                                    );
+                                }
+                                menu
+                            }
+                        },
+                    )
+                })
                 .when(!available_skills.is_empty(), |this| {
                     this.submenu_with_colored_icon("Skills", IconName::Sparkle, Color::Muted, {
                         let message_editor = message_editor.clone();
@@ -6278,14 +6405,12 @@ impl ThreadView {
                 let opaque_window = cx.theme().window_background_appearance()
                     == gpui::WindowBackgroundAppearance::Opaque;
 
-                let has_checkpoint_button = message
-                    .checkpoint
-                    .as_ref()
-                    .is_some_and(|checkpoint| checkpoint.show);
+                let has_checkpoint_button = message.checkpoint.is_some();
 
                 let is_subagent = self.is_subagent();
                 let can_rewind = self.thread.read(cx).supports_truncate(cx);
-                let is_editable = can_rewind && message.client_id.is_some() && !is_subagent;
+                let can_rollback = can_rewind && message.client_id.is_some() && !is_subagent;
+                let is_editable = can_rollback && !cfg!(target_os = "android");
                 let agent_name = if is_subagent {
                     "subagents".into()
                 } else {
@@ -6305,20 +6430,20 @@ impl ThreadView {
                     .px_2()
                     .gap_1p5()
                     .w_full()
-                    .when(is_editable && has_checkpoint_button, |this| {
+                    .when(can_rollback && has_checkpoint_button, |this| {
                         this.children(message.client_id.clone().map(|client_id| {
                             h_flex()
                                 .px_3()
                                 .gap_2()
                                 .child(Divider::horizontal())
                                 .child(
-                                    Button::new("restore-checkpoint", "Restore Checkpoint")
+                                    Button::new("restore-checkpoint", "Rollback to Here")
                                         .start_icon(Icon::new(IconName::Undo).size(IconSize::XSmall).color(Color::Muted))
                                         .label_size(LabelSize::XSmall)
                                         .color(Color::Muted)
-                                        .tooltip(Tooltip::text("Restores all files in the project to the content they had at this point in the conversation."))
-                                        .on_click(cx.listener(move |this, _, _window, cx| {
-                                            this.restore_checkpoint(&client_id, cx);
+                                        .tooltip(Tooltip::text("Preview affected files, then roll code and conversation back to this point."))
+                                        .on_click(cx.listener(move |this, _, window, cx| {
+                                            this.restore_checkpoint(&client_id, window, cx);
                                         }))
                                 )
                                 .child(Divider::horizontal())

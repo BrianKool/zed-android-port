@@ -24,6 +24,7 @@ askpass = { path = "../../../askpass" }
 assets = { path = "../../../assets" }
 client = { path = "../../../client" }
 command_palette = { path = "../../../command_palette" }
+context_server = { path = "../../../context_server" }
 csv_preview = { path = "../../../csv_preview" }
 db = { path = "../../../db" }
 diagnostics = { path = "../../../diagnostics" }
@@ -37,6 +38,7 @@ debug_adapter_extension = { path = "../../../debug_adapter_extension" }
 extension = { path = "../../../extension" }
 extension_host = { path = "../../../extension_host" }
 extensions_ui = { path = "../../../extensions_ui" }
+git = { path = "../../../git" }
 git_ui = { path = "../../../git_ui" }
 language_extension = { path = "../../../language_extension" }
 go_to_line = { path = "../../../go_to_line" }

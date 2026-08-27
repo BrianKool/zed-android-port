@@ -2,7 +2,10 @@
 
 use android_activity::AndroidApp;
 use anyhow::{Context as _, Result, anyhow};
-use jni::{JavaVM, objects::{JByteArray, JObject, JValue}};
+use jni::{
+    JavaVM,
+    objects::{JByteArray, JObject, JValue},
+};
 
 pub(crate) fn write(
     android_app: &AndroidApp,
@@ -26,7 +29,11 @@ pub(crate) fn write(
                 ],
             )?
             .z()?;
-        if stored { Ok(()) } else { Err(anyhow!("Android Keystore rejected credential write")) }
+        if stored {
+            Ok(())
+        } else {
+            Err(anyhow!("Android Keystore rejected credential write"))
+        }
     })
 }
 
@@ -71,7 +78,11 @@ pub(crate) fn delete(android_app: &AndroidApp, url: &str) -> Result<()> {
                 &[JValue::Object(url.as_ref())],
             )?
             .z()?;
-        if deleted { Ok(()) } else { Err(anyhow!("failed to delete Android credential")) }
+        if deleted {
+            Ok(())
+        } else {
+            Err(anyhow!("failed to delete Android credential"))
+        }
     })
 }
 

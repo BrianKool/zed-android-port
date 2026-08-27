@@ -1,6 +1,6 @@
 use gpui::{
-    AnyView, App, DismissEvent, Entity, EventEmitter, FocusHandle, Global,
-    ManagedView, MouseButton, StatefulInteractiveElement, Subscription, WeakFocusHandle, hsla,
+    AnyView, App, DismissEvent, Entity, EventEmitter, FocusHandle, Global, ManagedView,
+    MouseButton, StatefulInteractiveElement, Subscription, WeakFocusHandle, hsla,
 };
 use ui::prelude::*;
 use ui::{IconButton, IconName, Tooltip, vh, vw};
@@ -329,6 +329,12 @@ impl Render for ModalLayer {
                     cx.stop_propagation();
                 })
                 .on_mouse_up(MouseButton::Left, |_, _, cx| {
+                    cx.stop_propagation();
+                })
+                .on_scroll_wheel(|_, _, cx| {
+                    // Android modal dialogs are blocking surfaces. Keep wheel,
+                    // trackpad and touch-scroll events from reaching the workspace
+                    // behind the modal after the modal's own scroller handles them.
                     cx.stop_propagation();
                 })
                 .child(

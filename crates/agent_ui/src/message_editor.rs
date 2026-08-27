@@ -874,6 +874,17 @@ impl MessageEditor {
         })
     }
 
+    /// Resolves every attached context item without interpreting leading text
+    /// as an ACP slash command. Company rooms use this because `/btw` is a
+    /// room-level interjection marker rather than an agent command.
+    pub fn context_contents(&self, cx: &mut Context<Self>) -> Task<Result<Vec<acp::ContentBlock>>> {
+        let build_task = self.build_content_blocks(true, cx);
+        cx.spawn(async move |_, _cx| {
+            let (blocks, _tracked_buffers) = build_task.await?;
+            Ok(blocks)
+        })
+    }
+
     fn build_content_blocks(
         &self,
         full_mention_content: bool,
@@ -1903,7 +1914,6 @@ impl MessageEditor {
         });
     }
 
-    #[cfg(any(test, feature = "test-support"))]
     pub fn set_text(&mut self, text: &str, window: &mut Window, cx: &mut Context<Self>) {
         self.editor.update(cx, |editor, cx| {
             editor.set_text(text, window, cx);
@@ -3324,7 +3334,7 @@ mod tests {
                     format!("five.txt b{slash}"),
                     "Files & Directories".into(),
                     "Symbols".into(),
-                    "Threads".into(),
+                    "Include Conversation".into(),
                     "Fetch".into()
                 ]
             );

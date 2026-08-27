@@ -261,7 +261,11 @@ impl EntryViewState {
                             window,
                             cx,
                         );
-                        if !can_rewind || !has_client_id || is_subagent {
+                        if !can_rewind
+                            || !has_client_id
+                            || is_subagent
+                            || cfg!(target_os = "android")
+                        {
                             editor.set_read_only(true, cx);
                         }
                         editor.set_message(chunks, window, cx);

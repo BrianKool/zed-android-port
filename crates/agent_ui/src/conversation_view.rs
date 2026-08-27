@@ -2095,6 +2095,12 @@ impl ConversationView {
                         window,
                         cx,
                     );
+                    if successful
+                        && crate::agent_panel::android_voice_conversation_enabled()
+                        && let Some(response) = thread.read(cx).latest_assistant_text(cx)
+                    {
+                        cx.speak_voice_response(&response);
+                    }
                 }
             }
             AcpThreadEvent::Refusal => {
@@ -2115,6 +2121,9 @@ impl ConversationView {
                     let notification_message =
                         format!("{} refused to respond to this request", model_or_agent_name);
                     self.notify_with_sound(&notification_message, IconName::Warning, window, cx);
+                    if crate::agent_panel::android_voice_conversation_enabled() {
+                        cx.speak_voice_response("The agent refused this request.");
+                    }
                 }
             }
             AcpThreadEvent::Error => {
@@ -2143,6 +2152,9 @@ impl ConversationView {
                         window,
                         cx,
                     );
+                    if crate::agent_panel::android_voice_conversation_enabled() {
+                        cx.speak_voice_response("The agent stopped because of an error.");
+                    }
                 }
             }
             AcpThreadEvent::LoadError(error) => {

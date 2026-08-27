@@ -245,12 +245,7 @@ impl<V: EntityInputHandler> InputHandler for ElementInputHandler<V> {
             .update(cx, |view, cx| view.accepts_text_input(window, cx))
     }
 
-    fn select_text_range(
-        &mut self,
-        range: Range<usize>,
-        window: &mut Window,
-        cx: &mut App,
-    ) {
+    fn select_text_range(&mut self, range: Range<usize>, window: &mut Window, cx: &mut App) {
         self.view
             .update(cx, |view, cx| view.select_text_range(range, window, cx));
     }

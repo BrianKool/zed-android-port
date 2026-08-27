@@ -323,6 +323,28 @@ fn jni_open_url(android_app: &AndroidApp, url: &str) -> Result<()> {
     Ok(())
 }
 
+fn jni_open_with_system(android_app: &AndroidApp, path: &Path) -> Result<()> {
+    use anyhow::Context;
+    use jni::{JavaVM, objects::JObject};
+
+    let vm = unsafe { JavaVM::from_raw(android_app.vm_as_ptr().cast())? };
+    let mut env = vm
+        .attach_current_thread()
+        .context("attach_current_thread for open_with_system")?;
+    let activity = unsafe { JObject::from_raw(android_app.activity_as_ptr() as _) };
+    let path = env
+        .new_string(path.to_string_lossy().as_ref())
+        .context("alloc JString for open_with_system path")?;
+    env.call_method(
+        &activity,
+        "openFileWithSystem",
+        "(Ljava/lang/String;)V",
+        &[(&path).into()],
+    )
+    .context("MainActivity.openFileWithSystem")?;
+    Ok(())
+}
+
 fn jni_start_background_task(
     android_app: &AndroidApp,
     task_id: &str,
@@ -379,6 +401,45 @@ fn jni_finish_background_task(
         &[(&task_id).into(), (&description).into(), successful.into()],
     )
     .context("MainActivity.finishAgentBackgroundTask")?;
+    Ok(())
+}
+
+fn jni_set_voice_conversation(android_app: &AndroidApp, enabled: bool) -> Result<()> {
+    use anyhow::Context;
+    use jni::{JavaVM, objects::JObject};
+
+    let vm = unsafe { JavaVM::from_raw(android_app.vm_as_ptr().cast())? };
+    let mut env = vm
+        .attach_current_thread()
+        .context("attach_current_thread for voice conversation")?;
+    let activity = unsafe { JObject::from_raw(android_app.activity_as_ptr() as _) };
+    env.call_method(
+        &activity,
+        "setVoiceConversationEnabled",
+        "(Z)V",
+        &[enabled.into()],
+    )
+    .context("MainActivity.setVoiceConversationEnabled")?;
+    Ok(())
+}
+
+fn jni_speak_voice_response(android_app: &AndroidApp, text: &str) -> Result<()> {
+    use anyhow::Context;
+    use jni::{JavaVM, objects::JObject};
+
+    let vm = unsafe { JavaVM::from_raw(android_app.vm_as_ptr().cast())? };
+    let mut env = vm
+        .attach_current_thread()
+        .context("attach_current_thread for voice response")?;
+    let activity = unsafe { JObject::from_raw(android_app.activity_as_ptr() as _) };
+    let text = env.new_string(text).context("alloc voice response")?;
+    env.call_method(
+        &activity,
+        "speakVoiceResponse",
+        "(Ljava/lang/String;)V",
+        &[(&text).into()],
+    )
+    .context("MainActivity.speakVoiceResponse")?;
     Ok(())
 }
 
@@ -975,6 +1036,7 @@ impl AndroidPlatform {
                 let mut state = window_ptr.state.borrow_mut();
                 state.ime_composition_start = None;
                 state.ime_composition_text = None;
+                state.ime_recently_finished_composition = None;
             }
             crate::ime::restart_input_for_kind(android_app, extra_window_id, kind);
             window_ptr.state.borrow_mut().last_ime_target_kind = Some(kind);
@@ -1000,6 +1062,7 @@ impl AndroidPlatform {
                 let mut state = window_ptr.state.borrow_mut();
                 state.ime_composition_start = None;
                 state.ime_composition_text = None;
+                state.ime_recently_finished_composition = None;
             }
         }
 
@@ -1501,6 +1564,18 @@ impl Platform for AndroidPlatform {
         rx
     }
 
+    fn set_voice_conversation_enabled(&self, enabled: bool) {
+        if let Err(err) = jni_set_voice_conversation(&self.android_app, enabled) {
+            log::warn!("Android voice conversation toggle failed: {err:#}");
+        }
+    }
+
+    fn speak_voice_response(&self, text: &str) {
+        if let Err(err) = jni_speak_voice_response(&self.android_app, text) {
+            log::warn!("Android voice response failed: {err:#}");
+        }
+    }
+
     fn prompt_for_new_path(
         &self,
         _directory: &Path,
@@ -1522,7 +1597,11 @@ impl Platform for AndroidPlatform {
         false
     }
     fn reveal_path(&self, _path: &Path) {}
-    fn open_with_system(&self, _path: &Path) {}
+    fn open_with_system(&self, path: &Path) {
+        if let Err(err) = jni_open_with_system(&self.android_app, path) {
+            log::warn!("AndroidPlatform::open_with_system({path:?}) failed: {err:#}");
+        }
+    }
 
     fn on_quit(&self, callback: Box<dyn FnMut()>) {
         self.common.borrow_mut().callbacks.quit = Some(callback);

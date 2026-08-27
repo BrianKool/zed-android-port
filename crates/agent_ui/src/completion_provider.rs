@@ -270,7 +270,7 @@ impl PromptContextType {
             Self::File => "Files & Directories",
             Self::Symbol => "Symbols",
             Self::Fetch => "Fetch",
-            Self::Thread => "Threads",
+            Self::Thread => "Include Conversation",
             Self::Skill => "Skills",
             Self::Diagnostics => "Diagnostics",
             Self::BranchDiff => "Branch Diff",

@@ -1979,6 +1979,41 @@ impl GitStore {
         })
     }
 
+    /// Returns the patch between two store-wide checkpoints. Each repository
+    /// is prefixed with its work directory so callers can identify files when
+    /// a project contains more than one repository.
+    pub fn diff_checkpoints(
+        &self,
+        left: GitStoreCheckpoint,
+        mut right: GitStoreCheckpoint,
+        cx: &mut App,
+    ) -> Task<Result<Vec<(Arc<Path>, String)>>> {
+        let repositories_by_work_dir_abs_path = self
+            .repositories
+            .values()
+            .map(|repo| (repo.read(cx).snapshot.work_directory_abs_path.clone(), repo))
+            .collect::<HashMap<_, _>>();
+
+        let mut tasks = Vec::new();
+        for (work_dir_abs_path, left_checkpoint) in left.checkpoints_by_work_dir_abs_path {
+            let Some(right_checkpoint) = right
+                .checkpoints_by_work_dir_abs_path
+                .remove(&work_dir_abs_path)
+            else {
+                continue;
+            };
+            let Some(repository) = repositories_by_work_dir_abs_path.get(&work_dir_abs_path) else {
+                continue;
+            };
+            let diff = repository.update(cx, |repository, _| {
+                repository.diff_checkpoints(left_checkpoint, right_checkpoint)
+            });
+            tasks.push(async move { Ok((work_dir_abs_path, diff.await??)) });
+        }
+
+        cx.background_spawn(async move { future::try_join_all(tasks).await })
+    }
+
     /// Blames a buffer.
     pub fn blame_buffer(
         &self,

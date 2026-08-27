@@ -2,6 +2,8 @@ package com.zdroid
 
 import android.Manifest
 import android.app.Activity
+import android.content.ActivityNotFoundException
+import android.content.ClipData
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
@@ -13,6 +15,11 @@ import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.os.Process
+import android.speech.RecognitionListener
+import android.speech.RecognizerIntent
+import android.speech.SpeechRecognizer
+import android.speech.tts.TextToSpeech
+import android.speech.tts.UtteranceProgressListener
 import android.provider.DocumentsContract
 import android.provider.OpenableColumns
 import android.util.Log
@@ -23,6 +30,7 @@ import android.view.SurfaceView
 import android.view.View
 import android.view.ViewGroup
 import android.view.animation.AccelerateDecelerateInterpolator
+import android.webkit.MimeTypeMap
 import android.widget.FrameLayout
 import android.widget.ImageView
 import android.widget.LinearLayout
@@ -39,6 +47,7 @@ import com.google.androidgamesdk.GameActivity
 import java.io.File
 import java.io.FileOutputStream
 import java.security.MessageDigest
+import java.util.Locale
 
 /// SAF flows go through legacy `startActivityForResult` instead of
 /// `ActivityResultLauncher` because `ActivityResultRegistry` silently
@@ -64,6 +73,166 @@ class MainActivity : GameActivity(), ImeHost {
     @Volatile
     private var initialPermissionFlowSettled = false
     private var initialNotificationStage = 0
+    private var voiceConversationEnabled = false
+    private var voiceRecognizer: SpeechRecognizer? = null
+    private var voiceTts: TextToSpeech? = null
+    private var voiceTtsReady = false
+    private var voicePendingResponse: String? = null
+    private var voiceWaitingForAgent = false
+
+    @Suppress("unused")
+    fun setVoiceConversationEnabled(enabled: Boolean) {
+        runOnUiThread {
+            voiceConversationEnabled = enabled
+            if (!enabled) {
+                voiceWaitingForAgent = false
+                voicePendingResponse = null
+                voiceRecognizer?.cancel()
+                voiceTts?.stop()
+                Toast.makeText(this, "Voice conversation stopped", Toast.LENGTH_SHORT).show()
+                return@runOnUiThread
+            }
+            if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) !=
+                PackageManager.PERMISSION_GRANTED
+            ) {
+                ActivityCompat.requestPermissions(
+                    this,
+                    arrayOf(Manifest.permission.RECORD_AUDIO),
+                    REQ_VOICE_PERMISSION,
+                )
+                return@runOnUiThread
+            }
+            ensureVoiceTts()
+            startVoiceListening()
+        }
+    }
+
+    @Suppress("unused")
+    fun speakVoiceResponse(text: String) {
+        runOnUiThread {
+            if (!voiceConversationEnabled || text.isBlank()) return@runOnUiThread
+            voiceWaitingForAgent = false
+            voiceRecognizer?.cancel()
+            ensureVoiceTts()
+            if (!voiceTtsReady) {
+                voicePendingResponse = text
+                return@runOnUiThread
+            }
+            voicePendingResponse = null
+            val chunks = text.chunked((TextToSpeech.getMaxSpeechInputLength() - 100).coerceAtLeast(500))
+            chunks.forEachIndexed { index, chunk ->
+                val utteranceId = if (index == chunks.lastIndex) {
+                    "$VOICE_UTTERANCE_ID-last"
+                } else {
+                    "$VOICE_UTTERANCE_ID-$index"
+                }
+                voiceTts?.speak(
+                    chunk,
+                    if (index == 0) TextToSpeech.QUEUE_FLUSH else TextToSpeech.QUEUE_ADD,
+                    null,
+                    utteranceId,
+                )
+            }
+        }
+    }
+
+    private fun ensureVoiceTts() {
+        if (voiceTts != null) return
+        voiceTts = TextToSpeech(this) { status ->
+            voiceTtsReady = status == TextToSpeech.SUCCESS
+            if (voiceTtsReady) {
+                voiceTts?.language = Locale.getDefault()
+                voiceTts?.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
+                    override fun onStart(utteranceId: String?) = Unit
+                    override fun onError(utteranceId: String?) {
+                        if (utteranceId?.endsWith("-last") == true) {
+                            runOnUiThread { if (voiceConversationEnabled) startVoiceListening() }
+                        }
+                    }
+                    override fun onDone(utteranceId: String?) {
+                        if (utteranceId?.endsWith("-last") == true) {
+                            runOnUiThread { if (voiceConversationEnabled) startVoiceListening() }
+                        }
+                    }
+                })
+                val pendingResponse = voicePendingResponse
+                voicePendingResponse = null
+                if (pendingResponse != null) {
+                    speakVoiceResponse(pendingResponse)
+                }
+            } else {
+                voicePendingResponse = null
+                voiceConversationEnabled = false
+                Toast.makeText(
+                    this,
+                    "Text-to-speech is unavailable on this device",
+                    Toast.LENGTH_LONG,
+                ).show()
+            }
+        }
+    }
+
+    private fun startVoiceListening() {
+        if (!voiceConversationEnabled || voiceWaitingForAgent) return
+        if (!SpeechRecognizer.isRecognitionAvailable(this)) {
+            Toast.makeText(this, "Speech recognition is unavailable on this device", Toast.LENGTH_LONG).show()
+            voiceConversationEnabled = false
+            return
+        }
+        if (voiceRecognizer == null) {
+            voiceRecognizer = SpeechRecognizer.createSpeechRecognizer(this).apply {
+                setRecognitionListener(object : RecognitionListener {
+                    override fun onReadyForSpeech(params: Bundle?) = Unit
+                    override fun onBeginningOfSpeech() = Unit
+                    override fun onRmsChanged(rmsdB: Float) = Unit
+                    override fun onBufferReceived(buffer: ByteArray?) = Unit
+                    override fun onEndOfSpeech() = Unit
+                    override fun onPartialResults(partialResults: Bundle?) = Unit
+                    override fun onEvent(eventType: Int, params: Bundle?) = Unit
+                    override fun onError(error: Int) {
+                        if (!voiceConversationEnabled || voiceWaitingForAgent) return
+                        Handler(Looper.getMainLooper()).postDelayed({ startVoiceListening() }, 600)
+                    }
+                    override fun onResults(results: Bundle?) {
+                        val text = results
+                            ?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
+                            ?.firstOrNull()
+                            ?.trim()
+                            .orEmpty()
+                        if (text.isBlank()) {
+                            if (voiceConversationEnabled) startVoiceListening()
+                            return
+                        }
+                        voiceWaitingForAgent = true
+                        NativeBridge.nativeImeCommitText(imeWindowId, text, 1)
+                        val sendMeta = KeyEvent.META_CTRL_ON or KeyEvent.META_SHIFT_ON
+                        NativeBridge.nativeImeSendKeyEvent(
+                            imeWindowId,
+                            KeyEvent.ACTION_DOWN,
+                            KeyEvent.KEYCODE_ENTER,
+                            sendMeta,
+                            0,
+                        )
+                        NativeBridge.nativeImeSendKeyEvent(
+                            imeWindowId,
+                            KeyEvent.ACTION_UP,
+                            KeyEvent.KEYCODE_ENTER,
+                            sendMeta,
+                            0,
+                        )
+                    }
+                })
+            }
+        }
+        val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
+            putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+            putExtra(RecognizerIntent.EXTRA_LANGUAGE, Locale.getDefault().toLanguageTag())
+            putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, false)
+            putExtra(RecognizerIntent.EXTRA_PREFER_OFFLINE, false)
+        }
+        voiceRecognizer?.startListening(intent)
+        Toast.makeText(this, "Listening...", Toast.LENGTH_SHORT).show()
+    }
 
     override fun onStart() {
         super.onStart()
@@ -299,6 +468,7 @@ class MainActivity : GameActivity(), ImeHost {
     /// reading before/during a show animation must not be confused
     /// with a hide.
     private var lastImeInsetBottom: Int = 0
+    private var lastStatusBarInsetTop: Int = 0
 
     /// Setter that wraps the `imeShown` mutation and ALSO pushes
     /// the value into Rust's `SOFT_KEYBOARD_VISIBLE` mirror. Every
@@ -341,11 +511,11 @@ class MainActivity : GameActivity(), ImeHost {
             }
             extraKeysView?.visibility = View.VISIBLE
             extraKeysView?.post {
-                applyImeViewportInset(viewportBottomInset(lastImeInsetBottom))
+                applyViewportInsets(lastStatusBarInsetTop, viewportBottomInset(lastImeInsetBottom))
             }
         } else {
             extraKeysView?.visibility = View.GONE
-            applyImeViewportInset(lastImeInsetBottom)
+            applyViewportInsets(lastStatusBarInsetTop, lastImeInsetBottom)
         }
     }
 
@@ -627,14 +797,14 @@ class MainActivity : GameActivity(), ImeHost {
         // as letterboxing under the status bar / above the nav bar on
         // 1080x2340 phones (Mi 10) and notch-cropping on tablets.
         //
-        // We also hide the system bars by default and set
-        // BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE so a downward swipe
-        // temporarily reveals the status bar (notifications) without
-        // leaving the editor — same UX a native desktop editor gives on
-        // Wayland/macOS.
+        // Keep the phone status bar visible so battery, connectivity, time,
+        // and notification state remain available while coding. The bottom
+        // navigation bar stays transient to preserve editor space.
         WindowCompat.setDecorFitsSystemWindows(window, false)
         WindowInsetsControllerCompat(window, window.decorView).apply {
-            hide(WindowInsetsCompat.Type.systemBars())
+            show(WindowInsetsCompat.Type.statusBars())
+            hide(WindowInsetsCompat.Type.navigationBars())
+            isAppearanceLightStatusBars = false
             systemBarsBehavior = WindowInsetsControllerCompat
                 .BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
         }
@@ -666,6 +836,9 @@ class MainActivity : GameActivity(), ImeHost {
             val imeBottom = insets.getInsets(
                 androidx.core.view.WindowInsetsCompat.Type.ime()
             ).bottom
+            val statusBarTop = insets.getInsets(
+                androidx.core.view.WindowInsetsCompat.Type.statusBars()
+            ).top
             val wasVisible = lastImeInsetBottom > 0
             val nowVisible = imeBottom > 0
 
@@ -708,7 +881,8 @@ class MainActivity : GameActivity(), ImeHost {
             // row so it floats just above the keyboard, following the
             // IME show/hide animation smoothly.
             extraKeysView?.translationY = -imeBottom.toFloat()
-            applyImeViewportInset(viewportBottomInset(imeBottom))
+            lastStatusBarInsetTop = statusBarTop
+            applyViewportInsets(statusBarTop, viewportBottomInset(imeBottom))
 
             lastImeInsetBottom = imeBottom
             insets
@@ -923,18 +1097,19 @@ class MainActivity : GameActivity(), ImeHost {
         return imeBottom + extrasHeight
     }
 
-    /** Keep the GPUI surface above the soft keyboard and extras row. */
-    private fun applyImeViewportInset(bottomInset: Int) {
+    /** Keep GPUI below the status bar and above the soft keyboard/extras row. */
+    private fun applyViewportInsets(topInset: Int, bottomInset: Int) {
         val surface = findSurfaceView(window.decorView) ?: return
         val params = surface.layoutParams
         if (params is ViewGroup.MarginLayoutParams) {
-            if (params.bottomMargin == bottomInset) return
+            if (params.topMargin == topInset && params.bottomMargin == bottomInset) return
+            params.topMargin = topInset
             params.bottomMargin = bottomInset
             surface.layoutParams = params
             surface.requestLayout()
-            Log.i("zdroid_ime", "GPUI viewport bottom inset=$bottomInset")
+            Log.i("zdroid_ime", "GPUI viewport insets top=$topInset bottom=$bottomInset")
         } else {
-            Log.w("zdroid_ime", "SurfaceView has no margin layout params; IME resize skipped")
+            Log.w("zdroid_ime", "SurfaceView has no margin layout params; viewport resize skipped")
         }
     }
 
@@ -1376,6 +1551,47 @@ class MainActivity : GameActivity(), ImeHost {
         }
     }
 
+    /** Open any readable project file with an Android app chosen by the user. */
+    @Suppress("unused") // called from Rust via JNI
+    fun openFileWithSystem(path: String) {
+        runOnUiThread {
+            val file = File(path)
+            if (!file.isFile || !file.canRead()) {
+                Log.w(TAG, "openFileWithSystem rejected unreadable file: $path")
+                Toast.makeText(this, "This file is not available to open.", Toast.LENGTH_SHORT).show()
+                return@runOnUiThread
+            }
+
+            try {
+                val uri = FileProvider.getUriForFile(this, "com.zdroid.files", file)
+                val extension = file.extension.lowercase()
+                val mimeType = MimeTypeMap.getSingleton().getMimeTypeFromExtension(extension)
+                    ?: when (extension) {
+                        "md" -> "text/markdown"
+                        "toml" -> "application/toml"
+                        "yaml", "yml" -> "application/yaml"
+                        "rs", "go", "py", "ts", "tsx", "js", "jsx", "kt", "swift", "zig" -> "text/plain"
+                        else -> "*/*"
+                    }
+                val viewIntent = Intent(Intent.ACTION_VIEW).apply {
+                    setDataAndType(uri, mimeType)
+                    clipData = ClipData.newRawUri(file.name, uri)
+                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                }
+                startActivity(Intent.createChooser(viewIntent, "Open ${file.name} with"))
+            } catch (error: ActivityNotFoundException) {
+                Log.w(TAG, "No Android app can open $path", error)
+                Toast.makeText(this, "No installed app can open this file.", Toast.LENGTH_LONG).show()
+            } catch (error: IllegalArgumentException) {
+                Log.e(TAG, "File is outside the Open With provider roots: $path", error)
+                Toast.makeText(this, "This file location cannot be shared.", Toast.LENGTH_LONG).show()
+            } catch (error: Throwable) {
+                Log.e(TAG, "openFileWithSystem failed for $path", error)
+                Toast.makeText(this, "Could not open this file.", Toast.LENGTH_LONG).show()
+            }
+        }
+    }
+
     fun launchOpenTree(importForeignProviders: Boolean, forceImport: Boolean) {
         Log.i(
             TAG,
@@ -1648,6 +1864,11 @@ class MainActivity : GameActivity(), ImeHost {
     /// the process here guarantees the next launch starts fresh with
     /// zero stale static state.
     override fun onDestroy() {
+        voiceRecognizer?.destroy()
+        voiceRecognizer = null
+        voicePendingResponse = null
+        voiceTts?.shutdown()
+        voiceTts = null
         selectionOverlay?.destroy()
         selectionOverlay = null
         Log.i(TAG, "onDestroy isFinishing=$isFinishing — exiting process for clean restart")
@@ -1672,6 +1893,20 @@ class MainActivity : GameActivity(), ImeHost {
             initialNotificationStage = 0
             Log.i(TAG, "Initial permission flow settled after notification result")
             startBackgroundExecutionIfEnabled()
+            return
+        }
+        if (requestCode == REQ_VOICE_PERMISSION) {
+            if (grantResults.firstOrNull() == PackageManager.PERMISSION_GRANTED) {
+                ensureVoiceTts()
+                startVoiceListening()
+            } else {
+                voiceConversationEnabled = false
+                Toast.makeText(
+                    this,
+                    "Microphone permission is required for voice conversation",
+                    Toast.LENGTH_LONG,
+                ).show()
+            }
             return
         }
         if (requestCode != REQ_STORAGE_PERMS) {
@@ -1919,6 +2154,8 @@ class MainActivity : GameActivity(), ImeHost {
         private const val REQ_STORAGE_PERMS = 0xA3
         private const val REQ_NOTIFICATION_PERMISSION = 0xA4
         private const val REQ_OPEN_DOCUMENT = 0xA5
+        private const val REQ_VOICE_PERMISSION = 0xA6
+        private const val VOICE_UTTERANCE_ID = "zdroid-agent-response"
         /// Software cursor side length in dp. Scaled by display
         /// density at instantiation time to give the sprite a
         /// consistent visual size across devices.

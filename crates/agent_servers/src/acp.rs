@@ -4435,8 +4435,12 @@ mod tests {
 fn mcp_servers_for_project(project: &Entity<Project>, cx: &App) -> Vec<acp::McpServer> {
     let context_server_store = project.read(cx).context_server_store().read(cx);
     let is_local = project.read(cx).is_local();
-    context_server_store
-        .configured_server_ids()
+    #[cfg(target_os = "android")]
+    let server_ids = context_server_store.server_ids();
+    #[cfg(not(target_os = "android"))]
+    let server_ids = context_server_store.configured_server_ids();
+
+    server_ids
         .iter()
         .filter_map(|id| {
             let configuration = context_server_store.configuration_for_server(id)?;

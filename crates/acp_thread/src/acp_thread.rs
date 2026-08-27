@@ -2394,6 +2394,27 @@ impl AcpThread {
         &self.entries
     }
 
+    /// Plain assistant text from the latest response, excluding thoughts and
+    /// tool output. Android voice conversation uses this after EndTurn.
+    pub fn latest_assistant_text(&self, cx: &App) -> Option<String> {
+        self.entries.iter().rev().find_map(|entry| {
+            let AgentThreadEntry::AssistantMessage(message) = entry else {
+                return None;
+            };
+            let text = message
+                .chunks
+                .iter()
+                .filter_map(|chunk| match chunk {
+                    AssistantMessageChunk::Message { block, .. } => {
+                        Some(block.to_markdown(cx).to_string())
+                    }
+                    AssistantMessageChunk::Thought { .. } => None,
+                })
+                .join("\n\n");
+            (!text.trim().is_empty()).then_some(text)
+        })
+    }
+
     pub fn is_compacting(&self) -> bool {
         self.entries.last().is_some_and(|entry| {
             matches!(
@@ -4009,6 +4030,57 @@ impl AcpThread {
             }
 
             Ok(())
+        })
+    }
+
+    /// Lists files whose contents would change if `restore_checkpoint` were
+    /// applied. This is deliberately computed immediately before showing the
+    /// confirmation because the user may have edited files since the agent
+    /// turn completed.
+    pub fn checkpoint_changed_paths(
+        &self,
+        client_id: ClientUserMessageId,
+        cx: &mut App,
+    ) -> Task<Result<Vec<String>>> {
+        let Some(message) = self.entries.iter().find_map(|entry| {
+            let AgentThreadEntry::UserMessage(message) = entry else {
+                return None;
+            };
+            (message.client_id.as_ref() == Some(&client_id)).then_some(message)
+        }) else {
+            return Task::ready(Err(anyhow!("message not found")));
+        };
+        let Some(checkpoint) = message
+            .checkpoint
+            .as_ref()
+            .map(|checkpoint| checkpoint.git_checkpoint.clone())
+        else {
+            return Task::ready(Ok(Vec::new()));
+        };
+
+        let git_store = self.project.read(cx).git_store().clone();
+        let current_checkpoint = git_store.update(cx, |git, cx| git.checkpoint(cx));
+        cx.spawn(async move |cx| {
+            let current_checkpoint = current_checkpoint.await?;
+            let patches = git_store
+                .update(cx, |git, cx| {
+                    git.diff_checkpoints(checkpoint, current_checkpoint, cx)
+                })
+                .await?;
+
+            let mut paths = std::collections::BTreeSet::new();
+            for (work_dir, patch) in patches {
+                for line in patch
+                    .lines()
+                    .filter(|line| line.starts_with("diff --git a/"))
+                {
+                    let Some((path, _)) = line[13..].split_once(" b/") else {
+                        continue;
+                    };
+                    paths.insert(work_dir.join(path).display().to_string());
+                }
+            }
+            Ok(paths.into_iter().collect())
         })
     }
 

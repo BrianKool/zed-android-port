@@ -331,8 +331,8 @@ android {
         // denied â€” the entire L2 plan stops working. Skipping Play Store
         // eligibility is the explicit trade.
         targetSdk = 28
-        versionCode = 141
-        versionName = "1.1.5"
+        versionCode = 159
+        versionName = "1.1.6-beta-1r"
         ndk {
             abiFilters += listOf("arm64-v8a")
         }

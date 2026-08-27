@@ -259,9 +259,17 @@ pub(crate) enum ImeEvent {
     },
     /// `performEditorAction(actionId)` — Enter / Done / Next / Search.
     /// Not handled yet; logged for now.
-    EditorAction { action_id: i32 },
-    SelectionAdjust { endpoint: i32, x: f32, y: f32 },
-    SelectionCommand { command: i32 },
+    EditorAction {
+        action_id: i32,
+    },
+    SelectionAdjust {
+        endpoint: i32,
+        x: f32,
+        y: f32,
+    },
+    SelectionCommand {
+        command: i32,
+    },
 }
 
 /// Each IME event is paired with the `window_id` it was generated
@@ -378,6 +386,7 @@ fn set_composition(window_ptr: &AndroidWindowStatePtr, new_text: &str) {
         log::debug!("ime: set_composition dropped (no input handler)");
         return;
     }
+    state.ime_recently_finished_composition = None;
     let new_len = new_text.encode_utf16().count();
 
     // Snapshot composition anchor & current selection BEFORE the
@@ -415,6 +424,21 @@ fn set_composition(window_ptr: &AndroidWindowStatePtr, new_text: &str) {
 
     state.ime_composition_start = Some(start);
     state.ime_composition_text = Some(new_text.to_string());
+}
+
+fn recently_finished_replacement_range(
+    recently_finished: Option<&(usize, String)>,
+    committed_text: &str,
+    selection: Option<std::ops::Range<usize>>,
+) -> Option<std::ops::Range<usize>> {
+    let (start, finished_text) = recently_finished?;
+    let finished_len = finished_text.encode_utf16().count();
+    let cursor = start + finished_len;
+    let selection = selection?;
+    (selection.start == cursor
+        && selection.end == cursor
+        && committed_text.starts_with(finished_text))
+    .then_some(*start..cursor)
 }
 
 /// Finalize the active composition. Behavior diverges based on what
@@ -478,21 +502,45 @@ fn commit_composition(window_ptr: &AndroidWindowStatePtr, replacement_text: Opti
             // `unmark_text` BEFORE here is harmful for editor
             // because it clears marked_ranges so the replace
             // can't use them.
+            let recently_finished = state.ime_recently_finished_composition.take();
             let handler = state.input_handler.as_mut().expect("checked is_some above");
-            handler.replace_text_in_range(None, text);
+            let replacement_range = if prev_text.is_none() {
+                recently_finished_replacement_range(
+                    recently_finished.as_ref(),
+                    text,
+                    handler
+                        .selected_text_range(false)
+                        .map(|selection| selection.range),
+                )
+            } else {
+                None
+            };
+            handler.replace_text_in_range(replacement_range, text);
         }
         None => {
-            let handler = state.input_handler.as_mut().expect("checked is_some above");
+            let mut recently_finished = None;
             if marked_is_in_buffer {
                 // Editor: text already in buffer, just drop the
                 // composition highlight.
-                handler.unmark_text();
+                state
+                    .input_handler
+                    .as_mut()
+                    .expect("checked is_some above")
+                    .unmark_text();
+                if let (Some(start), Some(text)) = (prev_start, prev_text.clone()) {
+                    recently_finished = Some((start, text));
+                }
             } else if let Some(text) = prev_text.as_deref() {
                 // Terminal: marked text lives only in the overlay.
                 // Replace_text_in_range delivers it to the PTY
                 // (terminal's impl: clear_marked_text + commit_text).
-                handler.replace_text_in_range(None, text);
+                state
+                    .input_handler
+                    .as_mut()
+                    .expect("checked is_some above")
+                    .replace_text_in_range(None, text);
             }
+            state.ime_recently_finished_composition = recently_finished;
         }
     }
 
@@ -649,7 +697,9 @@ fn call_activity_update_selection_ui(
         anyhow::bail!("AndroidApp vm/activity pointer is null");
     }
     let vm = unsafe { JavaVM::from_raw(vm_ptr as _) }.context("JavaVM::from_raw")?;
-    let mut env = vm.attach_current_thread().context("attach_current_thread")?;
+    let mut env = vm
+        .attach_current_thread()
+        .context("attach_current_thread")?;
     let (visible, sx, sy, ex, ey) = endpoints
         .map(|(sx, sy, ex, ey)| (true, sx as f32, sy as f32, ex as f32, ey as f32))
         .unwrap_or((false, 0.0, 0.0, 0.0, 0.0));
@@ -665,8 +715,13 @@ fn call_activity_update_selection_ui(
             let Some(activity_ref) = crate::multi_window::extra_activity_for(id) else {
                 return Ok(());
             };
-            env.call_method(activity_ref.as_obj(), "updateSelectionUi", "(ZFFFF)V", &args)
-                .context("call ExtraWindowActivity.updateSelectionUi")?;
+            env.call_method(
+                activity_ref.as_obj(),
+                "updateSelectionUi",
+                "(ZFFFF)V",
+                &args,
+            )
+            .context("call ExtraWindowActivity.updateSelectionUi")?;
         }
         None => {
             let activity = unsafe { JObject::from_raw(activity_ptr as _) };
@@ -705,6 +760,7 @@ fn apply_event(window_ptr: &AndroidWindowStatePtr, event: ImeEvent) {
             after_length,
         } => {
             let mut state = window_ptr.state.borrow_mut();
+            state.ime_recently_finished_composition = None;
             let Some(handler) = state.input_handler.as_mut() else {
                 return;
             };
@@ -725,6 +781,10 @@ fn apply_event(window_ptr: &AndroidWindowStatePtr, event: ImeEvent) {
             meta_state,
             repeat_count,
         } => {
+            window_ptr
+                .state
+                .borrow_mut()
+                .ime_recently_finished_composition = None;
             if let Some(input) =
                 crate::events::translate_extra_key_event(action, keycode, meta_state, repeat_count)
             {
@@ -737,6 +797,10 @@ fn apply_event(window_ptr: &AndroidWindowStatePtr, event: ImeEvent) {
             true
         }
         ImeEvent::EditorAction { action_id } => {
+            window_ptr
+                .state
+                .borrow_mut()
+                .ime_recently_finished_composition = None;
             // Soft keyboards deliver Enter either as
             // sendKeyEvent(KEYCODE_ENTER) (handled in the KeyEvent arm) or
             // as performEditorAction, depending on the keyboard and the
@@ -762,6 +826,7 @@ fn apply_event(window_ptr: &AndroidWindowStatePtr, event: ImeEvent) {
         }
         ImeEvent::SelectionAdjust { endpoint, x, y } => {
             let mut state = window_ptr.state.borrow_mut();
+            state.ime_recently_finished_composition = None;
             let scale = state.scale_factor;
             let Some(handler) = state.input_handler.as_mut() else {
                 return;
@@ -769,10 +834,9 @@ fn apply_event(window_ptr: &AndroidWindowStatePtr, event: ImeEvent) {
             let Some(selection) = handler.selected_text_range(false) else {
                 return;
             };
-            let Some(offset) = handler.character_index_for_point(gpui::point(
-                gpui::px(x / scale),
-                gpui::px(y / scale),
-            )) else {
+            let Some(offset) = handler
+                .character_index_for_point(gpui::point(gpui::px(x / scale), gpui::px(y / scale)))
+            else {
                 return;
             };
             let anchor = if endpoint == 0 {
@@ -784,6 +848,10 @@ fn apply_event(window_ptr: &AndroidWindowStatePtr, event: ImeEvent) {
             true
         }
         ImeEvent::SelectionCommand { command } => {
+            window_ptr
+                .state
+                .borrow_mut()
+                .ime_recently_finished_composition = None;
             const CUT: i32 = 1;
             const COPY: i32 = 2;
             const PASTE: i32 = 3;
@@ -1054,7 +1122,10 @@ pub extern "system" fn Java_com_zdroid_NativeBridge_nativeSelectionAdjust<'local
     x: f32,
     y: f32,
 ) {
-    dispatch_event(window_id as u64, ImeEvent::SelectionAdjust { endpoint, x, y });
+    dispatch_event(
+        window_id as u64,
+        ImeEvent::SelectionAdjust { endpoint, x, y },
+    );
 }
 
 #[unsafe(no_mangle)]
@@ -1078,4 +1149,36 @@ pub extern "system" fn Java_com_zdroid_NativeBridge_nativeSetSoftKeyboardVisible
     visible: jni::sys::jboolean,
 ) {
     SOFT_KEYBOARD_VISIBLE.store(visible != 0, Ordering::Release);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::recently_finished_replacement_range;
+
+    #[test]
+    fn cumulative_commit_replaces_just_finished_composition() {
+        let finished = Some((4, "A_".to_string()));
+        assert_eq!(
+            recently_finished_replacement_range(finished.as_ref(), "A_B", Some(6..6)),
+            Some(4..6)
+        );
+    }
+
+    #[test]
+    fn ordinary_follow_up_commit_is_not_rewritten() {
+        let finished = Some((4, "A_".to_string()));
+        assert_eq!(
+            recently_finished_replacement_range(finished.as_ref(), "B", Some(6..6)),
+            None
+        );
+    }
+
+    #[test]
+    fn moved_cursor_does_not_rewrite_old_composition() {
+        let finished = Some((4, "A_".to_string()));
+        assert_eq!(
+            recently_finished_replacement_range(finished.as_ref(), "A_B", Some(2..2)),
+            None
+        );
+    }
 }

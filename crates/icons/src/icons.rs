@@ -56,6 +56,7 @@ pub enum IconName {
     BoltOutlined,
     Book,
     BookCopy,
+    Building2,
     Box,
     BoxOpen,
     CaseSensitive,

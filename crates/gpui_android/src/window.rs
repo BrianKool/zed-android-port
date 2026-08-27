@@ -162,6 +162,12 @@ pub(crate) struct AndroidWindowState {
     /// adequate for editor ASCII typing.
     pub(crate) ime_composition_start: Option<usize>,
     pub(crate) ime_composition_text: Option<String>,
+    /// An editor composition that was finalized by `finishComposingText`.
+    /// Some Samsung/Gboard paths immediately follow that callback with a
+    /// cumulative `commitText` containing the finalized prefix plus the new
+    /// text. Keeping exactly one event of history lets that commit replace the
+    /// just-finished span instead of duplicating it.
+    pub(crate) ime_recently_finished_composition: Option<(usize, String)>,
     /// Per-window mirror of whether the input handler was present at
     /// the last frame-boundary IME reconcile. Compared against the
     /// current `input_handler.is_some()` to detect show/hide
@@ -537,6 +543,7 @@ impl AndroidWindow {
             extra_window_id: None,
             ime_composition_start: None,
             ime_composition_text: None,
+            ime_recently_finished_composition: None,
             ime_currently_visible: false,
             ime_reassert_requested: false,
             last_ime_target_kind: None,

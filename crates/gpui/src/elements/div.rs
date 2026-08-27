@@ -3988,6 +3988,47 @@ impl ScrollAnchor {
             this.handle.set_offset(viewport_bounds.origin - self_bounds);
         });
     }
+
+    /// Request scroll to place this anchor near the center of the viewport on
+    /// the next frame. This is useful for touch forms after an IME has resized
+    /// the available viewport.
+    pub fn scroll_to_center(&self, window: &mut Window, _cx: &mut App) {
+        let this = self.clone();
+
+        window.on_next_frame(move |_, _| {
+            let viewport_bounds = this.handle.bounds();
+            let self_origin = *this.last_origin.borrow();
+            this.handle
+                .set_offset(viewport_bounds.center() - self_origin);
+        });
+    }
+
+    /// Keep this anchor centered while several frames are rendered. Android's
+    /// IME changes both the outer window and nested scroll viewport
+    /// asynchronously, so centering only once at the end can still observe an
+    /// intermediate viewport size.
+    pub fn scroll_to_center_after_frames(
+        &self,
+        frame_count: u8,
+        window: &mut Window,
+        _cx: &mut App,
+    ) {
+        fn schedule(anchor: ScrollAnchor, frames: u8, window: &mut Window) {
+            window.on_next_frame(move |window, _| {
+                let viewport_bounds = anchor.handle.bounds();
+                let self_origin = *anchor.last_origin.borrow();
+                anchor
+                    .handle
+                    .set_offset(viewport_bounds.center() - self_origin);
+
+                if frames > 0 {
+                    schedule(anchor, frames - 1, window);
+                }
+            });
+        }
+
+        schedule(self.clone(), frame_count, window);
+    }
 }
 
 #[derive(Default, Debug)]

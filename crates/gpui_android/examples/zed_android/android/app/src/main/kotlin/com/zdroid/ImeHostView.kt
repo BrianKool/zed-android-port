@@ -24,11 +24,10 @@ class ImeHostView(context: Context) : View(context) {
         isFocusableInTouchMode = true
     }
 
-    /// Returning `true` here is what makes Android auto-show the
-    /// IME the moment this view gains focus — same path EditText
-    /// uses. Termux's TerminalView is a plain `View` that doesn't
-    /// override this method, which is why Termux never shows Gboard
-    /// on focus.
+    /// Returning `true` also lets Android bind an IME to the view.
+    /// That binding is required even when a physical keyboard is
+    /// attached: Samsung DeX routes Zhuyin and other CJK composition
+    /// through InputConnection rather than plain KeyEvents.
     ///
     /// We gate on:
     ///   1. The user's `android_input.on_screen_keyboard` setting
@@ -44,7 +43,7 @@ class ImeHostView(context: Context) : View(context) {
     override fun onCheckIsTextEditor(): Boolean {
         val userWants = (context as? ImeHost)?.softKeyboardEnabled ?: false
         val hwKeyboardPresent = isPhysicalKeyboardConnected(context)
-        return userWants && !hwKeyboardPresent
+        return userWants || hwKeyboardPresent
     }
 
     companion object {
@@ -64,19 +63,13 @@ class ImeHostView(context: Context) : View(context) {
     }
 
     override fun onCreateInputConnection(outAttrs: EditorInfo): InputConnection? {
-        // Hard kill switch. `onCheckIsTextEditor()` returning false
-        // only suppresses ONE auto-show path; Android still calls
-        // `onCreateInputConnection` on focus and binds the IME if we
-        // return a non-null connection. Returning null here aborts
-        // the bind entirely — no Gboard, no inset, no nothing. The
-        // user's manual `imm.showSoftInput` call from
-        // `MainActivity.showIme` (when the setting is on and no HW
-        // keyboard is connected) lands on the next call to this
-        // method, at which point both gates are satisfied and we
-        // return a real connection.
+        // Keep the connection alive for a physical keyboard even when
+        // the on-screen keyboard is disabled. DeX's Samsung IME needs
+        // it to deliver composing text from a hardware Zhuyin layout.
+        // Only reject the connection when neither input route is in use.
         val userWants = (context as? ImeHost)?.softKeyboardEnabled ?: false
         val hwKeyboardPresent = isPhysicalKeyboardConnected(context)
-        if (!userWants || hwKeyboardPresent) {
+        if (!userWants && !hwKeyboardPresent) {
             android.util.Log.i(
                 "zdroid_ime",
                 "ImeHostView.onCreateInputConnection -> null " +
@@ -101,17 +94,9 @@ class ImeHostView(context: Context) : View(context) {
         //   writing comments / strings in their native script.
         //   IME_MULTI_LINE so Enter inserts a newline instead of
         //   triggering "Done".
-        // Both modes use VISIBLE_PASSWORD: Samsung's Gboard ignores
-        // NO_SUGGESTIONS alone (documented behavior — its prediction
-        // strip + glide-typing still fire on code tokens, producing
-        // the "lililimeline" autocompletion regression where Gboard
-        // turns a sequence of "lili" typings into a long suggested
-        // word and commits the whole thing). VISIBLE_PASSWORD is the
-        // only flag that reliably refuses composition + prediction
-        // across Gboard / Swiftkey / Samsung IME. Trade-off: CJK
-        // composition is also disabled in CODE_EDITOR — we add a
-        // separate RICH_TEXT mode later if a user needs CJK input
-        // (rare in code; common in comments / docs).
+        // VISIBLE_PASSWORD remains terminal-only. Applying it to the
+        // shared editor/input-field mode disables CJK composition,
+        // including Samsung DeX hardware-keyboard Zhuyin input.
         outAttrs.inputType = when (mode) {
             ImeInputMode.TERMINAL ->
                 EditorInfo.TYPE_CLASS_TEXT or
@@ -119,7 +104,6 @@ class ImeHostView(context: Context) : View(context) {
                     EditorInfo.TYPE_TEXT_FLAG_NO_SUGGESTIONS
             else /* CODE_EDITOR */ ->
                 EditorInfo.TYPE_CLASS_TEXT or
-                    EditorInfo.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD or
                     EditorInfo.TYPE_TEXT_FLAG_NO_SUGGESTIONS or
                     EditorInfo.TYPE_TEXT_FLAG_MULTI_LINE
         }

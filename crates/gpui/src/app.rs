@@ -1449,6 +1449,16 @@ impl App {
             .finish_background_task(task_id, description, successful);
     }
 
+    /// Enables or disables Android's hands-free Agent conversation loop.
+    pub fn set_voice_conversation_enabled(&self, enabled: bool) {
+        self.platform.set_voice_conversation_enabled(enabled);
+    }
+
+    /// Speaks an Agent response and resumes listening when speech completes.
+    pub fn speak_voice_response(&self, text: &str) {
+        self.platform.speak_voice_response(text);
+    }
+
     /// Registers the given URL scheme (e.g. `zed` for `zed://` urls) to be
     /// opened by the current app.
     ///

@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<paths>
+    <!-- Projects and generated files kept in Zdroid-B's persistent home. -->
+    <files-path
+        name="zdroid_home"
+        path="home/" />
+
+    <!-- Projects opened in place through Android's shared storage. Access is
+         still limited to the exact URI granted by the chooser intent. -->
+    <external-path
+        name="external_projects"
+        path="." />
+</paths>

@@ -477,7 +477,11 @@ fn clone_and_open_with_destination(
                         gpui::PromptLevel::Info,
                         &format!("Git Clone: {}", repo_name),
                         None,
-                        &["Add repo to project", "Open repo in new project"],
+                        &[
+                            "Add repo to project",
+                            "Open repo in new project",
+                            "Keep cloned only",
+                        ],
                         cx,
                     )
                 })

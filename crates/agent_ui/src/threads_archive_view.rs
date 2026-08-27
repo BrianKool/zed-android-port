@@ -43,6 +43,7 @@ use workspace::{
     WorkspaceDb, WorkspaceId,
 };
 
+use uuid::Uuid;
 use zed_actions::agents_sidebar::FocusSidebarFilter;
 use zed_actions::editor::{MoveDown, MoveUp};
 
@@ -59,6 +60,9 @@ enum ArchiveListItem {
     Entry {
         thread: ThreadMetadata,
         highlight_positions: Vec<usize>,
+        display_title: Option<SharedString>,
+        company_session_id: Option<Uuid>,
+        company_worker: bool,
     },
 }
 
@@ -127,9 +131,20 @@ pub fn fuzzy_match_positions(query: &str, candidate: &str) -> Option<Vec<usize>>
     None
 }
 
+fn legacy_personnel_title(title: &str) -> Option<SharedString> {
+    if let Some(rest) = title.strip_prefix("Personnel / Chat / ") {
+        return Some(rest.trim().into());
+    }
+
+    let marker = "<personnel_configuration name=\"";
+    let name = title.strip_prefix(marker)?.split_once('\"')?.0.trim();
+    (!name.is_empty()).then(|| name.into())
+}
+
 pub enum ThreadsArchiveViewEvent {
     Close,
     Activate { thread: ThreadMetadata },
+    Transfer { thread: ThreadMetadata },
     CancelRestore { thread_id: ThreadId },
     Import,
     NewThread,
@@ -153,6 +168,9 @@ pub struct ThreadsArchiveView {
     agent_server_store: WeakEntity<AgentServerStore>,
     restoring: HashSet<ThreadId>,
     archived_thread_ids: HashSet<ThreadId>,
+    company_thread_ids: HashSet<ThreadId>,
+    personnel_thread_ids: HashSet<ThreadId>,
+    expanded_company_sessions: HashSet<Uuid>,
     archived_branch_names: HashMap<ThreadId, HashMap<PathBuf, String>>,
     _load_branch_names_task: Task<()>,
     thread_filter: ThreadFilter,
@@ -227,6 +245,12 @@ impl ThreadsArchiveView {
             agent_server_store,
             restoring: HashSet::default(),
             archived_thread_ids: HashSet::default(),
+            company_thread_ids: crate::company::load_companies(cx).company_thread_ids,
+            personnel_thread_ids: crate::company::load_companies(cx)
+                .personnel_thread_ids
+                .into_keys()
+                .collect(),
+            expanded_company_sessions: HashSet::default(),
             archived_branch_names: HashMap::default(),
             _load_branch_names_task: Task::ready(()),
             thread_filter: ThreadFilter::All,
@@ -269,6 +293,31 @@ impl ThreadsArchiveView {
 
     fn update_items(&mut self, cx: &mut Context<Self>) {
         let store = ThreadMetadataStore::global(cx).read(cx);
+        let company_data = crate::company::load_companies(cx);
+        self.company_thread_ids = company_data.company_thread_ids.clone();
+        self.personnel_thread_ids = company_data.personnel_thread_ids.keys().copied().collect();
+        let personnel_names_by_thread = company_data
+            .personnel_thread_ids
+            .iter()
+            .filter_map(|(thread_id, personnel_id)| {
+                company_data
+                    .personnel
+                    .iter()
+                    .find(|person| person.id == *personnel_id)
+                    .map(|person| (*thread_id, SharedString::from(person.name.clone())))
+            })
+            .collect::<HashMap<_, _>>();
+        let hidden_company_worker_threads = company_data
+            .sessions
+            .iter()
+            .flat_map(|session| {
+                session
+                    .worker_thread_ids
+                    .iter()
+                    .copied()
+                    .filter(move |thread_id| Some(*thread_id) != session.primary_thread_id)
+            })
+            .collect::<HashSet<_>>();
 
         // If we're filtering to archived threads but none remain (e.g. the
         // user just deleted the last one), fall back to showing all threads
@@ -282,6 +331,7 @@ impl ThreadsArchiveView {
         let thread_filter = self.thread_filter;
         let sessions = store
             .entries()
+            .filter(|thread| !hidden_company_worker_threads.contains(&thread.thread_id))
             .filter(|t| match thread_filter {
                 ThreadFilter::All => true,
                 ThreadFilter::ArchivedOnly => t.archived,
@@ -298,11 +348,33 @@ impl ThreadsArchiveView {
         let mut current_bucket: Option<TimeBucket> = None;
 
         for session in sessions {
+            let company_session = company_data.sessions.iter().find(|company_session| {
+                company_session.primary_thread_id == Some(session.thread_id)
+            });
+            let display_title = company_session
+                .map(|company_session| {
+                    SharedString::from(format!(
+                        "{}: {}",
+                        match company_session.kind {
+                            crate::company::CompanySessionKind::Meeting => "Meeting",
+                            crate::company::CompanySessionKind::Task => "Task",
+                        },
+                        company_session.title
+                    ))
+                })
+                .or_else(|| personnel_names_by_thread.get(&session.thread_id).cloned())
+                .or_else(|| {
+                    session
+                        .title_override
+                        .as_deref()
+                        .or(session.title.as_deref())
+                        .and_then(legacy_personnel_title)
+                });
             let highlight_positions = if !query.is_empty() {
-                let title = session
-                    .title
+                let title = display_title
                     .as_ref()
-                    .map(|t| t.as_ref())
+                    .map(|title| title.as_ref())
+                    .or_else(|| session.title.as_ref().map(|title| title.as_ref()))
                     .unwrap_or(DEFAULT_THREAD_TITLE);
                 if let Some(positions) = fuzzy_match_positions(&query, title) {
                     positions
@@ -343,7 +415,53 @@ impl ThreadsArchiveView {
             items.push(ArchiveListItem::Entry {
                 thread: session,
                 highlight_positions,
+                display_title,
+                company_session_id: company_session.map(|session| session.id),
+                company_worker: false,
             });
+
+            if let Some(company_session) = company_session
+                && self.expanded_company_sessions.contains(&company_session.id)
+            {
+                for worker_thread_id in &company_session.worker_thread_ids {
+                    let Some(worker) = store.entry(*worker_thread_id).cloned() else {
+                        continue;
+                    };
+                    if thread_filter == ThreadFilter::ArchivedOnly && !worker.archived {
+                        continue;
+                    }
+                    let timeline_entry = company_session
+                        .timeline
+                        .iter()
+                        .rev()
+                        .find(|entry| entry.worker_thread_id == Some(*worker_thread_id));
+                    let speaker = timeline_entry
+                        .and_then(|entry| entry.personnel_id)
+                        .and_then(|personnel_id| {
+                            company_data
+                                .personnel
+                                .iter()
+                                .find(|person| person.id == personnel_id)
+                                .map(|person| person.name.as_str())
+                        })
+                        .or_else(|| timeline_entry.map(|entry| entry.speaker.as_str()))
+                        .unwrap_or("Personnel");
+                    let worker_title = SharedString::from(format!("  ↳ {speaker}"));
+                    if !query.is_empty()
+                        && fuzzy_match_positions(&query, worker_title.as_ref()).is_none()
+                    {
+                        continue;
+                    }
+                    items.push(ArchiveListItem::Entry {
+                        thread: worker,
+                        highlight_positions: fuzzy_match_positions(&query, worker_title.as_ref())
+                            .unwrap_or_default(),
+                        display_title: Some(worker_title),
+                        company_session_id: Some(company_session.id),
+                        company_worker: true,
+                    });
+                }
+            }
         }
 
         let preserve = self.preserve_selection_on_next_update;
@@ -616,6 +734,9 @@ impl ThreadsArchiveView {
             ArchiveListItem::Entry {
                 thread,
                 highlight_positions,
+                display_title,
+                company_session_id,
+                company_worker,
             } => {
                 let id = SharedString::from(format!("archive-entry-{}", ix));
 
@@ -632,7 +753,13 @@ impl ThreadsArchiveView {
                     .upgrade()
                     .and_then(|store| store.read(cx).agent_icon(&thread.agent_id));
 
-                let icon = if thread.agent_id.as_ref() == agent::ZED_AGENT_ID.as_ref() {
+                let icon = if *company_worker {
+                    IconName::Person
+                } else if self.personnel_thread_ids.contains(&thread.thread_id) {
+                    IconName::UserRoundPen
+                } else if self.company_thread_ids.contains(&thread.thread_id) {
+                    IconName::Building2
+                } else if thread.agent_id.as_ref() == agent::ZED_AGENT_ID.as_ref() {
                     IconName::ZedAgent
                 } else {
                     IconName::Sparkle
@@ -659,7 +786,10 @@ impl ThreadsArchiveView {
 
                 let archived_color = Color::Custom(cx.theme().colors().icon_muted.opacity(0.6));
 
-                let base = ThreadItem::new(id, thread.display_title())
+                let display_title = display_title
+                    .clone()
+                    .unwrap_or_else(|| thread.display_title());
+                let base = ThreadItem::new(id, display_title)
                     .icon(icon)
                     .when(is_archived, |this| {
                         this.archived(true)
@@ -708,34 +838,61 @@ impl ThreadsArchiveView {
                         .into_any_element()
                 } else if is_archived {
                     base.action_slot(
-                        IconButton::new("delete-thread", IconName::Trash)
-                            .icon_size(IconSize::Small)
-                            .icon_color(Color::Muted)
-                            .tooltip({
-                                move |_window, cx| {
-                                    Tooltip::for_action_in(
-                                        "Delete Thread",
-                                        &RemoveSelectedThread,
-                                        &focus_handle,
-                                        cx,
+                        h_flex()
+                            .gap_0p5()
+                            .when(
+                                thread.session_id.is_some() && company_session_id.is_none(),
+                                |actions| {
+                                    actions.child(
+                                        IconButton::new("transfer-thread", IconName::Share)
+                                            .icon_size(IconSize::Small)
+                                            .icon_color(Color::Muted)
+                                            .tooltip(Tooltip::text("Transfer to New Conversation"))
+                                            .on_click({
+                                                let thread = thread.clone();
+                                                cx.listener(move |_this, _, _, cx| {
+                                                    cx.emit(ThreadsArchiveViewEvent::Transfer {
+                                                        thread: thread.clone(),
+                                                    });
+                                                    cx.stop_propagation();
+                                                })
+                                            }),
                                     )
-                                }
-                            })
-                            .on_click({
-                                let agent = thread.agent_id.clone();
-                                let thread_id = thread.thread_id;
-                                let session_id = thread.session_id.clone();
-                                cx.listener(move |this, _, window, cx| {
-                                    this.request_delete_thread(
-                                        thread_id,
-                                        session_id.clone(),
-                                        agent.clone(),
-                                        window,
-                                        cx,
-                                    );
-                                    cx.stop_propagation();
-                                })
-                            }),
+                                },
+                            )
+                            .child(
+                                IconButton::new("delete-thread", IconName::Trash)
+                                    .icon_size(IconSize::Small)
+                                    .icon_color(Color::Muted)
+                                    .tooltip({
+                                        move |_window, cx| {
+                                            Tooltip::for_action_in(
+                                                "Delete Thread",
+                                                &RemoveSelectedThread,
+                                                &focus_handle,
+                                                cx,
+                                            )
+                                        }
+                                    })
+                                    .on_click({
+                                        let agent = thread.agent_id.clone();
+                                        let thread_id = thread.thread_id;
+                                        let session_id = thread.session_id.clone();
+                                        let company_session_id =
+                                            company_session_id.filter(|_| !*company_worker);
+                                        cx.listener(move |this, _, window, cx| {
+                                            this.request_delete_thread(
+                                                thread_id,
+                                                session_id.clone(),
+                                                agent.clone(),
+                                                company_session_id,
+                                                window,
+                                                cx,
+                                            );
+                                            cx.stop_propagation();
+                                        })
+                                    }),
+                            ),
                     )
                     .on_click({
                         let thread = thread.clone();
@@ -753,28 +910,85 @@ impl ThreadsArchiveView {
                     base.action_slot(
                         h_flex()
                             .gap_0p5()
-                            .child(
-                                IconButton::new("archive-thread", IconName::Archive)
-                                    .icon_size(IconSize::Small)
-                                    .icon_color(Color::Muted)
-                                    .tooltip({
-                                        move |_window, cx| {
-                                            Tooltip::for_action_in(
-                                                "Archive Thread",
-                                                &ArchiveSelectedThread,
-                                                &focus_handle,
-                                                cx,
-                                            )
-                                        }
-                                    })
-                                    .on_click({
-                                        let thread_id = thread.thread_id;
-                                        cx.listener(move |this, _, _, cx| {
-                                            this.archive_thread(thread_id, cx);
-                                            cx.stop_propagation();
-                                        })
-                                    }),
+                            .when_some(
+                                company_session_id.filter(|_| !*company_worker),
+                                |actions, session_id| {
+                                    let expanded =
+                                        self.expanded_company_sessions.contains(&session_id);
+                                    actions.child(
+                                        IconButton::new(
+                                            SharedString::from(format!(
+                                                "toggle-company-session-{session_id}"
+                                            )),
+                                            if expanded {
+                                                IconName::ChevronDown
+                                            } else {
+                                                IconName::ChevronRight
+                                            },
+                                        )
+                                        .icon_size(IconSize::Small)
+                                        .tooltip(Tooltip::text(if expanded {
+                                            "Hide Personnel threads"
+                                        } else {
+                                            "Show Personnel threads"
+                                        }))
+                                        .on_click(
+                                            cx.listener(move |this, _, _, cx| {
+                                                if !this
+                                                    .expanded_company_sessions
+                                                    .remove(&session_id)
+                                                {
+                                                    this.expanded_company_sessions
+                                                        .insert(session_id);
+                                                }
+                                                this.update_items(cx);
+                                                cx.stop_propagation();
+                                            }),
+                                        ),
+                                    )
+                                },
                             )
+                            .when(thread.session_id.is_some(), |actions| {
+                                actions.child(
+                                    IconButton::new("transfer-thread", IconName::Share)
+                                        .icon_size(IconSize::Small)
+                                        .icon_color(Color::Muted)
+                                        .tooltip(Tooltip::text("Transfer to New Conversation"))
+                                        .on_click({
+                                            let thread = thread.clone();
+                                            cx.listener(move |_this, _, _, cx| {
+                                                cx.emit(ThreadsArchiveViewEvent::Transfer {
+                                                    thread: thread.clone(),
+                                                });
+                                                cx.stop_propagation();
+                                            })
+                                        }),
+                                )
+                            })
+                            .when(company_session_id.is_none() || *company_worker, |actions| {
+                                actions.child(
+                                    IconButton::new("archive-thread", IconName::Archive)
+                                        .icon_size(IconSize::Small)
+                                        .icon_color(Color::Muted)
+                                        .tooltip({
+                                            move |_window, cx| {
+                                                Tooltip::for_action_in(
+                                                    "Archive Thread",
+                                                    &ArchiveSelectedThread,
+                                                    &focus_handle,
+                                                    cx,
+                                                )
+                                            }
+                                        })
+                                        .on_click({
+                                            let thread_id = thread.thread_id;
+                                            cx.listener(move |this, _, _, cx| {
+                                                this.archive_thread(thread_id, cx);
+                                                cx.stop_propagation();
+                                            })
+                                        }),
+                                )
+                            })
                             .child(
                                 IconButton::new("delete-thread", IconName::Trash)
                                     .icon_size(IconSize::Small)
@@ -784,11 +998,14 @@ impl ThreadsArchiveView {
                                         let agent = thread.agent_id.clone();
                                         let thread_id = thread.thread_id;
                                         let session_id = thread.session_id.clone();
+                                        let company_session_id =
+                                            company_session_id.filter(|_| !*company_worker);
                                         cx.listener(move |this, _, window, cx| {
                                             this.request_delete_thread(
                                                 thread_id,
                                                 session_id.clone(),
                                                 agent.clone(),
+                                                company_session_id,
                                                 window,
                                                 cx,
                                             );
@@ -826,7 +1043,12 @@ impl ThreadsArchiveView {
         cx: &mut Context<Self>,
     ) {
         let Some(ix) = self.selection else { return };
-        let Some(ArchiveListItem::Entry { thread, .. }) = self.items.get(ix) else {
+        let Some(ArchiveListItem::Entry {
+            thread,
+            company_session_id,
+            ..
+        }) = self.items.get(ix)
+        else {
             return;
         };
 
@@ -834,6 +1056,7 @@ impl ThreadsArchiveView {
             thread.thread_id,
             thread.session_id.clone(),
             thread.agent_id.clone(),
+            *company_session_id,
             window,
             cx,
         );
@@ -844,6 +1067,7 @@ impl ThreadsArchiveView {
         thread_id: ThreadId,
         session_id: Option<acp::SessionId>,
         agent: AgentId,
+        company_session_id: Option<Uuid>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -859,7 +1083,18 @@ impl ThreadsArchiveView {
             if prompt.await == Ok(0) {
                 this.update(cx, |this, cx| {
                     this.preserve_selection_on_next_update = true;
-                    this.delete_thread(thread_id, session_id, agent, cx);
+                    if let Some(company_session_id) = company_session_id {
+                        let thread_ids =
+                            crate::company::delete_company_session(company_session_id, cx);
+                        for thread_id in thread_ids {
+                            ThreadMetadataStore::global(cx)
+                                .update(cx, |store, cx| store.delete(thread_id, cx));
+                        }
+                        this.expanded_company_sessions.remove(&company_session_id);
+                        this.update_items(cx);
+                    } else {
+                        this.delete_thread(thread_id, session_id, agent, cx);
+                    }
                 })?;
             }
             anyhow::Ok(())
@@ -1752,5 +1987,19 @@ mod tests {
                 "position {pos} is not a valid UTF-8 boundary in {text:?}"
             );
         }
+    }
+
+    #[test]
+    fn test_legacy_personnel_titles_show_only_the_person_name() {
+        assert_eq!(
+            legacy_personnel_title("Personnel / Chat / UI Designer").as_deref(),
+            Some("UI Designer")
+        );
+        assert_eq!(
+            legacy_personnel_title("<personnel_configuration name=\"工程師\"> Agent: codex")
+                .as_deref(),
+            Some("工程師")
+        );
+        assert_eq!(legacy_personnel_title("Regular conversation"), None);
     }
 }

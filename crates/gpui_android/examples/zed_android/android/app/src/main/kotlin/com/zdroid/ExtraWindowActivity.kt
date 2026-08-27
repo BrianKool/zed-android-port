@@ -157,11 +157,13 @@ class ExtraWindowActivity : AppCompatActivity(), ImeHost {
         // makes the secondary surface fill the screen end-to-end. On
         // freeform-windowing devices the OS-managed chrome (close X, drag
         // bar) renders on its own decoration layer above this Activity, so
-        // hiding system bars here doesn't strip the chrome — only the
-        // status / nav strips that don't belong to the freeform window.
+        // keeping the phone status bar visible here does not affect DeX's
+        // OS-managed freeform chrome.
         WindowCompat.setDecorFitsSystemWindows(window, false)
         WindowInsetsControllerCompat(window, window.decorView).apply {
-            hide(WindowInsetsCompat.Type.systemBars())
+            show(WindowInsetsCompat.Type.statusBars())
+            hide(WindowInsetsCompat.Type.navigationBars())
+            isAppearanceLightStatusBars = false
             systemBarsBehavior = WindowInsetsControllerCompat
                 .BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
         }
@@ -313,6 +315,9 @@ class ExtraWindowActivity : AppCompatActivity(), ImeHost {
             val imeBottom = insets.getInsets(
                 androidx.core.view.WindowInsetsCompat.Type.ime()
             ).bottom
+            val statusBarTop = insets.getInsets(
+                androidx.core.view.WindowInsetsCompat.Type.statusBars()
+            ).top
             val wasVisible = lastImeInsetBottom > 0
             val nowVisible = imeBottom > 0
             if (!wasVisible && nowVisible) {
@@ -334,7 +339,7 @@ class ExtraWindowActivity : AppCompatActivity(), ImeHost {
                 }
                 setImeShown(false)
             }
-            applyImeViewportInset(imeBottom)
+            applyViewportInsets(statusBarTop, imeBottom)
             lastImeInsetBottom = imeBottom
             insets
         }
@@ -838,17 +843,21 @@ class ExtraWindowActivity : AppCompatActivity(), ImeHost {
         }
     }
 
-    /** Keep this GPUI surface above the soft keyboard in edge-to-edge mode. */
-    private fun applyImeViewportInset(imeBottom: Int) {
+    /** Keep this GPUI surface between the status bar and soft keyboard. */
+    private fun applyViewportInsets(statusBarTop: Int, imeBottom: Int) {
         val params = surfaceView.layoutParams
         if (params is android.view.ViewGroup.MarginLayoutParams) {
-            if (params.bottomMargin == imeBottom) return
+            if (params.topMargin == statusBarTop && params.bottomMargin == imeBottom) return
+            params.topMargin = statusBarTop
             params.bottomMargin = imeBottom
             surfaceView.layoutParams = params
             surfaceView.requestLayout()
-            Log.i(TAG_IME, "GPUI viewport[w=$extraWindowId] bottom inset=$imeBottom")
+            Log.i(
+                TAG_IME,
+                "GPUI viewport[w=$extraWindowId] top=$statusBarTop bottom=$imeBottom"
+            )
         } else {
-            Log.w(TAG_IME, "SurfaceView has no margin layout params; IME resize skipped")
+            Log.w(TAG_IME, "SurfaceView has no margin layout params; viewport resize skipped")
         }
     }
 

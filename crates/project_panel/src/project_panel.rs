@@ -17,6 +17,8 @@ use fs::TrashId;
 use git;
 use git::status::GitSummary;
 use git_ui_core::file_diff_view::FileDiffView;
+#[cfg(target_os = "android")]
+use gpui::EntityInputHandler;
 use gpui::{
     Action, AnyElement, App, AsyncWindowContext, Bounds, ClipboardEntry as GpuiClipboardEntry,
     ClipboardItem, Context, CursorStyle, DismissEvent, Div, DragMoveEvent, Entity, EventEmitter,
@@ -62,6 +64,8 @@ use std::{
     time::{Duration, Instant},
 };
 use theme_settings::ThemeSettings;
+#[cfg(target_os = "android")]
+use ui::{Button, ButtonStyle, Headline, HeadlineSize, TintColor, vh, vw};
 use ui::{
     ContextMenu, DecoratedIcon, IconDecoration, IconDecorationKind, IndentGuideColors,
     IndentGuideLayout, Indicator, KeyBinding, ListItem, ListItemSpacing, ProjectEmptyState,
@@ -74,6 +78,8 @@ use util::{
     paths::{PathStyle, compare_paths},
     rel_path::{RelPath, RelPathBuf},
 };
+#[cfg(target_os = "android")]
+use workspace::ModalView;
 use workspace::{
     DraggedSelection, OpenInTerminal, OpenMode, OpenOptions, OpenVisible, PreviewTabsSettings,
     SelectedEntry, SplitDirection, Workspace, WorkspaceSettings,
@@ -95,6 +101,177 @@ use crate::{
 const PROJECT_PANEL_KEY: &str = "ProjectPanel";
 const NEW_ENTRY_ID: ProjectEntryId = ProjectEntryId::MAX;
 static NEXT_IMPORT_TASK_ID: AtomicU64 = AtomicU64::new(1);
+
+#[cfg(target_os = "android")]
+struct AndroidRenameModal {
+    project_panel: WeakEntity<ProjectPanel>,
+    worktree_id: WorktreeId,
+    entry_id: ProjectEntryId,
+    is_dir: bool,
+    current_name: String,
+    editor: Entity<Editor>,
+}
+
+#[cfg(target_os = "android")]
+impl AndroidRenameModal {
+    fn new(
+        project_panel: WeakEntity<ProjectPanel>,
+        worktree_id: WorktreeId,
+        entry_id: ProjectEntryId,
+        is_dir: bool,
+        current_name: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let editor = cx.new(|cx| {
+            let mut editor = Editor::single_line(window, cx);
+            editor.set_text(current_name.clone(), window, cx);
+            let end = current_name.len();
+            editor.change_selections(Default::default(), window, cx, |selections| {
+                selections.select_ranges([MultiBufferOffset(end)..MultiBufferOffset(end)]);
+            });
+            editor
+        });
+        Self {
+            project_panel,
+            worktree_id,
+            entry_id,
+            is_dir,
+            current_name,
+            editor,
+        }
+    }
+
+    fn cancel(&mut self, _: &menu::Cancel, _window: &mut Window, cx: &mut Context<Self>) {
+        cx.emit(DismissEvent);
+    }
+
+    fn confirm(&mut self, _: &Confirm, window: &mut Window, cx: &mut Context<Self>) {
+        let new_name = self.editor.read(cx).text(cx);
+        if new_name.trim().is_empty() || new_name == self.current_name {
+            cx.emit(DismissEvent);
+            return;
+        }
+
+        let worktree_id = self.worktree_id;
+        let entry_id = self.entry_id;
+        let is_dir = self.is_dir;
+        let started = self
+            .project_panel
+            .update(cx, |panel, cx| {
+                panel.selection = Some(SelectedEntry {
+                    worktree_id,
+                    entry_id,
+                });
+                panel.state.edit_state = Some(EditState {
+                    worktree_id,
+                    entry_id,
+                    leaf_entry_id: Some(entry_id),
+                    is_dir,
+                    processing_filename: None,
+                    previously_focused: None,
+                    depth: 0,
+                    validation_state: ValidationState::None,
+                    temporarily_unfolded: None,
+                });
+                panel.filename_editor.update(cx, |editor, cx| {
+                    editor.set_text(new_name.clone(), window, cx);
+                });
+                let Some(task) = panel.confirm_edit(true, window, cx) else {
+                    panel.state.edit_state = None;
+                    return false;
+                };
+                task.detach_and_notify_err(panel.workspace.clone(), window, cx);
+                true
+            })
+            .unwrap_or(false);
+        if started {
+            cx.emit(DismissEvent);
+        }
+    }
+}
+
+#[cfg(target_os = "android")]
+impl EventEmitter<DismissEvent> for AndroidRenameModal {}
+#[cfg(target_os = "android")]
+impl ModalView for AndroidRenameModal {}
+#[cfg(target_os = "android")]
+impl Focusable for AndroidRenameModal {
+    fn focus_handle(&self, cx: &App) -> FocusHandle {
+        self.editor.read(cx).focus_handle(cx)
+    }
+}
+
+#[cfg(target_os = "android")]
+impl Render for AndroidRenameModal {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let focus_editor = self.editor.clone();
+        v_flex()
+            .key_context("AndroidRenameModal")
+            .on_action(cx.listener(Self::cancel))
+            .on_action(cx.listener(Self::confirm))
+            .w(vw(0.90, window))
+            .min_h(vh(0.50, window))
+            .max_h(vh(0.90, window))
+            .max_w(px(720.))
+            .rounded_md()
+            .border_1()
+            .border_color(cx.theme().colors().border)
+            .bg(cx.theme().colors().elevated_surface_background)
+            .child(
+                h_flex()
+                    .w_full()
+                    .p_4()
+                    .border_b_1()
+                    .border_color(cx.theme().colors().border)
+                    .child(Headline::new("Rename File or Folder").size(HeadlineSize::Small)),
+            )
+            .child(
+                v_flex()
+                    .w_full()
+                    .flex_1()
+                    .min_h_0()
+                    .p_4()
+                    .gap_2()
+                    .child(Label::new("Name").color(Color::Muted))
+                    .child(
+                        div()
+                            .w_full()
+                            .min_h_10()
+                            .px_2()
+                            .py_1p5()
+                            .rounded_md()
+                            .border_1()
+                            .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+                                focus_editor.read(cx).focus_handle(cx).focus(window, cx);
+                                if !window.soft_keyboard_visible() {
+                                    window.toggle_soft_keyboard();
+                                }
+                            })
+                            .child(self.editor.clone()),
+                    ),
+            )
+            .child(
+                h_flex()
+                    .w_full()
+                    .justify_end()
+                    .gap_2()
+                    .p_4()
+                    .border_t_1()
+                    .border_color(cx.theme().colors().border)
+                    .child(Button::new("cancel-android-rename", "Cancel").on_click(
+                        cx.listener(|this, _, window, cx| this.cancel(&menu::Cancel, window, cx)),
+                    ))
+                    .child(
+                        Button::new("confirm-android-rename", "Rename")
+                            .style(ButtonStyle::Tinted(TintColor::Accent))
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.confirm(&Confirm, window, cx)
+                            })),
+                    ),
+            )
+    }
+}
 
 struct VisibleEntriesForWorktree {
     worktree_id: WorktreeId,
@@ -1142,8 +1319,15 @@ impl ProjectPanel {
                                     Box::new(RevealInFileManager),
                                 )
                             })
-                            .when(is_local, |menu| {
-                                menu.action("Open in Default App", Box::new(OpenWithSystem))
+                            .when(is_local && !is_dir, |menu| {
+                                menu.action(
+                                    if cfg!(target_os = "android") {
+                                        "Open With..."
+                                    } else {
+                                        "Open in Default App"
+                                    },
+                                    Box::new(OpenWithSystem),
+                                )
                             })
                             .action("Open in Terminal", Box::new(OpenInTerminal))
                             .when(is_markdown, |menu| {
@@ -2268,6 +2452,8 @@ impl ProjectPanel {
             temporarily_unfolded: (new_entry_id != entry_id).then_some(new_entry_id),
         });
         self.filename_editor.update(cx, |editor, cx| {
+            #[cfg(target_os = "android")]
+            editor.unmark_text(window, cx);
             editor.clear(window, cx);
         });
         self.update_visible_entries(Some((worktree_id, NEW_ENTRY_ID)), true, true, window, cx);
@@ -2300,6 +2486,8 @@ impl ProjectPanel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        #[cfg(target_os = "android")]
+        let _ = selection;
         if let Some(SelectedEntry {
             worktree_id,
             entry_id,
@@ -2334,6 +2522,7 @@ impl ProjectPanel {
                     temporarily_unfolded: None,
                 });
                 let file_name = entry.path.file_name().unwrap_or_default().to_string();
+                #[cfg(not(target_os = "android"))]
                 let selection = selection.unwrap_or_else(|| {
                     // Folders have no extension, so select the whole name. Only
                     // files keep their extension unselected for quick renames.
@@ -2346,7 +2535,13 @@ impl ProjectPanel {
                     0..selection_end
                 });
                 self.filename_editor.update(cx, |editor, cx| {
+                    #[cfg(target_os = "android")]
+                    editor.unmark_text(window, cx);
+                    #[cfg(target_os = "android")]
+                    let filename_end = file_name.len();
                     editor.set_text(file_name, window, cx);
+                    #[cfg(target_os = "android")]
+                    let selection = filename_end..filename_end;
                     editor.change_selections(Default::default(), window, cx, |s| {
                         s.select_ranges([
                             MultiBufferOffset(selection.start)..MultiBufferOffset(selection.end)
@@ -2359,6 +2554,53 @@ impl ProjectPanel {
         }
     }
 
+    #[cfg(target_os = "android")]
+    fn rename(&mut self, _: &Rename, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(SelectedEntry {
+            worktree_id,
+            entry_id,
+        }) = self.selection
+        else {
+            return;
+        };
+        let Some(worktree) = self.project.read(cx).worktree_for_id(worktree_id, cx) else {
+            return;
+        };
+        let entry_id = self.unflatten_entry_id(entry_id);
+        let Some(entry) = worktree.read(cx).entry_for_id(entry_id) else {
+            return;
+        };
+        if Some(entry) == worktree.read(cx).root_entry() {
+            let settings = ProjectPanelSettings::get_global(cx);
+            let visible_worktrees_count = self.project.read(cx).visible_worktrees(cx).count();
+            if settings.hide_root && visible_worktrees_count == 1 {
+                return;
+            }
+        }
+        let current_name = entry.path.file_name().unwrap_or_default().to_string();
+        let is_dir = entry.is_dir();
+        let workspace = self.workspace.clone();
+        let project_panel = cx.weak_entity();
+        window.defer(cx, move |window, cx| {
+            workspace
+                .update(cx, |workspace, cx| {
+                    workspace.toggle_modal(window, cx, move |window, cx| {
+                        AndroidRenameModal::new(
+                            project_panel,
+                            worktree_id,
+                            entry_id,
+                            is_dir,
+                            current_name,
+                            window,
+                            cx,
+                        )
+                    });
+                })
+                .ok();
+        });
+    }
+
+    #[cfg(not(target_os = "android"))]
     fn rename(&mut self, _: &Rename, window: &mut Window, cx: &mut Context<Self>) {
         self.rename_impl(None, window, cx);
     }
@@ -4617,6 +4859,46 @@ impl ProjectPanel {
                 }
                 if this.update_visible_entries_task.focus_filename_editor {
                     this.update_visible_entries_task.focus_filename_editor = false;
+                    #[cfg(target_os = "android")]
+                    let pinned_for_ime = if let Some((_, _, index)) = this
+                        .selection
+                        .and_then(|selection| this.index_for_selection(selection))
+                    {
+                        // Pin the edited row near the top before the IME shrinks the viewport.
+                        // Keeping it in the virtual list prevents the filename editor from being
+                        // unmounted (and losing focus) during the keyboard animation.
+                        this.scroll_handle.scroll_to_item_with_offset(
+                            index,
+                            ScrollStrategy::Top,
+                            this.sticky_items_count,
+                        );
+                        true
+                    } else {
+                        false
+                    };
+                    #[cfg(target_os = "android")]
+                    if pinned_for_ime {
+                        let filename_editor = this.filename_editor.clone();
+                        // Let the virtual list lay out at its pinned position before the IME
+                        // shrinks the Android viewport. Otherwise the editor can be unmounted
+                        // between focus and the first keyboard frame.
+                        window.defer(cx, move |window, cx| {
+                            filename_editor.update(cx, |editor, cx| {
+                                window.focus(&editor.focus_handle(cx), cx);
+                            });
+                            if !window.soft_keyboard_visible() {
+                                window.toggle_soft_keyboard();
+                            }
+                        });
+                    } else {
+                        this.filename_editor.update(cx, |editor, cx| {
+                            window.focus(&editor.focus_handle(cx), cx);
+                        });
+                        if !window.soft_keyboard_visible() {
+                            window.toggle_soft_keyboard();
+                        }
+                    }
+                    #[cfg(not(target_os = "android"))]
                     this.filename_editor.update(cx, |editor, cx| {
                         window.focus(&editor.focus_handle(cx), cx);
                     });

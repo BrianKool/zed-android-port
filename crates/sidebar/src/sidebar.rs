@@ -7870,6 +7870,22 @@ impl Sidebar {
                 ThreadsArchiveViewEvent::Activate { thread } => {
                     this.open_thread_from_archive(thread.clone(), window, cx);
                 }
+                ThreadsArchiveViewEvent::Transfer { thread } => {
+                    let Some(session_id) = thread.session_id.clone() else {
+                        return;
+                    };
+                    this.show_thread_list(window, cx);
+                    if let Some(workspace) = this.active_workspace(cx)
+                        && let Some(panel) = workspace.read(cx).panel::<AgentPanel>(cx)
+                    {
+                        panel.update(cx, |panel, cx| {
+                            panel.start_thread_with_context(session_id, thread.title(), window, cx);
+                        });
+                        workspace.update(cx, |workspace, cx| {
+                            workspace.focus_panel::<AgentPanel>(window, cx);
+                        });
+                    }
+                }
                 ThreadsArchiveViewEvent::CancelRestore { thread_id } => {
                     this.restoring_tasks.remove(thread_id);
                 }

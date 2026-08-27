@@ -24,7 +24,11 @@ actions!(
     zed_android,
     [
         /// Toggles the always-on Android application menu bar.
-        ToggleAppMenuBar
+        ToggleAppMenuBar,
+        /// Starts the Android clone flow after handling an open project.
+        CloneFromRepository,
+        /// Starts the Android project import flow after handling an open project.
+        ImportProject
     ]
 );
 
@@ -263,6 +267,8 @@ fn file_menu_items() -> Vec<MenuEntry> {
                 create_new_window: Some(false),
             }),
         ),
+        MenuEntry::Action("Clone from Repository…", Box::new(CloneFromRepository)),
+        MenuEntry::Action("Import Project…", Box::new(ImportProject)),
         MenuEntry::Separator,
         MenuEntry::Action(
             "Add Folder to Project…",

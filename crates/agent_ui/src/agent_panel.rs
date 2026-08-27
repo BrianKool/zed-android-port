@@ -10,14 +10,16 @@ use std::{
     time::Duration,
 };
 
-use acp_thread::{AcpThread, AcpThreadEvent, MentionUri, ThreadStatus, line_range_suffix};
+use acp_thread::{
+    AcpThread, AcpThreadEvent, AgentThreadEntry, MentionUri, ThreadStatus, line_range_suffix,
+};
 use agent::{ContextServerRegistry, SharedThread, ThreadStore};
 use agent_client_protocol::schema::v1 as acp;
 use agent_servers::AgentServer;
-use agent_settings::UserAgentsMd;
 use collections::HashSet;
 use db::kvp::{Dismissable, KeyValueStore};
 use itertools::Itertools;
+use parking_lot::RwLock;
 use project::{AgentId, ProjectItem};
 use serde::{Deserialize, Serialize};
 
@@ -37,7 +39,14 @@ use zed_actions::{
 use crate::ExpandMessageEditor;
 use crate::ManageProfiles;
 use crate::agent_connection_store::AgentConnectionStore;
+use crate::company::{
+    CompanyAgendaModal, CompanyAgentOption, CompanyMember, CompanyModal, CompanySessionKind,
+    CompanySessionRecord, CompanySessionRequest, CompanySessionStatus, CompanyTimelineEntry,
+    CompanyTimelineEntryKind, CompanyWorkItem, CompanyWorkItemStatus, create_company_session,
+    refresh_personnel_mention_highlights, update_company_session,
+};
 use crate::completion_provider::{AgentContextSelection, AgentContextSource};
+use crate::message_editor::{MessageEditor, MessageEditorEvent, SessionCapabilities};
 use crate::terminal_thread_metadata_store::{
     TerminalThreadMetadata, TerminalThreadMetadataStore, compose_terminal_thread_title,
     terminal_title_without_prefix,
@@ -48,10 +57,10 @@ use crate::{
     NewNativeAgentThreadFromSummary,
 };
 use crate::{
-    AgentDiffPane, ConversationView, CopyThreadToClipboard, Follow, LoadThreadFromClipboard,
-    NewTerminalThread, NewThread, OpenActiveThreadAsMarkdown, OpenAgentDiff, ResetFastModeWarnings,
-    ResetTrialEndUpsell, ResetTrialUpsell, ShowAllSidebarThreadMetadata, ShowThreadMetadata,
-    ToggleNewThreadMenu, ToggleOptionsMenu,
+    AgentDiffPane, ConfigureBrowserTools, ConversationView, CopyThreadToClipboard, Follow,
+    LoadThreadFromClipboard, NewTerminalThread, NewThread, OpenActiveThreadAsMarkdown,
+    OpenAgentDiff, ResetFastModeWarnings, ResetTrialEndUpsell, ResetTrialUpsell,
+    ShowAllSidebarThreadMetadata, ShowThreadMetadata, ToggleNewThreadMenu, ToggleOptionsMenu,
     conversation_view::{
         AcpThreadViewEvent, RootThreadUpdated, ThreadView, reset_fast_mode_warnings,
     },
@@ -66,7 +75,7 @@ use chrono::{DateTime, Utc};
 use client::UserStore;
 use cloud_api_types::Plan;
 use collections::HashMap;
-use editor::{Editor, MultiBuffer};
+use editor::{Editor, EditorMode, MultiBuffer};
 use extension_host::ExtensionStore;
 use feature_flags::{CreateThreadToolFeatureFlag, FeatureFlagAppExt as _};
 
@@ -75,8 +84,8 @@ use futures::FutureExt as _;
 use gpui::{
     Action, Anchor, Animation, AnimationExt, AnyElement, App, AsyncWindowContext, ClipboardItem,
     Entity, EventEmitter, ExternalPaths, FocusHandle, Focusable, KeyContext, MouseButton, Pixels,
-    PlatformDisplay, Subscription, Task, TaskExt, WeakEntity, WindowHandle, prelude::*,
-    pulsating_between,
+    PlatformDisplay, ScrollHandle, Subscription, Task, TaskExt, WeakEntity, WindowHandle,
+    prelude::*, pulsating_between,
 };
 use language::LanguageRegistry;
 use language_model::LanguageModelRegistry;
@@ -91,8 +100,9 @@ use terminal_view::{TerminalView, terminal_panel::TerminalPanel};
 use text::OffsetRangeExt;
 use theme_settings::ThemeSettings;
 use ui::{
-    ContextMenu, ContextMenuEntry, GradientFade, IconButton, KeyBinding, PopoverMenu,
-    PopoverMenuHandle, ProjectEmptyState, Tab, Tooltip, prelude::*, utils::WithRemSize,
+    Chip, ContextMenu, ContextMenuEntry, GradientFade, IconButton, KeyBinding, PopoverMenu,
+    PopoverMenuHandle, ProjectEmptyState, Tab, TintColor, Tooltip, WithScrollbar, prelude::*,
+    utils::WithRemSize,
 };
 use util::ResultExt as _;
 use workspace::{
@@ -103,6 +113,11 @@ use workspace::{
 };
 
 const AGENT_PANEL_KEY: &str = "agent_panel";
+static ANDROID_VOICE_CONVERSATION_ENABLED: AtomicBool = AtomicBool::new(false);
+
+pub(crate) fn android_voice_conversation_enabled() -> bool {
+    ANDROID_VOICE_CONVERSATION_ENABLED.load(Ordering::Acquire)
+}
 const MIN_PANEL_WIDTH: Pixels = px(220.);
 const LAST_USED_AGENT_KEY: &str = "agent_panel__last_used_external_agent";
 const LAST_CREATED_ENTRY_KIND_KEY: &str = "agent_panel__last_created_entry_kind";
@@ -134,6 +149,38 @@ fn external_agent_visible_on_this_platform(agent_id: &AgentId) -> bool {
     } else {
         true
     }
+}
+
+fn company_external_agent_models(agent_id: &AgentId) -> Vec<(String, SharedString)> {
+    let models: &[(&str, &str)] = match agent_id.as_ref() {
+        // Keep these IDs aligned with the Android Claude catalog installed by
+        // zed_android::ensure_claude_model_catalog.
+        "claude-acp" => &[
+            ("claude-fable-5", "Claude Fable 5"),
+            ("claude-opus-5", "Claude Opus 5"),
+            ("claude-opus-4-8", "Claude Opus 4.8"),
+            ("claude-opus-4-7", "Claude Opus 4.7"),
+            ("claude-sonnet-5", "Claude Sonnet 5"),
+            ("claude-sonnet-4-7", "Claude Sonnet 4.7"),
+            ("claude-sonnet-4-6", "Claude Sonnet 4.6"),
+            ("claude-haiku-4-5", "Claude Haiku 4.5"),
+        ],
+        // These mirror openai_subscribed::ChatGptModel, which is also the
+        // picker-visible model catalog used by the current Codex CLI.
+        "codex-acp" => &[
+            ("gpt-5.6-sol", "GPT-5.6 Sol"),
+            ("gpt-5.6-terra", "GPT-5.6 Terra"),
+            ("gpt-5.6-luna", "GPT-5.6 Luna"),
+            ("gpt-5.5", "GPT-5.5"),
+            ("gpt-5.4", "GPT-5.4"),
+            ("gpt-5.4-mini", "GPT-5.4 Mini"),
+        ],
+        _ => &[],
+    };
+    models
+        .iter()
+        .map(|(id, name)| ((*id).to_string(), SharedString::from(*name)))
+        .collect()
 }
 
 fn is_known_terminal_agent_command(command: &str) -> bool {
@@ -241,34 +288,34 @@ fn read_global_last_created_entry_kind(kvp: &KeyValueStore) -> Option<AgentPanel
         .map(|entry| entry.entry_kind)
 }
 
-fn project_agents_md_path(
+fn project_instruction_path(
     project: &Entity<Project>,
-    require_existing_file: bool,
+    file_name: &str,
     cx: &App,
 ) -> Option<PathBuf> {
-    let rel_path = util::rel_path::RelPath::from_unix_str("AGENTS.md").ok()?;
+    let rel_path = util::rel_path::RelPath::from_unix_str(file_name).ok()?;
     project
         .read(cx)
         .visible_worktrees(cx)
         .next()
-        .and_then(|worktree| {
-            let worktree = worktree.read(cx);
-
-            if require_existing_file {
-                let entry = worktree.entry_for_path(rel_path)?;
-                if !entry.is_file() {
-                    return None;
-                }
-            }
-
-            Some(worktree.absolutize(rel_path))
-        })
+        .map(|worktree| worktree.read(cx).absolutize(rel_path))
 }
 
-fn open_global_rules(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<Workspace>) {
+fn open_instruction_file(
+    workspace: &mut Workspace,
+    path: PathBuf,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) {
+    if let Some(parent) = path.parent()
+        && let Err(error) = std::fs::create_dir_all(parent)
+    {
+        log::error!("failed to create instruction directory: {error:#}");
+        return;
+    }
     workspace
         .open_abs_path(
-            paths::agents_file().clone(),
+            path,
             workspace::OpenOptions {
                 focus: Some(true),
                 ..Default::default()
@@ -279,19 +326,22 @@ fn open_global_rules(workspace: &mut Workspace, window: &mut Window, cx: &mut Co
         .detach_and_log_err(cx);
 }
 
+fn open_global_rules(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<Workspace>) {
+    open_instruction_file(workspace, paths::agents_file().clone(), window, cx);
+}
+
 fn open_project_rules(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<Workspace>) {
-    if let Some(path) = project_agents_md_path(workspace.project(), false, cx) {
-        workspace
-            .open_abs_path(
-                path,
-                workspace::OpenOptions {
-                    focus: Some(true),
-                    ..Default::default()
-                },
-                window,
-                cx,
-            )
-            .detach_and_log_err(cx);
+    open_project_instruction(workspace, "AGENTS.md", window, cx);
+}
+
+fn open_project_instruction(
+    workspace: &mut Workspace,
+    file_name: &str,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) {
+    if let Some(path) = project_instruction_path(workspace.project(), file_name, cx) {
+        open_instruction_file(workspace, path, window, cx);
     }
 }
 
@@ -1178,6 +1228,7 @@ pub struct AgentPanel {
     pending_terminal_spawn: Option<TerminalId>,
     new_thread_menu_handle: PopoverMenuHandle<ContextMenu>,
     agent_panel_menu_handle: PopoverMenuHandle<ContextMenu>,
+    company_room_menu_handle: PopoverMenuHandle<ContextMenu>,
     _extension_subscription: Option<Subscription>,
     _project_subscription: Subscription,
     zoomed: bool,
@@ -1192,6 +1243,14 @@ pub struct AgentPanel {
     _active_draft_reclaim_observation: Option<Subscription>,
     _thread_metadata_store_subscription: Subscription,
     last_context_source: Option<AgentContextSource>,
+    company_room_input: Entity<MessageEditor>,
+    _company_room_input_subscription: Subscription,
+    company_timeline_scroll_handle: ScrollHandle,
+    company_task_scroll_handle: ScrollHandle,
+    company_mention_scroll_handle: ScrollHandle,
+    company_room_drafts: HashMap<uuid::Uuid, Vec<acp::ContentBlock>>,
+    active_company_room_session_id: Option<uuid::Uuid>,
+    company_worker_detail_thread: Option<ThreadId>,
 
     is_active: bool,
 }
@@ -1490,7 +1549,7 @@ impl AgentPanel {
         })
     }
 
-    pub(crate) fn new(workspace: &Workspace, _window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub(crate) fn new(workspace: &Workspace, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let fs = workspace.app_state().fs.clone();
         let user_store = workspace.app_state().user_store.clone();
         let project = workspace.project();
@@ -1505,6 +1564,49 @@ impl AgentPanel {
         let thread_store = ThreadStore::global(cx);
 
         let base_view = BaseView::Uninitialized;
+        let company_room_capabilities = Arc::new(RwLock::new(SessionCapabilities::new(
+            acp::PromptCapabilities::new()
+                .image(true)
+                .embedded_context(true),
+            Vec::new(),
+            Vec::new(),
+        )));
+        let company_room_input = cx.new(|cx| {
+            MessageEditor::new(
+                workspace.clone(),
+                project.downgrade(),
+                Some(thread_store.clone()),
+                company_room_capabilities,
+                agent::ZED_AGENT_ID.clone(),
+                "Message the meeting, use @person, or /btw to interject",
+                EditorMode::AutoHeight {
+                    min_lines: 1,
+                    max_lines: Some(6),
+                },
+                window,
+                cx,
+            )
+        });
+        let _company_room_input_subscription = cx.subscribe(
+            &company_room_input,
+            |this, message_editor, event: &MessageEditorEvent, cx| {
+                if matches!(event, MessageEditorEvent::Edited) {
+                    let members = this
+                        .active_company_session(cx)
+                        .and_then(|session| {
+                            crate::company::load_companies(cx)
+                                .companies
+                                .into_iter()
+                                .find(|company| company.id == session.company_id)
+                                .map(|company| company.members)
+                        })
+                        .unwrap_or_default();
+                    let editor = message_editor.read(cx).editor().clone();
+                    refresh_personnel_mention_highlights(&editor, &members, cx);
+                    cx.notify();
+                }
+            },
+        );
 
         let weak_panel = cx.entity().downgrade();
         let onboarding = cx.new(|cx| {
@@ -1580,6 +1682,7 @@ impl AgentPanel {
             pending_terminal_spawn: None,
             new_thread_menu_handle: PopoverMenuHandle::default(),
             agent_panel_menu_handle: PopoverMenuHandle::default(),
+            company_room_menu_handle: PopoverMenuHandle::default(),
 
             _extension_subscription: extension_subscription,
             _project_subscription,
@@ -1596,6 +1699,14 @@ impl AgentPanel {
             _active_draft_reclaim_observation: None,
             _thread_metadata_store_subscription,
             last_context_source: None,
+            company_room_input,
+            _company_room_input_subscription,
+            company_timeline_scroll_handle: ScrollHandle::new(),
+            company_task_scroll_handle: ScrollHandle::new(),
+            company_mention_scroll_handle: ScrollHandle::new(),
+            company_room_drafts: HashMap::default(),
+            active_company_room_session_id: None,
+            company_worker_detail_thread: None,
             is_active: false,
         };
 
@@ -1825,6 +1936,2545 @@ impl AgentPanel {
             }
         }
         self.activate_draft(focus, source, window, cx);
+    }
+
+    pub fn start_thread_with_context(
+        &mut self,
+        session_id: acp::SessionId,
+        title: Option<SharedString>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let thread_id = self.create_thread_with_options(
+            CreateThreadOptions {
+                title: None,
+                initial_content: Some(AgentInitialContent::ThreadSummary { session_id, title }),
+                agent: None,
+                model: None,
+                work_dirs: None,
+            },
+            AgentThreadSource::AgentPanel,
+            window,
+            cx,
+        );
+        self.activate_retained_thread(thread_id, true, window, cx);
+    }
+
+    fn company_agent_options(&self, cx: &App) -> Vec<CompanyAgentOption> {
+        let registry = LanguageModelRegistry::read_global(cx);
+        let native_models = registry
+            .providers()
+            .into_iter()
+            .filter(|provider| provider.is_authenticated(cx))
+            .flat_map(|provider| {
+                let provider_id = provider.id();
+                provider.provided_models(cx).into_iter().map(move |model| {
+                    (
+                        format!("{}/{}", provider_id.0, model.id().0),
+                        model.name().0,
+                    )
+                })
+            })
+            .collect();
+        let mut options = vec![CompanyAgentOption {
+            id: agent::ZED_AGENT_ID.to_string(),
+            name: Agent::NativeAgent.label(),
+            models: native_models,
+        }];
+
+        let store = self.project.read(cx).agent_server_store().clone();
+        let store = store.read(cx);
+        options.extend(
+            store
+                .external_agents()
+                .filter(|id| external_agent_visible_on_this_platform(id))
+                .map(|id| CompanyAgentOption {
+                    id: id.0.to_string(),
+                    name: store.agent_display_name(id).unwrap_or_else(|| id.0.clone()),
+                    models: company_external_agent_models(id),
+                }),
+        );
+        options
+    }
+
+    fn open_company_modal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(workspace) = self.workspace.upgrade() else {
+            return;
+        };
+        let panel = cx.weak_entity();
+        let agent_options = self.company_agent_options(cx);
+        // Menu handlers can run while Workspace is already being updated. Opening the modal
+        // synchronously would re-enter that entity and panic, so wait until this event ends.
+        window.defer(cx, move |window, cx| {
+            workspace.update(cx, |workspace, cx| {
+                workspace.toggle_modal(window, cx, move |window, cx| {
+                    CompanyModal::new(panel, agent_options, window, cx)
+                });
+            });
+        });
+    }
+
+    fn open_personnel_modal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(workspace) = self.workspace.upgrade() else {
+            return;
+        };
+        let panel = cx.weak_entity();
+        let agent_options = self.company_agent_options(cx);
+        window.defer(cx, move |window, cx| {
+            workspace.update(cx, |workspace, cx| {
+                workspace.toggle_modal(window, cx, move |window, cx| {
+                    CompanyModal::new_personnel(panel, agent_options, window, cx)
+                });
+            });
+        });
+    }
+
+    fn open_company_agenda(
+        &mut self,
+        title: SharedString,
+        content: SharedString,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(workspace) = self.workspace.upgrade() else {
+            return;
+        };
+        window.defer(cx, move |window, cx| {
+            workspace.update(cx, |workspace, cx| {
+                workspace.toggle_modal(window, cx, move |_window, cx| {
+                    CompanyAgendaModal::new(title, content, cx)
+                });
+            });
+        });
+    }
+
+    fn open_add_company_personnel(
+        &mut self,
+        session_id: uuid::Uuid,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(workspace) = self.workspace.upgrade() else {
+            return;
+        };
+        let panel = cx.weak_entity();
+        let agent_options = self.company_agent_options(cx);
+        window.defer(cx, move |window, cx| {
+            workspace.update(cx, |workspace, cx| {
+                workspace.toggle_modal(window, cx, move |window, cx| {
+                    CompanyModal::new_add_personnel(panel, agent_options, session_id, window, cx)
+                });
+            });
+        });
+    }
+
+    pub(crate) fn launch_personnel_chat(
+        &mut self,
+        person: CompanyMember,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let prompt = format!(
+            "<personnel_configuration name=\"{}\">\n\
+             Agent: {}\n\
+             Model: {}\n\
+             Persona: {}\n\
+             Allowed installed slash-command skills: {}\n\
+             Rules: {}\n\
+             Boundaries: {}\n\
+             Workflow: {}\n\n\
+             Adopt this configuration for this conversation. Briefly confirm that you are ready, \
+             then wait for the user's request.\n\
+             </personnel_configuration>",
+            person.name,
+            person.agent_id,
+            person.model.as_deref().unwrap_or("agent default"),
+            person.persona,
+            person.skills,
+            person.rules,
+            person.boundaries,
+            person.workflow,
+        );
+        let (thread_id, _) = self.create_company_member_thread(
+            "Personnel",
+            "Chat",
+            &person,
+            prompt,
+            &[],
+            window,
+            cx,
+        );
+        ThreadMetadataStore::global(cx).update(cx, |store, cx| {
+            store.set_title_override(thread_id, person.name.clone().into(), cx);
+        });
+        crate::company::mark_personnel_thread(thread_id, person.id, cx);
+        self.activate_retained_thread(thread_id, true, window, cx);
+    }
+
+    fn create_company_session_thread(
+        &mut self,
+        kind: CompanySessionKind,
+        title: &str,
+        company_name: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> ThreadId {
+        let kind_label = match kind {
+            CompanySessionKind::Meeting => "Meeting",
+            CompanySessionKind::Task => "Task",
+        };
+        let display_title: SharedString = format!("{kind_label}: {title}").into();
+        let marker = format!(
+            "<company_session_main type=\"{}\" company=\"{}\" title=\"{}\" />",
+            kind_label.to_lowercase(),
+            company_name,
+            title
+        );
+        let thread_id = self.create_thread_with_options(
+            CreateThreadOptions {
+                title: Some(display_title.clone()),
+                initial_content: Some(AgentInitialContent::ContentBlock {
+                    blocks: vec![acp::ContentBlock::Text(acp::TextContent::new(marker))],
+                    auto_submit: false,
+                }),
+                agent: Some(Agent::NativeAgent),
+                model: None,
+                work_dirs: None,
+            },
+            AgentThreadSource::AgentPanel,
+            window,
+            cx,
+        );
+        ThreadMetadataStore::global(cx).update(cx, |store, cx| {
+            store.set_title_override(thread_id, display_title, cx);
+        });
+        crate::company::mark_company_threads([thread_id], cx);
+        thread_id
+    }
+
+    pub(crate) fn open_company_session(
+        &mut self,
+        session: &CompanySessionRecord,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.company_worker_detail_thread = None;
+        self.switch_company_room_draft(session.id, window, cx);
+        let Some(thread_id) = session
+            .primary_thread_id
+            .or_else(|| session.worker_thread_ids.last().copied())
+        else {
+            return;
+        };
+        if self.retained_threads.contains_key(&thread_id) {
+            self.activate_retained_thread(thread_id, true, window, cx);
+            return;
+        }
+        let metadata = ThreadMetadataStore::try_global(cx)
+            .and_then(|store| store.read(cx).entry(thread_id).cloned());
+        let Some(metadata) = metadata else {
+            return;
+        };
+        let agent = if metadata.agent_id == *agent::ZED_AGENT_ID {
+            Agent::NativeAgent
+        } else {
+            Agent::Custom {
+                id: metadata.agent_id.clone(),
+            }
+        };
+        self.load_agent_thread(
+            agent,
+            thread_id,
+            Some(metadata.folder_paths().clone()),
+            metadata.title(),
+            true,
+            AgentThreadSource::AgentPanel,
+            window,
+            cx,
+        );
+    }
+
+    fn open_company_worker_thread(
+        &mut self,
+        thread_id: ThreadId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.company_worker_detail_thread = Some(thread_id);
+        if self.retained_threads.contains_key(&thread_id) {
+            self.activate_retained_thread(thread_id, true, window, cx);
+            return;
+        }
+        let metadata = ThreadMetadataStore::try_global(cx)
+            .and_then(|store| store.read(cx).entry(thread_id).cloned());
+        let Some(metadata) = metadata else {
+            return;
+        };
+        let agent = if metadata.agent_id == *agent::ZED_AGENT_ID {
+            Agent::NativeAgent
+        } else {
+            Agent::Custom {
+                id: metadata.agent_id.clone(),
+            }
+        };
+        self.load_agent_thread(
+            agent,
+            thread_id,
+            Some(metadata.folder_paths().clone()),
+            metadata.title(),
+            true,
+            AgentThreadSource::AgentPanel,
+            window,
+            cx,
+        );
+    }
+
+    fn switch_company_room_draft(
+        &mut self,
+        session_id: uuid::Uuid,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.active_company_room_session_id == Some(session_id) {
+            return;
+        }
+        if let Some(previous_session_id) = self.active_company_room_session_id {
+            self.company_room_drafts.insert(
+                previous_session_id,
+                self.company_room_input
+                    .read(cx)
+                    .draft_content_blocks_snapshot(cx),
+            );
+        }
+        let draft = self
+            .company_room_drafts
+            .get(&session_id)
+            .cloned()
+            .unwrap_or_default();
+        self.company_room_input
+            .update(cx, |editor, cx| editor.set_message(draft, window, cx));
+        self.active_company_room_session_id = Some(session_id);
+    }
+
+    fn resume_company_session(
+        &mut self,
+        session: CompanySessionRecord,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let data = crate::company::load_companies(cx);
+        let Some(company) = data
+            .companies
+            .into_iter()
+            .find(|company| company.id == session.company_id)
+        else {
+            return;
+        };
+        let selected_members = company
+            .members
+            .iter()
+            .filter(|member| session.personnel_ids.contains(&member.id))
+            .cloned()
+            .collect::<Vec<_>>();
+        if selected_members.is_empty() {
+            return;
+        }
+        let roster = selected_members
+            .iter()
+            .map(|member| format!("- {}", member.name))
+            .join("\n");
+        let attachments = if session.attachments.is_empty() {
+            "None".to_string()
+        } else {
+            session
+                .attachments
+                .iter()
+                .map(|path| format!("- {}", path.display()))
+                .join("\n")
+        };
+        let request = CompanySessionRequest {
+            company: company.clone(),
+            kind: session.kind,
+            title: session.title.clone(),
+            description: session.description.clone(),
+            member_ids: session.personnel_ids.clone(),
+            attachments: session.attachments.clone(),
+            completion_condition: session.completion_condition.clone(),
+            meeting_turn_limit: session.meeting_turn_limit,
+            allow_clarifying_questions: session.allow_clarifying_questions,
+        };
+        let mut runner_generation = session.runner_generation;
+        update_company_session(session.id, cx, |session| {
+            session.runner_generation = session.runner_generation.saturating_add(1);
+            runner_generation = session.runner_generation;
+            session.stop_requested = false;
+            session.paused = false;
+            session.runner_active = true;
+            session.status = CompanySessionStatus::Running;
+            session.active_personnel_ids.clear();
+            session.waiting_personnel_ids.clear();
+            session.completed_personnel_ids.clear();
+            session.failed_personnel_ids.clear();
+        });
+        match session.kind {
+            CompanySessionKind::Meeting => self.launch_company_meeting(
+                session.id,
+                runner_generation,
+                request,
+                selected_members,
+                roster,
+                attachments,
+                window,
+                cx,
+            ),
+            CompanySessionKind::Task => self.launch_company_task(
+                session.id,
+                runner_generation,
+                request,
+                selected_members,
+                roster,
+                attachments,
+                format!(
+                    "Company rules:\n{}\n\nCompany skills:\n{}",
+                    company.rules, company.skills
+                ),
+                window,
+                cx,
+            ),
+        }
+    }
+
+    fn active_company_session(&self, cx: &App) -> Option<CompanySessionRecord> {
+        let thread_id = self.active_thread_id(cx)?;
+        if self.company_worker_detail_thread == Some(thread_id) {
+            return None;
+        }
+        crate::company::load_companies(cx)
+            .sessions
+            .into_iter()
+            .find(|session| {
+                session.primary_thread_id == Some(thread_id)
+                    || session.worker_thread_ids.contains(&thread_id)
+            })
+    }
+
+    fn active_company_worker_session(&self, cx: &App) -> Option<CompanySessionRecord> {
+        let active_thread_id = self.active_thread_id(cx)?;
+        let worker_thread_id = self.company_worker_detail_thread?;
+        if active_thread_id != worker_thread_id {
+            return None;
+        }
+        crate::company::load_companies(cx)
+            .sessions
+            .into_iter()
+            .find(|session| {
+                session.kind == CompanySessionKind::Task
+                    && session.worker_thread_ids.contains(&worker_thread_id)
+            })
+    }
+
+    fn latest_assistant_markdown(thread: &AcpThread, cx: &App) -> Option<String> {
+        thread.entries().iter().rev().find_map(|entry| match entry {
+            AgentThreadEntry::AssistantMessage(_) => Some(entry.to_markdown(cx)),
+            _ => None,
+        })
+    }
+
+    fn tagged_company_message(text: &str, tag: &str) -> Option<String> {
+        let start_marker = format!("<{tag}>");
+        let end_marker = format!("</{tag}>");
+        let start = text.find(&start_marker)? + start_marker.len();
+        let end = text[start..].find(&end_marker)? + start;
+        Some(text[start..end].trim().to_string())
+    }
+
+    fn take_company_interjections(
+        company_session_id: uuid::Uuid,
+        cx: &mut App,
+    ) -> (bool, Vec<String>) {
+        let mut stop_requested = false;
+        let mut messages = Vec::new();
+        update_company_session(company_session_id, cx, |session| {
+            stop_requested = session.stop_requested;
+            messages = std::mem::take(&mut session.pending_user_context);
+        });
+        (stop_requested, messages)
+    }
+
+    fn company_runner_is_current(
+        company_session_id: uuid::Uuid,
+        runner_generation: u64,
+        cx: &App,
+    ) -> bool {
+        crate::company::load_companies(cx)
+            .sessions
+            .into_iter()
+            .find(|session| session.id == company_session_id)
+            .is_some_and(|session| session.runner_generation == runner_generation)
+    }
+
+    fn company_context_blocks(company_session_id: uuid::Uuid, cx: &App) -> Vec<acp::ContentBlock> {
+        crate::company::load_companies(cx)
+            .sessions
+            .into_iter()
+            .find(|session| session.id == company_session_id)
+            .map(|session| session.context_blocks)
+            .unwrap_or_default()
+    }
+
+    fn release_completed_meeting_workers(
+        &mut self,
+        company_session_id: uuid::Uuid,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(session) = crate::company::load_companies(cx)
+            .sessions
+            .into_iter()
+            .find(|session| session.id == company_session_id)
+        else {
+            return;
+        };
+        let Some(primary_thread_id) = session.primary_thread_id else {
+            return;
+        };
+        let inactive_thread_ids = session
+            .worker_thread_ids
+            .into_iter()
+            .filter(|thread_id| *thread_id != primary_thread_id)
+            .collect::<Vec<_>>();
+
+        // Keep metadata and session ownership so History can present these as
+        // nested Personnel threads. Only release their live views from memory.
+        for thread_id in inactive_thread_ids {
+            self.retained_threads.remove(&thread_id);
+        }
+    }
+
+    fn play_company_discussion(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(session) = self.active_company_session(cx) else {
+            return;
+        };
+        let raw_message = self.company_room_input.read(cx).text(cx);
+        let context_task = self
+            .company_room_input
+            .update(cx, |editor, cx| editor.context_contents(cx));
+        let session_id = session.id;
+        cx.spawn_in(window, async move |this, cx| {
+            let context_blocks = context_task.await?;
+            this.update_in(cx, |this, window, cx| {
+                this.continue_company_discussion(
+                    session_id,
+                    raw_message,
+                    context_blocks,
+                    window,
+                    cx,
+                );
+            })?;
+            anyhow::Ok(())
+        })
+        .detach_and_log_err(cx);
+    }
+
+    fn continue_company_discussion(
+        &mut self,
+        session_id: uuid::Uuid,
+        raw_message: String,
+        context_blocks: Vec<acp::ContentBlock>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(session) = crate::company::load_companies(cx)
+            .sessions
+            .into_iter()
+            .find(|session| session.id == session_id)
+        else {
+            return;
+        };
+        let message = raw_message.trim();
+        if !message.is_empty() {
+            let context = message
+                .strip_prefix("/btw")
+                .map(str::trim)
+                .filter(|message| !message.is_empty())
+                .unwrap_or(message)
+                .to_string();
+            update_company_session(session.id, cx, |session| {
+                session.pending_user_context.push(context.clone());
+                session.timeline.push(CompanyTimelineEntry {
+                    id: uuid::Uuid::new_v4(),
+                    kind: CompanyTimelineEntryKind::User,
+                    personnel_id: None,
+                    speaker: "You".to_string(),
+                    content: context,
+                    worker_thread_id: None,
+                });
+            });
+        }
+        if !context_blocks.is_empty() {
+            update_company_session(session.id, cx, |session| {
+                session.context_blocks.extend(context_blocks);
+            });
+            self.company_room_input
+                .update(cx, |editor, cx| editor.clear(window, cx));
+            self.company_room_drafts.remove(&session.id);
+        }
+
+        if session.runner_active {
+            update_company_session(session.id, cx, |session| {
+                session.stop_requested = false;
+                session.paused = false;
+                session.status = CompanySessionStatus::Running;
+                session.waiting_personnel_ids.clear();
+                session.timeline.push(CompanyTimelineEntry {
+                    id: uuid::Uuid::new_v4(),
+                    kind: CompanyTimelineEntryKind::System,
+                    personnel_id: None,
+                    speaker: match session.kind {
+                        CompanySessionKind::Meeting => "Meeting",
+                        CompanySessionKind::Task => "Task",
+                    }
+                    .to_string(),
+                    content: "Discussion resumed.".to_string(),
+                    worker_thread_id: None,
+                });
+            });
+        } else {
+            self.resume_company_session(session, window, cx);
+        }
+        cx.notify();
+    }
+
+    fn stop_company_discussion(&mut self, cx: &mut Context<Self>) {
+        let Some(session) = self.active_company_session(cx) else {
+            return;
+        };
+        let kind = session.kind;
+        for thread_id in &session.worker_thread_ids {
+            if let Some(conversation) = self.retained_threads.get(thread_id) {
+                conversation.update(cx, |conversation, cx| {
+                    conversation.cancel_generation(cx);
+                });
+            }
+        }
+        update_company_session(session.id, cx, |session| {
+            session.stop_requested = true;
+            session.runner_generation = session.runner_generation.saturating_add(1);
+            session.runner_active = false;
+            session.paused = false;
+            session.status = CompanySessionStatus::Completed;
+            session.active_personnel_ids.clear();
+            session.waiting_personnel_ids.clear();
+            session.timeline.push(CompanyTimelineEntry {
+                id: uuid::Uuid::new_v4(),
+                kind: CompanyTimelineEntryKind::System,
+                personnel_id: None,
+                speaker: match kind {
+                    CompanySessionKind::Meeting => "Meeting",
+                    CompanySessionKind::Task => "Task",
+                }
+                .to_string(),
+                content: match kind {
+                    CompanySessionKind::Meeting => "Discussion stopped.",
+                    CompanySessionKind::Task => "Task stopped.",
+                }
+                .to_string(),
+                worker_thread_id: None,
+            });
+        });
+        let task_id = match kind {
+            CompanySessionKind::Meeting => format!("company-meeting-{}", session.id),
+            CompanySessionKind::Task => format!("company-task-{}", session.id),
+        };
+        cx.finish_background_task(
+            &task_id,
+            match kind {
+                CompanySessionKind::Meeting => "Company meeting stopped",
+                CompanySessionKind::Task => "Company task stopped",
+            },
+            true,
+        );
+        cx.notify();
+    }
+
+    fn hold_company_discussion(&mut self, cx: &mut Context<Self>) {
+        let Some(session) = self.active_company_session(cx) else {
+            return;
+        };
+        if !session.runner_active || session.paused {
+            return;
+        }
+        let kind = session.kind;
+        update_company_session(session.id, cx, |session| {
+            session.paused = true;
+            session.timeline.push(CompanyTimelineEntry {
+                id: uuid::Uuid::new_v4(),
+                kind: CompanyTimelineEntryKind::System,
+                personnel_id: None,
+                speaker: match kind {
+                    CompanySessionKind::Meeting => "Meeting",
+                    CompanySessionKind::Task => "Task",
+                }
+                .to_string(),
+                content:
+                    "Discussion is on hold. Add context or Personnel, then press Play to continue."
+                        .to_string(),
+                worker_thread_id: None,
+            });
+        });
+        cx.notify();
+    }
+
+    fn company_mention_query(&self, cx: &App) -> Option<(usize, String)> {
+        let text = self.company_room_input.read(cx).text(cx);
+        let token_start = text
+            .char_indices()
+            .rev()
+            .find(|(_, character)| character.is_whitespace())
+            .map(|(index, character)| index + character.len_utf8())
+            .unwrap_or(0);
+        let token = text.get(token_start..)?;
+        let query = token.strip_prefix('@')?;
+        (!query.contains(char::is_whitespace)).then(|| (token_start, query.to_string()))
+    }
+
+    fn insert_company_mention(
+        &mut self,
+        member_name: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some((token_start, _)) = self.company_mention_query(cx) else {
+            return;
+        };
+        let mut text = self.company_room_input.read(cx).text(cx);
+        text.replace_range(token_start.., &format!("@{member_name} "));
+        self.company_room_input.update(cx, |editor, cx| {
+            editor.set_text(&text, window, cx);
+            editor.editor().read(cx).focus_handle(cx).focus(window, cx);
+        });
+        if cfg!(target_os = "android") && !window.soft_keyboard_visible() {
+            window.toggle_soft_keyboard();
+        }
+        cx.notify();
+    }
+
+    fn render_company_room(
+        &mut self,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let session = self.active_company_session(cx)?;
+        let company = crate::company::load_companies(cx)
+            .companies
+            .into_iter()
+            .find(|company| company.id == session.company_id);
+        let active_personnel_names = company
+            .as_ref()
+            .map(|company| {
+                company
+                    .members
+                    .iter()
+                    .filter(|member| session.active_personnel_ids.contains(&member.id))
+                    .map(|member| member.name.clone())
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let working_label = match active_personnel_names.as_slice() {
+            [] => None,
+            [name] => Some(format!("{name} is typing")),
+            [name, rest @ ..] => Some(format!("{name} and {} others are working", rest.len())),
+        };
+        let mention_menu = self.company_mention_query(cx).and_then(|(_, query)| {
+            let company = company.as_ref()?;
+            let normalized_query = query.to_lowercase();
+            let matching_members = company
+                .members
+                .iter()
+                .filter(|member| {
+                    normalized_query.is_empty()
+                        || member.name.to_lowercase().contains(&normalized_query)
+                })
+                .take(8)
+                .cloned()
+                .collect::<Vec<_>>();
+            if matching_members.is_empty() {
+                return None;
+            }
+            let mut menu = v_flex()
+                .id("company-personnel-mention-menu")
+                .w_full()
+                .max_h(px(240.))
+                .overflow_y_scroll()
+                .track_scroll(&self.company_mention_scroll_handle)
+                .border_t_1()
+                .border_color(cx.theme().colors().border)
+                .bg(cx.theme().colors().elevated_surface_background);
+            if company.members.len() > 5 {
+                menu = menu.child(
+                    Label::new("Type after @ to search Personnel")
+                        .size(LabelSize::Small)
+                        .color(Color::Muted),
+                );
+            }
+            for member in matching_members {
+                let member_id = member.id;
+                let member_name = member.name.clone();
+                let member_name_for_click = member_name.clone();
+                menu = menu.child(
+                    ui::ListItem::new(SharedString::from(format!("company-mention-{member_id}")))
+                        .start_slot(Icon::new(IconName::Person))
+                        .child(Label::new(member_name))
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            this.insert_company_mention(&member_name_for_click, window, cx);
+                        })),
+                );
+            }
+            Some(
+                div()
+                    .relative()
+                    .w_full()
+                    .max_h(px(240.))
+                    .child(menu)
+                    .vertical_scrollbar_for(&self.company_mention_scroll_handle, _window, cx)
+                    .into_any_element(),
+            )
+        });
+        let task_activity = (session.kind == CompanySessionKind::Task)
+            .then(|| {
+                let company = company.as_ref()?;
+                let mut activity = v_flex()
+                    .id("company-task-activity")
+                    .w_full()
+                    .max_h(px(180.))
+                    .overflow_y_scroll()
+                    .track_scroll(&self.company_task_scroll_handle)
+                    .gap_1()
+                    .px_3()
+                    .py_2()
+                    .border_t_1()
+                    .border_color(cx.theme().colors().border)
+                    .child(Label::new("Task Activity").size(LabelSize::Small));
+                for member in company
+                    .members
+                    .iter()
+                    .filter(|member| session.personnel_ids.contains(&member.id))
+                {
+                    let (state, color) = if session.waiting_personnel_ids.contains(&member.id) {
+                        ("Waiting for your answer", Color::Warning)
+                    } else if session.failed_personnel_ids.contains(&member.id) {
+                        ("Needs attention", Color::Error)
+                    } else if session.completed_personnel_ids.contains(&member.id) {
+                        ("Completed", Color::Success)
+                    } else if session.active_personnel_ids.contains(&member.id) {
+                        ("Working", Color::Accent)
+                    } else {
+                        ("Waiting to start", Color::Muted)
+                    };
+                    let worker_thread_id = session
+                        .timeline
+                        .iter()
+                        .rev()
+                        .find(|entry| entry.personnel_id == Some(member.id))
+                        .and_then(|entry| entry.worker_thread_id)
+                        .or_else(|| {
+                            session.work_items.iter().find_map(|item| {
+                                item.assignee_ids
+                                    .contains(&member.id)
+                                    .then(|| item.worker_thread_ids.last().copied())
+                                    .flatten()
+                            })
+                        });
+                    activity = activity.child(
+                        ui::ListItem::new(SharedString::from(format!(
+                            "company-task-member-{}",
+                            member.id
+                        )))
+                        .start_slot(Icon::new(IconName::Person))
+                        .child(
+                            h_flex()
+                                .w_full()
+                                .min_w_0()
+                                .justify_between()
+                                .gap_2()
+                                .child(Label::new(member.name.clone()).truncate())
+                                .child(Label::new(state).size(LabelSize::Small).color(color)),
+                        )
+                        .when_some(
+                            worker_thread_id,
+                            |item, thread_id| {
+                                item.on_click(cx.listener(move |this, _, window, cx| {
+                                    this.open_company_worker_thread(thread_id, window, cx);
+                                }))
+                            },
+                        ),
+                    );
+                }
+                Some(
+                    div()
+                        .relative()
+                        .w_full()
+                        .max_h(px(180.))
+                        .child(activity)
+                        .vertical_scrollbar_for(&self.company_task_scroll_handle, _window, cx)
+                        .into_any_element(),
+                )
+            })
+            .flatten();
+        let mut timeline = v_flex().w_full().gap_2().p_3();
+        for entry in &session.timeline {
+            let is_user = entry.kind == CompanyTimelineEntryKind::User;
+            let is_system = entry.kind == CompanyTimelineEntryKind::System;
+            let is_agenda = is_system && entry.speaker == "Agenda";
+            if is_agenda {
+                let title: SharedString = format!("Agenda: {}", session.title).into();
+                let content: SharedString = entry.content.clone().into();
+                timeline = timeline.child(
+                    h_flex().w_full().justify_center().child(
+                        Button::new(
+                            SharedString::from(format!("open-company-agenda-{}", entry.id)),
+                            "Open Agenda",
+                        )
+                        .style(ButtonStyle::Tinted(TintColor::Accent))
+                        .start_icon(Icon::new(IconName::Building2))
+                        .on_click(cx.listener(
+                            move |this, _, window, cx| {
+                                this.open_company_agenda(
+                                    title.clone(),
+                                    content.clone(),
+                                    window,
+                                    cx,
+                                );
+                            },
+                        )),
+                    ),
+                );
+                continue;
+            }
+            let bubble = v_flex()
+                .max_w(px(640.))
+                .min_w_0()
+                .gap_1()
+                .px_3()
+                .py_2()
+                .rounded_md()
+                .border_1()
+                .border_color(cx.theme().colors().border)
+                .bg(if is_user {
+                    cx.theme().colors().element_selected
+                } else {
+                    cx.theme().colors().elevated_surface_background
+                })
+                .child(
+                    Label::new(entry.speaker.clone())
+                        .size(LabelSize::Small)
+                        .color(if is_user { Color::Accent } else { Color::Muted }),
+                )
+                .child(Label::new(entry.content.clone()));
+            timeline = timeline.child(
+                h_flex()
+                    .w_full()
+                    .when(is_user, |this| this.justify_end())
+                    .when(is_system, |this| this.justify_center())
+                    .when(!is_user && !is_system, |this| this.justify_start())
+                    .child(bubble),
+            );
+        }
+
+        let discussion_running = session.runner_active
+            && session.status == CompanySessionStatus::Running
+            && !session.paused;
+        let can_stop =
+            session.runner_active && session.status != CompanySessionStatus::WaitingForUser;
+        let company_room_menu = PopoverMenu::new("company-room-add-menu")
+            .trigger_with_tooltip(
+                IconButton::new("company-room-add", IconName::Plus).icon_size(IconSize::Small),
+                Tooltip::text("Add context or Personnel"),
+            )
+            .anchor(Anchor::BottomLeft)
+            .with_handle(self.company_room_menu_handle.clone())
+            .menu({
+                let panel = cx.entity().downgrade();
+                let message_editor = self.company_room_input.clone();
+                let session_id = session.id;
+                move |window, cx| {
+                    Some(ContextMenu::build(window, cx, |menu, _window, _cx| {
+                        menu.item(
+                            ContextMenuEntry::new("Files & Directories")
+                                .icon(IconName::File)
+                                .handler({
+                                    let message_editor = message_editor.clone();
+                                    move |window, cx| {
+                                        message_editor.update(cx, |editor, cx| {
+                                            editor.insert_context_type("file", window, cx);
+                                        });
+                                    }
+                                }),
+                        )
+                        .item(
+                            ContextMenuEntry::new("Symbols")
+                                .icon(IconName::Code)
+                                .handler({
+                                    let message_editor = message_editor.clone();
+                                    move |window, cx| {
+                                        message_editor.update(cx, |editor, cx| {
+                                            editor.insert_context_type("symbol", window, cx);
+                                        });
+                                    }
+                                }),
+                        )
+                        .item(
+                            ContextMenuEntry::new("Include Conversation")
+                                .icon(IconName::Thread)
+                                .handler({
+                                    let message_editor = message_editor.clone();
+                                    move |window, cx| {
+                                        message_editor.update(cx, |editor, cx| {
+                                            editor.insert_context_type("thread", window, cx);
+                                        });
+                                    }
+                                }),
+                        )
+                        .item(
+                            ContextMenuEntry::new("Image")
+                                .icon(IconName::Image)
+                                .handler({
+                                    let message_editor = message_editor.clone();
+                                    move |window, cx| {
+                                        message_editor.update(cx, |editor, cx| {
+                                            editor.add_images_from_picker(window, cx);
+                                        });
+                                    }
+                                }),
+                        )
+                        .item(
+                            ContextMenuEntry::new("Branch Diff")
+                                .icon(IconName::GitBranch)
+                                .handler({
+                                    let message_editor = message_editor.clone();
+                                    move |window, cx| {
+                                        message_editor.update(cx, |editor, cx| {
+                                            editor.insert_branch_diff_crease(window, cx);
+                                        });
+                                    }
+                                }),
+                        )
+                        .entry("Add Personnel", None, {
+                            let panel = panel.clone();
+                            move |window, cx| {
+                                panel
+                                    .update(cx, |panel, cx| {
+                                        panel.open_add_company_personnel(session_id, window, cx);
+                                    })
+                                    .ok();
+                            }
+                        })
+                    }))
+                }
+            });
+
+        Some(
+            v_flex()
+                .id("company-session-room")
+                .size_full()
+                .min_h_0()
+                .bg(cx.theme().colors().panel_background)
+                .child(
+                    div()
+                        .id("company-session-timeline-scroll-container")
+                        .relative()
+                        .w_full()
+                        .flex_1()
+                        .min_h_0()
+                        .overflow_hidden()
+                        .child(
+                            div()
+                                .id("company-session-timeline-scroll")
+                                .size_full()
+                                .overflow_y_scroll()
+                                .track_scroll(&self.company_timeline_scroll_handle)
+                                .child(timeline),
+                        )
+                        .vertical_scrollbar_for(&self.company_timeline_scroll_handle, _window, cx),
+                )
+                .when_some(task_activity, |this, activity| this.child(activity))
+                .when_some(working_label, |this, label| {
+                    this.child(
+                        h_flex()
+                            .w_full()
+                            .px_3()
+                            .py_1()
+                            .child(LoadingLabel::new(label).size(LabelSize::Small)),
+                    )
+                })
+                .when_some(mention_menu, |this, menu| this.child(menu))
+                .child(
+                    h_flex()
+                        .w_full()
+                        .min_w_0()
+                        .gap_2()
+                        .p_3()
+                        .border_t_1()
+                        .border_color(cx.theme().colors().border)
+                        .child(company_room_menu)
+                        .child(
+                            div()
+                                .min_w_0()
+                                .flex_1()
+                                .rounded_md()
+                                .border_1()
+                                .border_color(cx.theme().colors().border)
+                                .px_2()
+                                .py_1()
+                                .when(cfg!(target_os = "android"), |this| {
+                                    let input = self.company_room_input.clone();
+                                    this.capture_any_mouse_down(
+                                        move |event: &gpui::MouseDownEvent, window, cx| {
+                                            if event.button == MouseButton::Left {
+                                                input
+                                                    .read(cx)
+                                                    .editor()
+                                                    .read(cx)
+                                                    .focus_handle(cx)
+                                                    .focus(window, cx);
+                                                if !window.soft_keyboard_visible() {
+                                                    window.toggle_soft_keyboard();
+                                                }
+                                            }
+                                        },
+                                    )
+                                })
+                                .child(self.company_room_input.clone()),
+                        )
+                        .child(
+                            IconButton::new(
+                                "toggle-company-discussion",
+                                if discussion_running {
+                                    IconName::DebugPause
+                                } else {
+                                    IconName::PlayFilled
+                                },
+                            )
+                            .style(ButtonStyle::Tinted(if discussion_running {
+                                TintColor::Warning
+                            } else {
+                                TintColor::Success
+                            }))
+                            .tooltip(Tooltip::text(if discussion_running {
+                                "Hold discussion"
+                            } else {
+                                "Send and continue discussion"
+                            }))
+                            .on_click(cx.listener(
+                                move |this, _, window, cx| {
+                                    if discussion_running {
+                                        this.hold_company_discussion(cx);
+                                    } else {
+                                        this.play_company_discussion(window, cx);
+                                    }
+                                },
+                            )),
+                        )
+                        .when(can_stop, |this| {
+                            this.child(
+                                IconButton::new("stop-company-discussion", IconName::Stop)
+                                    .style(ButtonStyle::Tinted(TintColor::Error))
+                                    .tooltip(Tooltip::text("Stop discussion"))
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.stop_company_discussion(cx);
+                                    })),
+                            )
+                        }),
+                )
+                .into_any_element(),
+        )
+    }
+
+    pub(crate) fn launch_company_session(
+        &mut self,
+        request: CompanySessionRequest,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let selected_members = request
+            .company
+            .members
+            .iter()
+            .filter(|member| request.member_ids.contains(&member.id))
+            .cloned()
+            .collect::<Vec<_>>();
+        if selected_members.is_empty() {
+            return;
+        }
+
+        let kind = match request.kind {
+            CompanySessionKind::Meeting => "Meeting",
+            CompanySessionKind::Task => "Task",
+        };
+        let company_session_id = uuid::Uuid::new_v4();
+        let primary_thread_id = self.create_company_session_thread(
+            request.kind,
+            &request.title,
+            &request.company.name,
+            window,
+            cx,
+        );
+        let initial_work_items = if request.kind == CompanySessionKind::Task {
+            vec![CompanyWorkItem {
+                id: uuid::Uuid::new_v4(),
+                title: request.title.clone(),
+                description: request.description.clone(),
+                status: CompanyWorkItemStatus::Discussing,
+                assignee_ids: Vec::new(),
+                worker_thread_ids: Vec::new(),
+            }]
+        } else {
+            Vec::new()
+        };
+        create_company_session(
+            CompanySessionRecord {
+                id: company_session_id,
+                company_id: request.company.id,
+                company_name: request.company.name.clone(),
+                kind: request.kind,
+                title: request.title.clone(),
+                description: request.description.clone(),
+                started_at_unix_ms: chrono::Utc::now().timestamp_millis(),
+                archived: false,
+                personnel_ids: selected_members.iter().map(|person| person.id).collect(),
+                attachments: request.attachments.clone(),
+                status: CompanySessionStatus::Running,
+                timeline: vec![CompanyTimelineEntry {
+                    id: uuid::Uuid::new_v4(),
+                    kind: CompanyTimelineEntryKind::System,
+                    personnel_id: None,
+                    speaker: "Company Coordinator".to_string(),
+                    content: format!("Started {kind}: {}", request.title),
+                    worker_thread_id: None,
+                }],
+                worker_thread_ids: Vec::new(),
+                primary_thread_id: Some(primary_thread_id),
+                work_items: initial_work_items,
+                pending_user_context: Vec::new(),
+                context_blocks: Vec::new(),
+                stop_requested: false,
+                paused: false,
+                runner_active: false,
+                runner_generation: 1,
+                active_personnel_ids: Vec::new(),
+                waiting_personnel_ids: Vec::new(),
+                completed_personnel_ids: Vec::new(),
+                failed_personnel_ids: Vec::new(),
+                completion_condition: request.completion_condition.clone(),
+                meeting_turn_limit: request.meeting_turn_limit,
+                allow_clarifying_questions: request.allow_clarifying_questions,
+            },
+            cx,
+        );
+        self.company_worker_detail_thread = None;
+        self.switch_company_room_draft(company_session_id, window, cx);
+        self.activate_retained_thread(primary_thread_id, true, window, cx);
+
+        let roster = selected_members
+            .iter()
+            .map(|member| {
+                format!(
+                    "- {}\n  Agent: {}\n  Model: {}\n  Persona: {}\n  Allowed installed slash-command skills: {}\n  Rules: {}\n  Boundaries: {}\n  Workflow: {}",
+                    member.name,
+                    member.agent_id,
+                    member.model.as_deref().unwrap_or("agent default"),
+                    member.persona,
+                    member.skills,
+                    member.rules,
+                    member.boundaries,
+                    member.workflow,
+                )
+            })
+            .join("\n");
+        let attachments = if request.attachments.is_empty() {
+            "None".to_string()
+        } else {
+            request
+                .attachments
+                .iter()
+                .map(|path| format!("- {}", path.display()))
+                .join("\n")
+        };
+        let company_policy = format!(
+            "Company-wide allowed installed slash-command skills:\n{}\n\nCompany-wide rules:\n{}",
+            request.company.skills, request.company.rules
+        );
+
+        if request.kind == CompanySessionKind::Meeting {
+            self.launch_company_meeting(
+                company_session_id,
+                1,
+                request,
+                selected_members,
+                roster,
+                attachments,
+                window,
+                cx,
+            );
+            return;
+        }
+
+        self.launch_company_task(
+            company_session_id,
+            1,
+            request,
+            selected_members,
+            roster,
+            attachments,
+            company_policy,
+            window,
+            cx,
+        );
+    }
+
+    fn launch_company_task(
+        &mut self,
+        company_session_id: uuid::Uuid,
+        runner_generation: u64,
+        request: CompanySessionRequest,
+        selected_members: Vec<CompanyMember>,
+        roster: String,
+        attachments: String,
+        company_policy: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let task_id = format!("company-task-{company_session_id}");
+        update_company_session(company_session_id, cx, |session| {
+            session.runner_active = true;
+        });
+        cx.start_background_task(&task_id, &format!("Planning task: {}", request.title));
+
+        cx.spawn_in(window, async move |this, cx| {
+            let mut discussion = String::new();
+            let mut planning_successful = true;
+
+            // Planning is deliberately serial: each person sees the earlier
+            // discussion, so the visible result behaves like a meeting instead
+            // of several agents answering the same prompt in isolation.
+            for member in &selected_members {
+                loop {
+                    let (stop_requested, paused) = cx.update(|_, cx| {
+                        crate::company::load_companies(cx)
+                            .sessions
+                            .into_iter()
+                            .find(|session| session.id == company_session_id)
+                            .map(|session| {
+                                (
+                                    session.stop_requested
+                                        || session.runner_generation != runner_generation,
+                                    session.paused,
+                                )
+                            })
+                            .unwrap_or((true, false))
+                    })?;
+                    if stop_requested || !paused {
+                        break;
+                    }
+                    cx.background_executor()
+                        .timer(Duration::from_millis(250))
+                        .await;
+                }
+                let (stop_requested, interjections) = cx.update(|_, cx| {
+                    Self::take_company_interjections(company_session_id, cx)
+                })?;
+                if stop_requested {
+                    break;
+                }
+                this.update_in(cx, |_panel, _window, cx| {
+                    update_company_session(company_session_id, cx, |session| {
+                        session.active_personnel_ids = vec![member.id];
+                    });
+                    cx.notify();
+                })?;
+                let earlier_discussion = if discussion.is_empty() {
+                    "No earlier personnel has spoken yet.".to_string()
+                } else {
+                    discussion.clone()
+                };
+                let user_interjections = if interjections.is_empty() {
+                    "None".to_string()
+                } else {
+                    interjections.join("\n")
+                };
+                let prompt = format!(
+                    "<company_session type=\"task_planning\" company=\"{}\" title=\"{}\">\n\
+                     You are {}. This is the planning lane. Do not modify project files. \
+                     Review the desired outcome and earlier discussion from your configured \
+                     perspective. Identify requirements, acceptance criteria, dependencies, risks, \
+                     and which Personnel should own implementation or review. Speak once and keep \
+                     the result concise enough for the next person. Treat @Personnel mentions in \
+                     the task description as explicit assignment preferences unless they conflict \
+                     with that person's boundaries.\n\n{}\n\nTask description:\n{}\n\n\
+                     Completion condition:\n{}\n\n{}\n\n\
+                     Company roster:\n{}\n\nAttachments:\n{}\n\n\
+                     User interjections since the previous speaker:\n{}\n\n\
+                     Earlier discussion:\n{}\n\
+                     </company_session>",
+                    request.company.name,
+                    request.title,
+                    member.name,
+                    company_policy,
+                    request.description,
+                    if request.completion_condition.trim().is_empty() {
+                        "Use the task description and generated acceptance criteria."
+                    } else {
+                        request.completion_condition.as_str()
+                    },
+                    if request.allow_clarifying_questions {
+                        "If essential information is missing, respond only with <needs_user_input>your concise question</needs_user_input>."
+                    } else {
+                        "Do not pause for clarification; state reasonable assumptions."
+                    },
+                    roster,
+                    attachments,
+                    user_interjections,
+                    earlier_discussion,
+                );
+                let (thread_id, conversation, previous_response) =
+                    this.update_in(cx, |panel, window, cx| {
+                    let result = panel.create_or_continue_company_member_thread(
+                        company_session_id,
+                        &request.company.name,
+                        &format!("{} / Planning", request.title),
+                        member,
+                        prompt,
+                        &Self::company_context_blocks(company_session_id, cx),
+                        window,
+                        cx,
+                    );
+                    crate::company::mark_company_threads([result.0], cx);
+                    update_company_session(company_session_id, cx, |session| {
+                        if !session.worker_thread_ids.contains(&result.0) {
+                            session.worker_thread_ids.push(result.0);
+                        }
+                    });
+                    cx.notify();
+                    result
+                })?;
+
+                let mut saw_generation = false;
+                let mut response = String::new();
+                for _ in 0..7200 {
+                    cx.background_executor()
+                        .timer(Duration::from_millis(250))
+                        .await;
+                    let state = conversation.read_with(cx, |conversation, cx| {
+                        conversation.root_thread(cx).map(|thread| {
+                            let thread = thread.read(cx);
+                            (
+                                thread.status() == ThreadStatus::Generating,
+                                thread.status() == ThreadStatus::Idle,
+                                thread.had_error(),
+                                Self::latest_assistant_markdown(&thread, cx),
+                            )
+                        })
+                    });
+                    let Some((generating, idle, had_error, result)) = state else {
+                        continue;
+                    };
+                    saw_generation |= generating;
+                    if had_error
+                        || (idle
+                            && (saw_generation
+                                || result.as_deref() != previous_response.as_deref()))
+                    {
+                        response = result.unwrap_or_default();
+                        break;
+                    }
+                }
+                if response.is_empty() {
+                    planning_successful = false;
+                    response = "This person did not return a planning response before the timeout."
+                        .to_string();
+                }
+                if !cx.update(|_, cx| {
+                    Self::company_runner_is_current(
+                        company_session_id,
+                        runner_generation,
+                        cx,
+                    )
+                })? {
+                    return anyhow::Ok(());
+                }
+                let clarification = if request.allow_clarifying_questions {
+                    Self::tagged_company_message(&response, "needs_user_input")
+                } else {
+                    None
+                };
+                let visible_response = clarification.clone().unwrap_or(response);
+                let bounded = visible_response.chars().take(12_000).collect::<String>();
+                discussion.push_str(&format!("\n\n### {}\n{}", member.name, bounded));
+                cx.update(|_, cx| {
+                    update_company_session(company_session_id, cx, |session| {
+                        if !session.worker_thread_ids.contains(&thread_id) {
+                            session.worker_thread_ids.push(thread_id);
+                        }
+                        session.timeline.push(CompanyTimelineEntry {
+                            id: uuid::Uuid::new_v4(),
+                            kind: CompanyTimelineEntryKind::Personnel,
+                            personnel_id: Some(member.id),
+                            speaker: member.name.clone(),
+                            content: bounded,
+                            worker_thread_id: Some(thread_id),
+                        });
+                        session.active_personnel_ids.clear();
+                        if clarification.is_some() {
+                            session.status = CompanySessionStatus::WaitingForUser;
+                            session.paused = true;
+                            if !session.waiting_personnel_ids.contains(&member.id) {
+                                session.waiting_personnel_ids.push(member.id);
+                            }
+                        }
+                    });
+                    if clarification.is_some() {
+                        cx.start_background_task(
+                            &task_id,
+                            &format!(
+                                "Company: {}, {} is waiting for your answer",
+                                request.company.name, member.name
+                            ),
+                        );
+                    }
+                })?;
+                if clarification.is_some() {
+                    loop {
+                        let (stop_requested, waiting_for_user) = cx.update(|_, cx| {
+                            crate::company::load_companies(cx)
+                                .sessions
+                                .into_iter()
+                                .find(|session| session.id == company_session_id)
+                                .map(|session| {
+                                    (
+                                        session.stop_requested
+                                            || session.runner_generation != runner_generation,
+                                        session.status == CompanySessionStatus::WaitingForUser,
+                                    )
+                                })
+                                .unwrap_or((true, false))
+                        })?;
+                        if stop_requested || !waiting_for_user {
+                            break;
+                        }
+                        cx.background_executor()
+                            .timer(Duration::from_millis(250))
+                            .await;
+                    }
+                }
+            }
+
+            let (runner_is_current, stop_requested, active_personnel_ids) = cx.update(|_, cx| {
+                crate::company::load_companies(cx)
+                    .sessions
+                    .into_iter()
+                    .find(|session| session.id == company_session_id)
+                    .map(|session| {
+                        (
+                            session.runner_generation == runner_generation,
+                            session.stop_requested,
+                            session.personnel_ids,
+                        )
+                    })
+                    .unwrap_or((false, true, Vec::new()))
+            })?;
+            if !runner_is_current {
+                return anyhow::Ok(());
+            }
+            if stop_requested {
+                this.update_in(cx, |_panel, _window, cx| {
+                    update_company_session(company_session_id, cx, |session| {
+                        session.status = CompanySessionStatus::Completed;
+                        session.paused = false;
+                        session.timeline.push(CompanyTimelineEntry {
+                            id: uuid::Uuid::new_v4(),
+                            kind: CompanyTimelineEntryKind::System,
+                            personnel_id: None,
+                            speaker: "Task".to_string(),
+                            content: "Task stopped before execution started.".to_string(),
+                            worker_thread_id: None,
+                        });
+                    });
+                    cx.finish_background_task(
+                        &task_id,
+                        &format!("Task stopped: {}", request.title),
+                        true,
+                    );
+                    cx.notify();
+                })?;
+                return anyhow::Ok(());
+            }
+
+            // Personnel added while planning join the shared handoff and work lane.
+            let active_members = request
+                .company
+                .members
+                .iter()
+                .filter(|member| active_personnel_ids.contains(&member.id))
+                .cloned()
+                .collect::<Vec<_>>();
+            let active_members = if active_members.is_empty() {
+                selected_members.clone()
+            } else {
+                active_members
+            };
+
+            let Some(coordinator) = active_members.first().cloned() else {
+                return anyhow::Ok(());
+            };
+            this.update_in(cx, |_panel, _window, cx| {
+                update_company_session(company_session_id, cx, |session| {
+                    session.active_personnel_ids = vec![coordinator.id];
+                });
+                cx.notify();
+            })?;
+            let plan_prompt = format!(
+                "<company_session type=\"task_handoff\" company=\"{}\" title=\"{}\">\n\
+                 You are the planning coordinator. Convert the discussion into an implementation \
+                 handoff. List work items in dependency order. For each item name exactly one owner \
+                 from the roster, optional reviewers, acceptance criteria, and files or systems likely \
+                 to be owned. Personnel not assigned implementation must review or wait; they must not \
+                 make unrelated edits. Preserve explicit @Personnel assignments from the task \
+                 description unless they violate a configured boundary.\n\n{}\n\nTask description:\n{}\n\nCompletion condition:\n{}\n\nCompany roster:\n{}\n\n\
+                 Discussion:\n{}\n</company_session>",
+                request.company.name,
+                request.title,
+                company_policy,
+                request.description,
+                if request.completion_condition.trim().is_empty() {
+                    "Use the generated acceptance criteria."
+                } else {
+                    request.completion_condition.as_str()
+                },
+                roster,
+                discussion,
+            );
+            let (plan_thread_id, plan_conversation, previous_plan) =
+                this.update_in(cx, |panel, window, cx| {
+                    let result = panel.create_or_continue_company_member_thread(
+                        company_session_id,
+                        &request.company.name,
+                        &format!("{} / Handoff", request.title),
+                        &coordinator,
+                        plan_prompt,
+                        &Self::company_context_blocks(company_session_id, cx),
+                        window,
+                        cx,
+                    );
+                    crate::company::mark_company_threads([result.0], cx);
+                    update_company_session(company_session_id, cx, |session| {
+                        if !session.worker_thread_ids.contains(&result.0) {
+                            session.worker_thread_ids.push(result.0);
+                        }
+                    });
+                    cx.notify();
+                    result
+                })?;
+
+            let mut saw_generation = false;
+            let mut implementation_plan = String::new();
+            for _ in 0..7200 {
+                cx.background_executor()
+                    .timer(Duration::from_millis(250))
+                    .await;
+                let state = plan_conversation.read_with(cx, |conversation, cx| {
+                    conversation.root_thread(cx).map(|thread| {
+                        let thread = thread.read(cx);
+                        (
+                            thread.status() == ThreadStatus::Generating,
+                            thread.status() == ThreadStatus::Idle,
+                            thread.had_error(),
+                            Self::latest_assistant_markdown(&thread, cx),
+                        )
+                    })
+                });
+                let Some((generating, idle, had_error, result)) = state else {
+                    continue;
+                };
+                saw_generation |= generating;
+                if had_error
+                    || (idle
+                        && (saw_generation || result.as_deref() != previous_plan.as_deref()))
+                {
+                    implementation_plan = result.unwrap_or_default();
+                    break;
+                }
+            }
+            if implementation_plan.is_empty() {
+                planning_successful = false;
+                implementation_plan = discussion.clone();
+            }
+            let bounded_plan = implementation_plan.chars().take(24_000).collect::<String>();
+
+            this.update_in(cx, |_panel, _window, cx| {
+                update_company_session(company_session_id, cx, |session| {
+                    if !session.worker_thread_ids.contains(&plan_thread_id) {
+                        session.worker_thread_ids.push(plan_thread_id);
+                    }
+                    session.timeline.push(CompanyTimelineEntry {
+                        id: uuid::Uuid::new_v4(),
+                        kind: CompanyTimelineEntryKind::System,
+                        personnel_id: Some(coordinator.id),
+                        speaker: "Company Coordinator".to_string(),
+                        content: bounded_plan.clone(),
+                        worker_thread_id: Some(plan_thread_id),
+                    });
+                    if let Some(work_item) = session.work_items.first_mut() {
+                        work_item.status = CompanyWorkItemStatus::Ready;
+                    }
+                });
+            })?;
+
+            // The execution lane starts only after the serial planning lane has
+            // produced one shared handoff. Different Personnel may then work in
+            // parallel, while each individual agent still owns one turn at a time.
+            let execution_threads = this.update_in(cx, |panel, window, cx| {
+                let mut execution_threads = Vec::new();
+                for member in &active_members {
+                    let prompt = format!(
+                        "<company_session type=\"task_execution\" company=\"{}\" title=\"{}\">\n\
+                         You are {}. Read the shared implementation handoff. If it assigns you \
+                         implementation, complete only that work and state file ownership before \
+                         editing. If it assigns you review, review without taking another person's \
+                         files. If you are not assigned, make no changes and report that you are \
+                         waiting. You may use subagents only if your active agent supports them and \
+                         doing so respects the same ownership boundaries. Work toward the completion \
+                         condition and clearly report whether it was met.\n\n{}\n\nCompletion condition:\n{}\n\nShared handoff:\n{}\n\n\
+                         Attachments:\n{}\n</company_session>",
+                        request.company.name,
+                        request.title,
+                        member.name,
+                        company_policy,
+                        if request.completion_condition.trim().is_empty() {
+                            "Use the shared handoff acceptance criteria."
+                        } else {
+                            request.completion_condition.as_str()
+                        },
+                        bounded_plan,
+                        attachments,
+                    );
+                    let (thread_id, conversation, previous_response) =
+                        panel.create_or_continue_company_member_thread(
+                            company_session_id,
+                            &request.company.name,
+                            &format!("{} / Work", request.title),
+                            member,
+                            prompt,
+                            &Self::company_context_blocks(company_session_id, cx),
+                            window,
+                            cx,
+                        );
+                    crate::company::mark_company_threads([thread_id], cx);
+                    update_company_session(company_session_id, cx, |session| {
+                        if !session.worker_thread_ids.contains(&thread_id) {
+                            session.worker_thread_ids.push(thread_id);
+                        }
+                    });
+                    execution_threads.push((
+                        member.clone(),
+                        thread_id,
+                        conversation,
+                        previous_response,
+                    ));
+                }
+                execution_threads
+            })?;
+
+            this.update_in(cx, |_panel, _window, cx| {
+                update_company_session(company_session_id, cx, |session| {
+                    let ids = execution_threads
+                        .iter()
+                        .map(|(_, thread_id, _, _)| *thread_id)
+                        .collect::<Vec<_>>();
+                    for thread_id in &ids {
+                        if !session.worker_thread_ids.contains(thread_id) {
+                            session.worker_thread_ids.push(*thread_id);
+                        }
+                    }
+                    if let Some(work_item) = session.work_items.first_mut() {
+                        work_item.worker_thread_ids = ids;
+                        work_item.assignee_ids = active_members
+                            .iter()
+                            .map(|person| person.id)
+                            .collect();
+                        work_item.status = CompanyWorkItemStatus::InProgress;
+                    }
+                    session.active_personnel_ids = active_members
+                        .iter()
+                        .map(|person| person.id)
+                        .collect();
+                    session.status = if planning_successful {
+                        CompanySessionStatus::Running
+                    } else {
+                        CompanySessionStatus::Failed
+                    };
+                });
+                cx.notify();
+            })?;
+
+            let mut saw_generation = HashSet::default();
+            let mut completed_threads = HashSet::default();
+            let mut execution_results = HashMap::default();
+            let mut execution_successful = planning_successful;
+            let mut stopped = false;
+            for _ in 0..7200 {
+                stopped = cx.update(|_, cx| {
+                    crate::company::load_companies(cx)
+                        .sessions
+                        .into_iter()
+                        .find(|session| session.id == company_session_id)
+                        .is_none_or(|session| {
+                            session.stop_requested
+                                || session.runner_generation != runner_generation
+                        })
+                })?;
+                if stopped {
+                    cx.update(|_, cx| {
+                        for (_, _, conversation, _) in &execution_threads {
+                            conversation.update(cx, |conversation, cx| {
+                                conversation.cancel_generation(cx);
+                            });
+                        }
+                    })?;
+                    break;
+                }
+
+                for (member, thread_id, conversation, previous_response) in &execution_threads {
+                    if completed_threads.contains(thread_id) {
+                        continue;
+                    }
+                    let state = conversation.read_with(cx, |conversation, cx| {
+                        conversation.root_thread(cx).map(|thread| {
+                            let thread = thread.read(cx);
+                            (
+                                thread.status() == ThreadStatus::Generating,
+                                thread.status() == ThreadStatus::Idle,
+                                thread.had_error(),
+                                Self::latest_assistant_markdown(&thread, cx),
+                            )
+                        })
+                    });
+                    let Some((generating, idle, had_error, response)) = state else {
+                        continue;
+                    };
+                    if generating {
+                        saw_generation.insert(*thread_id);
+                    }
+                    if had_error
+                        || (idle
+                            && (saw_generation.contains(thread_id)
+                                || response.as_deref() != previous_response.as_deref()))
+                    {
+                        let response = response.unwrap_or_else(|| {
+                            "This person finished without a written report.".to_string()
+                        });
+                        let clarification = request
+                            .allow_clarifying_questions
+                            .then(|| Self::tagged_company_message(&response, "needs_user_input"))
+                            .flatten();
+                        completed_threads.insert(*thread_id);
+                        execution_successful &= !had_error && clarification.is_none();
+                        this.update_in(cx, |_panel, _window, cx| {
+                            update_company_session(company_session_id, cx, |session| {
+                                session
+                                    .active_personnel_ids
+                                    .retain(|person_id| *person_id != member.id);
+                                let destination = if had_error || clarification.is_some() {
+                                    &mut session.failed_personnel_ids
+                                } else {
+                                    &mut session.completed_personnel_ids
+                                };
+                                if !destination.contains(&member.id) {
+                                    destination.push(member.id);
+                                }
+                                if clarification.is_some() {
+                                    session.status = CompanySessionStatus::WaitingForUser;
+                                    if !session.waiting_personnel_ids.contains(&member.id) {
+                                        session.waiting_personnel_ids.push(member.id);
+                                    }
+                                }
+                            });
+                            if clarification.is_some() {
+                                let waiting_count = crate::company::load_companies(cx)
+                                    .sessions
+                                    .into_iter()
+                                    .find(|session| session.id == company_session_id)
+                                    .map(|session| session.waiting_personnel_ids.len())
+                                    .unwrap_or(1);
+                                let description = if waiting_count > 1 {
+                                    format!(
+                                        "Company: {}, multiple members are waiting for your answer",
+                                        request.company.name
+                                    )
+                                } else {
+                                    format!(
+                                        "Company: {}, {} is waiting for your answer",
+                                        request.company.name, member.name
+                                    )
+                                };
+                                cx.start_background_task(&task_id, &description);
+                            }
+                            cx.notify();
+                        })?;
+                        execution_results.insert(
+                            *thread_id,
+                            (member.clone(), clarification.unwrap_or(response)),
+                        );
+                    }
+                }
+                if completed_threads.len() == execution_threads.len() {
+                    break;
+                }
+                cx.background_executor()
+                    .timer(Duration::from_millis(250))
+                    .await;
+            }
+            if completed_threads.len() != execution_threads.len() && !stopped {
+                execution_successful = false;
+            }
+            if !cx.update(|_, cx| {
+                Self::company_runner_is_current(
+                    company_session_id,
+                    runner_generation,
+                    cx,
+                )
+            })? {
+                return anyhow::Ok(());
+            }
+
+            this.update_in(cx, |_panel, _window, cx| {
+                let mut waiting_for_user = false;
+                update_company_session(company_session_id, cx, |session| {
+                    for (thread_id, (member, response)) in &execution_results {
+                        session.timeline.push(CompanyTimelineEntry {
+                            id: uuid::Uuid::new_v4(),
+                            kind: CompanyTimelineEntryKind::Personnel,
+                            personnel_id: Some(member.id),
+                            speaker: member.name.clone(),
+                            content: response.chars().take(12_000).collect(),
+                            worker_thread_id: Some(*thread_id),
+                        });
+                    }
+                    session.active_personnel_ids.clear();
+                    session.paused = false;
+                    session.runner_active = false;
+                    waiting_for_user = !session.waiting_personnel_ids.is_empty();
+                    session.status = if waiting_for_user {
+                        CompanySessionStatus::WaitingForUser
+                    } else if stopped || execution_successful {
+                        CompanySessionStatus::Completed
+                    } else {
+                        CompanySessionStatus::Failed
+                    };
+                    if let Some(work_item) = session.work_items.first_mut() {
+                        work_item.status = if stopped {
+                            CompanyWorkItemStatus::Blocked
+                        } else if execution_successful {
+                            CompanyWorkItemStatus::Done
+                        } else {
+                            CompanyWorkItemStatus::Blocked
+                        };
+                    }
+                });
+                if !waiting_for_user {
+                    cx.finish_background_task(
+                        &task_id,
+                        &format!(
+                            "Company task {}: {}",
+                            if stopped { "stopped" } else { "completed" },
+                            request.title
+                        ),
+                        stopped || execution_successful,
+                    );
+                }
+                cx.notify();
+            })?;
+
+            anyhow::Ok(())
+        })
+        .detach_and_log_err(cx);
+    }
+
+    fn company_member_agent(member: &CompanyMember) -> Agent {
+        if member.agent_id == agent::ZED_AGENT_ID.as_ref() {
+            Agent::NativeAgent
+        } else {
+            Agent::Custom {
+                id: AgentId(member.agent_id.clone().into()),
+            }
+        }
+    }
+
+    fn create_company_member_thread(
+        &mut self,
+        company_name: &str,
+        session_title: &str,
+        member: &CompanyMember,
+        prompt: String,
+        context_blocks: &[acp::ContentBlock],
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> (ThreadId, Entity<ConversationView>) {
+        let title: SharedString =
+            format!("{company_name} / {session_title} / {}", member.name).into();
+        let mut blocks = vec![acp::ContentBlock::Text(acp::TextContent::new(prompt))];
+        blocks.extend(context_blocks.iter().cloned());
+        let thread_id = self.create_thread_with_options(
+            CreateThreadOptions {
+                title: Some(title.clone()),
+                initial_content: Some(AgentInitialContent::ContentBlock {
+                    blocks,
+                    auto_submit: true,
+                }),
+                agent: Some(Self::company_member_agent(member)),
+                model: member.model.clone(),
+                work_dirs: None,
+            },
+            AgentThreadSource::AgentPanel,
+            window,
+            cx,
+        );
+        ThreadMetadataStore::global(cx).update(cx, |store, cx| {
+            store.set_title_override(thread_id, title, cx);
+        });
+        let conversation = self
+            .retained_threads
+            .get(&thread_id)
+            .cloned()
+            .expect("new company thread must be retained");
+        (thread_id, conversation)
+    }
+
+    fn create_or_continue_company_member_thread(
+        &mut self,
+        company_session_id: uuid::Uuid,
+        company_name: &str,
+        session_title: &str,
+        member: &CompanyMember,
+        prompt: String,
+        context_blocks: &[acp::ContentBlock],
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> (ThreadId, Entity<ConversationView>, Option<String>) {
+        let existing_thread_id = crate::company::load_companies(cx)
+            .sessions
+            .into_iter()
+            .find(|session| session.id == company_session_id)
+            .and_then(|session| {
+                session.timeline.into_iter().rev().find_map(|entry| {
+                    (entry.personnel_id == Some(member.id))
+                        .then_some(entry.worker_thread_id)
+                        .flatten()
+                })
+            });
+
+        if let Some(thread_id) = existing_thread_id
+            && let Some(conversation) = self.retained_threads.get(&thread_id).cloned()
+            && let Some(thread_view) = conversation.read(cx).active_thread().cloned()
+        {
+            let previous_response = conversation
+                .read(cx)
+                .root_thread(cx)
+                .and_then(|thread| Self::latest_assistant_markdown(&thread.read(cx), cx));
+            let mut blocks = vec![acp::ContentBlock::Text(acp::TextContent::new(prompt))];
+            blocks.extend(context_blocks.iter().cloned());
+            thread_view.update(cx, |thread_view, cx| {
+                thread_view.send_content(
+                    Task::ready(Ok(Some((blocks, Vec::new())))),
+                    false,
+                    window,
+                    cx,
+                );
+            });
+            return (thread_id, conversation, previous_response);
+        }
+
+        let (thread_id, conversation) = self.create_company_member_thread(
+            company_name,
+            session_title,
+            member,
+            prompt,
+            context_blocks,
+            window,
+            cx,
+        );
+        (thread_id, conversation, None)
+    }
+
+    fn launch_company_meeting(
+        &mut self,
+        company_session_id: uuid::Uuid,
+        runner_generation: u64,
+        request: CompanySessionRequest,
+        selected_members: Vec<CompanyMember>,
+        _roster: String,
+        attachments: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let task_id = format!("company-meeting-{company_session_id}");
+        update_company_session(company_session_id, cx, |session| {
+            session.runner_active = true;
+        });
+        cx.start_background_task(&task_id, &format!("Company meeting: {}", request.title));
+
+        cx.spawn_in(window, async move |this, cx| {
+            let mut transcript = cx.update(|_, cx| {
+                crate::company::load_companies(cx)
+                    .sessions
+                    .into_iter()
+                    .find(|session| session.id == company_session_id)
+                    .map(|session| {
+                        session
+                            .timeline
+                            .into_iter()
+                            .filter(|entry| entry.kind != CompanyTimelineEntryKind::System)
+                            .map(|entry| format!("### {}\n{}", entry.speaker, entry.content))
+                            .join("\n\n")
+                    })
+                    .unwrap_or_default()
+            })?;
+            let mut meeting_successful = true;
+            let mut round = 0usize;
+            let mut completed_turns = 0usize;
+
+            'meeting: loop {
+                round += 1;
+                let personnel_ids = cx.update(|_, cx| {
+                    crate::company::load_companies(cx)
+                        .sessions
+                        .into_iter()
+                        .find(|session| session.id == company_session_id)
+                        .map(|session| session.personnel_ids)
+                        .unwrap_or_default()
+                })?;
+                let round_members = request
+                    .company
+                    .members
+                    .iter()
+                    .filter(|member| personnel_ids.contains(&member.id))
+                    .cloned()
+                    .collect::<Vec<_>>();
+                let round_roster = round_members
+                    .iter()
+                    .map(|member| {
+                        format!(
+                            "- {} [{} / {}]",
+                            member.name,
+                            member.agent_id,
+                            member.model.as_deref().unwrap_or("agent default")
+                        )
+                    })
+                    .join("\n");
+
+                for member in &round_members {
+                    if request
+                        .meeting_turn_limit
+                        .is_some_and(|limit| completed_turns >= limit)
+                    {
+                        break 'meeting;
+                    }
+                    loop {
+                        let (stop_requested, paused) = cx.update(|_, cx| {
+                            crate::company::load_companies(cx)
+                                .sessions
+                                .into_iter()
+                                .find(|session| session.id == company_session_id)
+                                .map(|session| {
+                                    (
+                                        session.stop_requested
+                                            || session.runner_generation != runner_generation,
+                                        session.paused,
+                                    )
+                                })
+                                .unwrap_or((true, false))
+                        })?;
+                        if stop_requested {
+                            break 'meeting;
+                        }
+                        if !paused {
+                            break;
+                        }
+                        cx.background_executor()
+                            .timer(Duration::from_millis(250))
+                            .await;
+                    }
+                let (stop_requested, interjections) = cx.update(|_, cx| {
+                    Self::take_company_interjections(company_session_id, cx)
+                })?;
+                if stop_requested {
+                    break 'meeting;
+                }
+                this.update_in(cx, |_panel, _window, cx| {
+                    update_company_session(company_session_id, cx, |session| {
+                        session.active_personnel_ids = vec![member.id];
+                    });
+                    cx.notify();
+                })?;
+                let earlier_discussion = if transcript.is_empty() {
+                    "No earlier member has spoken yet.".to_string()
+                } else {
+                    transcript.clone()
+                };
+                let user_interjections = if interjections.is_empty() {
+                    "None".to_string()
+                } else {
+                    interjections.join("\n")
+                };
+                let prompt = format!(
+                    "<company_session type=\"meeting\" company=\"{}\" title=\"{}\" round=\"{}\">\n\
+                     You are {}. Reply naturally to the people shown in Earlier discussion, as \
+                     colleagues talking together rather than delivering isolated reports. You may \
+                     agree, disagree, answer a question, ask a brief follow-up, or build on a named \
+                     person's idea. \
+                     Do not modify files during a meeting. Return exactly one concise meeting \
+                     utterance from your configured role. It may include a recommendation, agreement \
+                     or disagreement, a risk, or a question, but do not add headings, speaker labels, \
+                     transcripts, or tool logs. This response is rendered as one group-chat bubble.\n\n\
+                     Completion condition:\n{}\n\n\
+                     If that condition is clearly satisfied, append <meeting_complete/> after your \
+                     utterance. {}\n\n\
+                     Company-wide allowed installed slash-command skills:\n{}\n\n\
+                     Company-wide rules:\n{}\n\n\
+                     Task description:\n{}\n\nCompany roster:\n{}\n\nAttachments:\n{}\n\n\
+                     User interjections since the previous speaker:\n{}\n\n\
+                     Earlier discussion:\n{}\n</company_session>",
+                    request.company.name,
+                    request.title,
+                    round,
+                    member.name,
+                    if request.completion_condition.trim().is_empty() {
+                        "No explicit condition; continue until the configured turn limit or manual stop."
+                    } else {
+                        request.completion_condition.as_str()
+                    },
+                    if request.allow_clarifying_questions {
+                        "If essential information is missing, respond only with <needs_user_input>your concise question</needs_user_input>."
+                    } else {
+                        "Do not pause for clarification; state reasonable assumptions in the utterance."
+                    },
+                    request.company.skills,
+                    request.company.rules,
+                    request.description,
+                    round_roster,
+                    attachments,
+                    user_interjections,
+                    earlier_discussion,
+                );
+                let (thread_id, conversation, previous_response) =
+                    this.update_in(cx, |panel, window, cx| {
+                    let result = panel.create_or_continue_company_member_thread(
+                        company_session_id,
+                        &request.company.name,
+                        &request.title,
+                        member,
+                        prompt,
+                        &Self::company_context_blocks(company_session_id, cx),
+                        window,
+                        cx,
+                    );
+                    crate::company::mark_company_threads([result.0], cx);
+                    update_company_session(company_session_id, cx, |session| {
+                        if !session.worker_thread_ids.contains(&result.0) {
+                            session.worker_thread_ids.push(result.0);
+                        }
+                    });
+                    cx.notify();
+                    result
+                })?;
+                let mut saw_generation = false;
+                let mut final_utterance = String::new();
+                for _ in 0..7200 {
+                    cx.background_executor()
+                        .timer(Duration::from_millis(250))
+                        .await;
+                    let state = conversation.read_with(cx, |conversation, cx| {
+                        conversation.root_thread(cx).map(|thread| {
+                            let thread = thread.read(cx);
+                            (
+                                thread.status() == ThreadStatus::Generating,
+                                thread.status() == ThreadStatus::Idle,
+                                thread.had_error(),
+                                Self::latest_assistant_markdown(&thread, cx),
+                            )
+                        })
+                    });
+                    let Some((generating, idle, had_error, utterance)) = state else {
+                        continue;
+                    };
+                    saw_generation |= generating;
+                    if had_error
+                        || (idle
+                            && (saw_generation
+                                || utterance.as_deref() != previous_response.as_deref()))
+                    {
+                        final_utterance = utterance.unwrap_or_default();
+                        break;
+                    }
+                }
+
+                if final_utterance.is_empty() {
+                    meeting_successful = false;
+                    final_utterance = "This member did not return a response before the meeting timeout."
+                        .to_string();
+                }
+                if !cx.update(|_, cx| {
+                    Self::company_runner_is_current(
+                        company_session_id,
+                        runner_generation,
+                        cx,
+                    )
+                })? {
+                    return anyhow::Ok(());
+                }
+
+                let clarification = if request.allow_clarifying_questions {
+                    Self::tagged_company_message(&final_utterance, "needs_user_input")
+                } else {
+                    None
+                };
+                let completion_reached = final_utterance.contains("<meeting_complete/>");
+                let visible_utterance = clarification
+                    .clone()
+                    .unwrap_or_else(|| final_utterance.replace("<meeting_complete/>", ""));
+                let bounded_response = visible_utterance.chars().take(12_000).collect::<String>();
+                completed_turns += 1;
+                transcript.push_str(&format!(
+                    "\n\n### {}\n{}",
+                    member.name, bounded_response
+                ));
+                this.update_in(cx, |_panel, _window, cx| {
+                    update_company_session(company_session_id, cx, |session| {
+                        session.timeline.push(CompanyTimelineEntry {
+                            id: uuid::Uuid::new_v4(),
+                            kind: CompanyTimelineEntryKind::Personnel,
+                            personnel_id: Some(member.id),
+                            speaker: member.name.clone(),
+                            content: bounded_response,
+                            worker_thread_id: Some(thread_id),
+                        });
+                        session.active_personnel_ids.clear();
+                        if clarification.is_some() {
+                            session.status = CompanySessionStatus::WaitingForUser;
+                            session.paused = true;
+                            if !session.waiting_personnel_ids.contains(&member.id) {
+                                session.waiting_personnel_ids.push(member.id);
+                            }
+                        }
+                    });
+                    if clarification.is_some() {
+                        cx.start_background_task(
+                            &task_id,
+                            &format!(
+                                "Company: {}, {} is waiting for your answer",
+                                request.company.name, member.name
+                            ),
+                        );
+                    }
+                    cx.notify();
+                })?;
+                if clarification.is_some() {
+                    loop {
+                        let (stop_requested, waiting_for_user) = cx.update(|_, cx| {
+                            crate::company::load_companies(cx)
+                                .sessions
+                                .into_iter()
+                                .find(|session| session.id == company_session_id)
+                                .map(|session| {
+                                    (
+                                        session.stop_requested
+                                            || session.runner_generation != runner_generation,
+                                        session.status == CompanySessionStatus::WaitingForUser,
+                                    )
+                                })
+                                .unwrap_or((true, false))
+                        })?;
+                        if stop_requested {
+                            break 'meeting;
+                        }
+                        if !waiting_for_user {
+                            break;
+                        }
+                        cx.background_executor()
+                            .timer(Duration::from_millis(250))
+                            .await;
+                    }
+                }
+                if completion_reached {
+                    break 'meeting;
+                }
+                }
+
+            }
+
+            if !cx.update(|_, cx| {
+                Self::company_runner_is_current(
+                    company_session_id,
+                    runner_generation,
+                    cx,
+                )
+            })? {
+                return anyhow::Ok(());
+            }
+
+            let coordinator = selected_members.first().cloned();
+            if let Some(coordinator) = coordinator {
+                this.update_in(cx, |_panel, _window, cx| {
+                    update_company_session(company_session_id, cx, |session| {
+                        session.active_personnel_ids = vec![coordinator.id];
+                    });
+                    cx.notify();
+                })?;
+                let (_, final_interjections) = cx.update(|_, cx| {
+                    Self::take_company_interjections(company_session_id, cx)
+                })?;
+                if !final_interjections.is_empty() {
+                    transcript.push_str("\n\n### User interjection\n");
+                    transcript.push_str(&final_interjections.join("\n"));
+                }
+                let prompt = format!(
+                    "<company_session type=\"meeting_agenda\" company=\"{}\" title=\"{}\">\n\
+                     You are the meeting coordinator. Consolidate the member discussion below into: \
+                     decisions, unresolved questions, risks, a concise agenda, and proposed tasks with \
+                     one owner per task. Do not edit project files.\n\n\
+                     Company-wide allowed installed slash-command skills:\n{}\n\n\
+                     Company-wide rules:\n{}\n\nTask description:\n{}\n\n\
+                     Discussion:\n{}\n</company_session>",
+                    request.company.name,
+                    request.title,
+                    request.company.skills,
+                    request.company.rules,
+                    request.description,
+                    transcript,
+                );
+                let (agenda_thread_id, agenda_conversation, previous_agenda) =
+                    this.update_in(cx, |panel, window, cx| {
+                    let result = panel.create_or_continue_company_member_thread(
+                        company_session_id,
+                        &request.company.name,
+                        &format!("{} / Agenda", request.title),
+                        &coordinator,
+                        prompt,
+                        &Self::company_context_blocks(company_session_id, cx),
+                        window,
+                        cx,
+                    );
+                    crate::company::mark_company_threads([result.0], cx);
+                    update_company_session(company_session_id, cx, |session| {
+                        if !session.worker_thread_ids.contains(&result.0) {
+                            session.worker_thread_ids.push(result.0);
+                        }
+                        session.timeline.push(CompanyTimelineEntry {
+                            id: uuid::Uuid::new_v4(),
+                            kind: CompanyTimelineEntryKind::System,
+                            personnel_id: Some(coordinator.id),
+                            speaker: "Company Coordinator".to_string(),
+                            content: "The discussion round is complete. Preparing the agenda...".to_string(),
+                            worker_thread_id: Some(result.0),
+                        });
+                    });
+                    cx.notify();
+                    result
+                })?;
+
+                let mut saw_generation = false;
+                let mut agenda = String::new();
+                for _ in 0..7200 {
+                    cx.background_executor()
+                        .timer(Duration::from_millis(250))
+                        .await;
+                    let state = agenda_conversation.read_with(cx, |conversation, cx| {
+                        conversation.root_thread(cx).map(|thread| {
+                            let thread = thread.read(cx);
+                            (
+                                thread.status() == ThreadStatus::Generating,
+                                thread.status() == ThreadStatus::Idle,
+                                thread.had_error(),
+                                Self::latest_assistant_markdown(&thread, cx),
+                            )
+                        })
+                    });
+                    let Some((generating, idle, had_error, result)) = state else {
+                        continue;
+                    };
+                    saw_generation |= generating;
+                    if had_error
+                        || (idle
+                            && (saw_generation
+                                || result.as_deref() != previous_agenda.as_deref()))
+                    {
+                        agenda = result.unwrap_or_default();
+                        break;
+                    }
+                }
+                if agenda.is_empty() {
+                    meeting_successful = false;
+                    agenda = "The meeting agenda could not be generated. Open the coordinator thread for details."
+                        .to_string();
+                }
+                let bounded_agenda = agenda.chars().take(24_000).collect::<String>();
+                if !cx.update(|_, cx| {
+                    Self::company_runner_is_current(
+                        company_session_id,
+                        runner_generation,
+                        cx,
+                    )
+                })? {
+                    return anyhow::Ok(());
+                }
+                this.update_in(cx, |_panel, _window, cx| {
+                    update_company_session(company_session_id, cx, |session| {
+                        session.status = if meeting_successful {
+                            CompanySessionStatus::Completed
+                        } else {
+                            CompanySessionStatus::Failed
+                        };
+                        session.runner_active = false;
+                        session.active_personnel_ids.clear();
+                        session.timeline.retain(|entry| {
+                            !(entry.worker_thread_id == Some(agenda_thread_id)
+                                && entry.speaker == "Company Coordinator")
+                        });
+                        session.timeline.push(CompanyTimelineEntry {
+                            id: uuid::Uuid::new_v4(),
+                            kind: CompanyTimelineEntryKind::System,
+                            personnel_id: Some(coordinator.id),
+                            speaker: "Agenda".to_string(),
+                            content: bounded_agenda,
+                            worker_thread_id: Some(agenda_thread_id),
+                        });
+                    });
+                    cx.notify();
+                })?;
+            }
+
+            if !cx.update(|_, cx| {
+                Self::company_runner_is_current(
+                    company_session_id,
+                    runner_generation,
+                    cx,
+                )
+            })? {
+                return anyhow::Ok(());
+            }
+            this.update_in(cx, |panel, window, cx| {
+                update_company_session(company_session_id, cx, |session| {
+                    session.runner_active = false;
+                });
+                panel.release_completed_meeting_workers(company_session_id, window, cx);
+                cx.finish_background_task(
+                    &task_id,
+                    &format!("Company meeting completed: {}", request.title),
+                    meeting_successful,
+                );
+            })?;
+            anyhow::Ok(())
+        })
+        .detach_and_log_err(cx);
     }
 
     fn draft_has_content(&self, draft: &Entity<ConversationView>, cx: &App) -> bool {
@@ -4952,9 +7602,14 @@ impl agent::SiblingThreadHost for AgentPanelSiblingHost {
                 id: agent_id.0.to_string(),
                 name: display,
                 is_native: false,
-                // External agents pick their own models dynamically; we don't
-                // try to enumerate them ahead of time.
-                models: Vec::new(),
+                models: company_external_agent_models(agent_id)
+                    .into_iter()
+                    .map(|(id, name)| agent::AvailableModel {
+                        id,
+                        name,
+                        is_default: false,
+                    })
+                    .collect(),
             });
         }
 
@@ -5377,6 +8032,24 @@ impl AgentPanel {
     }
 
     fn render_title_view(&self, window: &mut Window, cx: &Context<Self>) -> AnyElement {
+        if let Some(session) = self.active_company_session(cx) {
+            return h_flex()
+                .min_w_0()
+                .gap_1()
+                .child(Icon::new(IconName::Building2).color(Color::Muted))
+                .child(
+                    Label::new(format!(
+                        "{}: {}",
+                        match session.kind {
+                            CompanySessionKind::Meeting => "Meeting",
+                            CompanySessionKind::Task => "Task",
+                        },
+                        session.title
+                    ))
+                    .truncate(),
+                )
+                .into_any_element();
+        }
         let content = match self.visible_surface() {
             VisibleSurface::AgentThread(conversation_view) => {
                 let server_view_ref = conversation_view.read(cx);
@@ -5636,12 +8309,6 @@ impl AgentPanel {
             .active_conversation_view()
             .is_some_and(|conversation_view| conversation_view.read(cx).supports_logout());
 
-        let project_agents_md_path = project_agents_md_path(&self.project, true, cx);
-
-        let global_agents_md_loaded = UserAgentsMd::global(cx)
-            .and_then(|md| md.content())
-            .is_some();
-
         let workspace = self.workspace.clone();
 
         PopoverMenu::new("agent-options-menu")
@@ -5728,65 +8395,103 @@ impl AgentPanel {
                                 .header("Context")
                                 .action("Skills", Box::new(ManageSkills));
 
-                            if project_agents_md_path.is_some() || global_agents_md_loaded {
-                                if global_agents_md_loaded {
-                                    let workspace = workspace.clone();
+                            let global_workspace = workspace.clone();
+                            menu =
+                                menu.submenu("Open Global Instructions", move |mut menu, _, _| {
+                                    for (label, path) in [
+                                        ("Zed Agent · AGENTS.md", paths::agents_file().clone()),
+                                        (
+                                            "Codex · AGENTS.md",
+                                            paths::home_dir().join(".codex").join("AGENTS.md"),
+                                        ),
+                                        (
+                                            "Claude · CLAUDE.md",
+                                            paths::home_dir().join(".claude").join("CLAUDE.md"),
+                                        ),
+                                    ] {
+                                        let workspace = global_workspace.clone();
+                                        menu = menu.item(ContextMenuEntry::new(label).handler(
+                                            move |window, cx| {
+                                                workspace
+                                                    .update(cx, |workspace, cx| {
+                                                        open_instruction_file(
+                                                            workspace,
+                                                            path.clone(),
+                                                            window,
+                                                            cx,
+                                                        );
+                                                    })
+                                                    .log_err();
+                                            },
+                                        ));
+                                    }
+                                    menu
+                                });
 
-                                    menu = menu.custom_entry(
-                                        |_window, _cx| {
-                                            h_flex()
-                                                .w_full()
-                                                .gap_1()
-                                                .child(Label::new("Open Global Rules"))
-                                                .child(
-                                                    Label::new("(AGENTS.md)")
-                                                        .color(Color::Muted)
-                                                        .size(LabelSize::Small),
-                                                )
-                                                .into_any_element()
-                                        },
-                                        move |window, cx| {
-                                            workspace
-                                                .update(cx, |workspace, cx| {
-                                                    open_global_rules(workspace, window, cx);
-                                                })
-                                                .log_err();
-                                        },
-                                    );
-                                }
-
-                                if project_agents_md_path.is_some() {
-                                    let workspace = workspace.clone();
-                                    menu = menu.custom_entry(
-                                        |_window, _cx| {
-                                            h_flex()
-                                                .w_full()
-                                                .gap_1()
-                                                .child(Label::new("Open Project Rules"))
-                                                .child(
-                                                    Label::new("(AGENTS.md)")
-                                                        .color(Color::Muted)
-                                                        .size(LabelSize::Small),
-                                                )
-                                                .into_any_element()
-                                        },
-                                        move |window, cx| {
-                                            workspace
-                                                .update(cx, |workspace, cx| {
-                                                    open_project_rules(workspace, window, cx);
-                                                })
-                                                .log_err();
-                                        },
-                                    );
-                                }
-                            }
+                            let project_workspace = workspace.clone();
+                            menu =
+                                menu.submenu("Open Project Instructions", move |mut menu, _, _| {
+                                    for (label, file_name) in [
+                                        ("Zed Agent / Codex · AGENTS.md", "AGENTS.md"),
+                                        ("Claude · CLAUDE.md", "CLAUDE.md"),
+                                        ("Zed legacy compatibility · .rules", ".rules"),
+                                    ] {
+                                        let workspace = project_workspace.clone();
+                                        menu = menu.item(ContextMenuEntry::new(label).handler(
+                                            move |window, cx| {
+                                                workspace
+                                                    .update(cx, |workspace, cx| {
+                                                        open_project_instruction(
+                                                            workspace, file_name, window, cx,
+                                                        );
+                                                    })
+                                                    .log_err();
+                                            },
+                                        ));
+                                    }
+                                    menu
+                                });
 
                             menu = menu
                                 .separator()
                                 .action("Profiles", Box::new(ManageProfiles::default()));
                         }
 
+                        if !showing_terminal {
+                            let workspace_for_company = workspace.clone();
+                            menu = menu
+                                .separator()
+                                .custom_row(|_, _| {
+                                    h_flex()
+                                        .w_full()
+                                        .gap_2()
+                                        .child(Label::new("Company / Team").color(Color::Muted))
+                                        .child(Chip::new("BETA").label_color(Color::Accent))
+                                        .into_any_element()
+                                })
+                                .item(
+                                    ContextMenuEntry::new("Open Company Room")
+                                        .icon(IconName::Building2)
+                                        .icon_color(Color::Muted)
+                                        .handler(move |window, cx| {
+                                            if let Some(workspace) = workspace_for_company.upgrade()
+                                            {
+                                                workspace.update(cx, |workspace, cx| {
+                                                    if let Some(panel) =
+                                                        workspace.panel::<AgentPanel>(cx)
+                                                    {
+                                                        panel.update(cx, |panel, cx| {
+                                                            panel.open_company_modal(window, cx);
+                                                        });
+                                                    }
+                                                });
+                                            }
+                                        }),
+                                );
+                        }
+
                         menu = menu
+                            .separator()
                             .action("Settings", Box::new(OpenSettings))
                             .separator()
                             .action("Toggle Threads Sidebar", Box::new(ToggleWorkspaceSidebar));
@@ -5834,19 +8539,47 @@ impl AgentPanel {
         let supports_terminal = self.supports_terminal(cx);
         let showing_terminal = matches!(self.visible_surface(), VisibleSurface::Terminal(_));
 
-        let (selected_agent_custom_icon, selected_agent_label) = if showing_terminal {
-            (None, SharedString::from("Terminal"))
-        } else if let Agent::Custom { id, .. } = &self.selected_agent {
-            let store = agent_server_store.read(cx);
-            let icon = store.agent_icon(&id);
+        let active_company_session = self.active_company_session(cx);
+        let company_data = crate::company::load_companies(cx);
+        let active_personnel = self.active_thread_id(cx).and_then(|thread_id| {
+            company_data
+                .personnel_thread_ids
+                .get(&thread_id)
+                .and_then(|personnel_id| {
+                    company_data
+                        .personnel
+                        .iter()
+                        .find(|person| person.id == *personnel_id)
+                })
+        });
+        let (selected_agent_custom_icon, selected_agent_label) =
+            if let Some(session) = &active_company_session {
+                (
+                    None,
+                    SharedString::from(format!(
+                        "{}: {}",
+                        match session.kind {
+                            CompanySessionKind::Meeting => "Meeting",
+                            CompanySessionKind::Task => "Task",
+                        },
+                        session.title
+                    )),
+                )
+            } else if let Some(personnel) = active_personnel {
+                (None, SharedString::from(personnel.name.clone()))
+            } else if showing_terminal {
+                (None, SharedString::from("Terminal"))
+            } else if let Agent::Custom { id, .. } = &self.selected_agent {
+                let store = agent_server_store.read(cx);
+                let icon = store.agent_icon(&id);
 
-            let label = store
-                .agent_display_name(&id)
-                .unwrap_or_else(|| self.selected_agent.label());
-            (icon, label)
-        } else {
-            (None, self.selected_agent.label())
-        };
+                let label = store
+                    .agent_display_name(&id)
+                    .unwrap_or_else(|| self.selected_agent.label());
+                (icon, label)
+            } else {
+                (None, self.selected_agent.label())
+            };
 
         let new_thread_menu_builder: Rc<
             dyn Fn(&mut Window, &mut App) -> Option<Entity<ContextMenu>>,
@@ -6023,6 +8756,36 @@ impl AgentPanel {
                             menu
                         })
                         .separator()
+                        .custom_row(|_, _| {
+                            h_flex()
+                                .w_full()
+                                .gap_2()
+                                .child(Label::new("Personnel").color(Color::Muted))
+                                .child(Chip::new("BETA").label_color(Color::Accent))
+                                .into_any_element()
+                        })
+                        .item(
+                            ContextMenuEntry::new("Open Personnel")
+                                .icon(IconName::UserRoundPen)
+                                .icon_color(Color::Muted)
+                                .handler({
+                                    let workspace = workspace.clone();
+                                    move |window, cx| {
+                                        if let Some(workspace) = workspace.upgrade() {
+                                            workspace.update(cx, |workspace, cx| {
+                                                if let Some(panel) =
+                                                    workspace.panel::<AgentPanel>(cx)
+                                                {
+                                                    panel.update(cx, |panel, cx| {
+                                                        panel.open_personnel_modal(window, cx);
+                                                    });
+                                                }
+                                            });
+                                        }
+                                    }
+                                }),
+                        )
+                        .separator()
                         .item(
                             ContextMenuEntry::new("Add More Agents")
                                 .icon(IconName::Plus)
@@ -6044,7 +8807,11 @@ impl AgentPanel {
             .unwrap_or(false);
 
         let has_custom_icon = selected_agent_custom_icon.is_some();
-        let selected_agent_builtin_icon = if showing_terminal {
+        let selected_agent_builtin_icon = if active_company_session.is_some() {
+            Some(IconName::Building2)
+        } else if active_personnel.is_some() {
+            Some(IconName::UserRoundPen)
+        } else if showing_terminal {
             Some(IconName::Terminal)
         } else {
             self.selected_agent.icon()
@@ -6131,6 +8898,14 @@ impl AgentPanel {
                 }))
         };
 
+        let back_to_company_task_button = self.active_company_worker_session(cx).map(|session| {
+            Button::new("back-to-company-task", "Back to Task")
+                .label_size(LabelSize::Small)
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    this.open_company_session(&session, window, cx);
+                }))
+        });
+
         let refresh_agent_button = |cx: &mut Context<Self>| {
             (!showing_terminal && matches!(self.selected_agent, Agent::Custom { .. })).then(|| {
                 IconButton::new("refresh-agent-connection", IconName::RotateCw)
@@ -6158,7 +8933,50 @@ impl AgentPanel {
             })
         };
 
+        let browser_tools_button = cfg!(target_os = "android").then(|| {
+            IconButton::new("configure-browser-tools", IconName::ToolWeb)
+                .icon_size(IconSize::Small)
+                .tooltip(Tooltip::text("Android Browser Tools"))
+                .on_click(|_, window, cx| {
+                    window.dispatch_action(Box::new(ConfigureBrowserTools), cx);
+                })
+        });
+
+        let voice_conversation_button =
+            (cfg!(target_os = "android") && !showing_terminal).then(|| {
+                let enabled = android_voice_conversation_enabled();
+                IconButton::new(
+                    "toggle-voice-conversation",
+                    if enabled {
+                        IconName::MicMute
+                    } else {
+                        IconName::Mic
+                    },
+                )
+                .icon_size(IconSize::Small)
+                .toggle_state(enabled)
+                .tooltip(Tooltip::text(if enabled {
+                    "Stop Voice Conversation"
+                } else {
+                    "Start Voice Conversation (Beta)"
+                }))
+                .on_click(cx.listener(|this, _, window, cx| {
+                    let enabled = !android_voice_conversation_enabled();
+                    ANDROID_VOICE_CONVERSATION_ENABLED.store(enabled, Ordering::Release);
+                    if enabled
+                        && let Some(view) = this.active_conversation_view().cloned()
+                        && let Some(thread) = view.read(cx).active_thread().cloned()
+                    {
+                        let editor = thread.read(cx).message_editor.clone();
+                        editor.read(cx).focus_handle(cx).focus(window, cx);
+                    }
+                    cx.set_voice_conversation_enabled(enabled);
+                    cx.notify();
+                }))
+            });
+
         let max_content_width = AgentSettings::get_global(cx).max_content_width;
+        let company_session_active = self.active_company_session(cx).is_some();
 
         let base_container = h_flex()
             .size_full()
@@ -6213,7 +9031,9 @@ impl AgentPanel {
                         .overflow_hidden()
                         .gap(DynamicSpacing::Base04.rems(cx))
                         .pl(DynamicSpacing::Base04.rems(cx))
-                        .child(selected_agent.into_any_element())
+                        .when(!company_session_active, |this| {
+                            this.child(selected_agent.into_any_element())
+                        })
                         .child(match empty_thread_title {
                             Some(title) => title,
                             None => self.render_title_view(window, cx),
@@ -6226,7 +9046,12 @@ impl AgentPanel {
                         .flex_none()
                         .gap_1()
                         .children(sandbox_status)
+                        .when_some(back_to_company_task_button, |this, button| {
+                            this.child(button)
+                        })
                         .when_some(refresh_agent_button(cx), |this, button| this.child(button))
+                        .when_some(voice_conversation_button, |this, button| this.child(button))
+                        .when_some(browser_tools_button, |this, button| this.child(button))
                         .child(history_button(cx))
                         .when(can_create_entries, |this| this.child(new_thread_menu))
                         .child(full_screen_button)
@@ -6582,9 +9407,15 @@ impl Render for AgentPanel {
                     parent.child(self.render_no_project_state(cx))
                 }
                 VisibleSurface::Uninitialized => parent,
-                VisibleSurface::AgentThread(conversation_view) => parent
-                    .child(conversation_view.clone())
-                    .child(self.render_drag_target(cx)),
+                VisibleSurface::AgentThread(conversation_view) => {
+                    if self.active_company_session(cx).is_some() {
+                        parent.children(self.render_company_room(window, cx))
+                    } else {
+                        parent
+                            .child(conversation_view.clone())
+                            .child(self.render_drag_target(cx))
+                    }
+                }
                 VisibleSurface::Terminal(terminal_view) => {
                     let search_bar = self
                         .active_terminal_id()
