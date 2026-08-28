@@ -3,10 +3,11 @@
 //! workspace stack and shows the WelcomePage on first launch (no auto-
 //! opened project) — matches official Zed's first-run behaviour.
 
-mod browser_tools;
+mod danger_zone;
 mod header;
 mod menu_bar;
 mod noexec_modal;
+mod phone_use;
 mod runtime_picker;
 mod title_bar;
 
@@ -26,10 +27,7 @@ use client::{Client, UserStore};
 use db::AppDatabase;
 use db::kvp::KeyValueStore;
 use fs::{Fs, RealFs};
-use gpui::{
-    App, AppContext as _, AsyncApp, Entity, Focusable as _, PromptLevel, Task, TaskExt as _,
-    UpdateGlobal as _,
-};
+use gpui::{App, AppContext as _, Focusable as _, PromptLevel, TaskExt as _, UpdateGlobal as _};
 use log::{error, info};
 use node_runtime::NodeRuntime;
 use project::Project;
@@ -49,246 +47,6 @@ use zdroid_runtime::{
 };
 
 static NEXT_OPEN_PROJECT_TASK_ID: AtomicU64 = AtomicU64::new(1);
-
-const ANDROID_BROWSER_CONTEXT_SERVER_ID: &str = "playwright-android";
-const PLAYWRIGHT_VERSION: &str = "1.62.1";
-const MCP_SERVER_VERSION: &str = "2.0.0";
-const ZOD_VERSION: &str = "4.4.3";
-const PLAYWRIGHT_ANDROID_MCP_SOURCE: &str = include_str!("playwright_android_mcp.mjs");
-
-struct AndroidPlaywrightContextServerDescriptor {
-    launcher: PathBuf,
-}
-
-impl project::context_server_store::registry::ContextServerDescriptor
-    for AndroidPlaywrightContextServerDescriptor
-{
-    fn command(
-        &self,
-        _worktree_store: Entity<project::worktree_store::WorktreeStore>,
-        _cx: &AsyncApp,
-    ) -> Task<Result<context_server::ContextServerCommand>> {
-        Task::ready(Ok(context_server::ContextServerCommand {
-            path: self.launcher.clone(),
-            args: Vec::new(),
-            env: None,
-            timeout: Some(120_000),
-        }))
-    }
-
-    fn configuration(
-        &self,
-        _worktree_store: Entity<project::worktree_store::WorktreeStore>,
-        _cx: &AsyncApp,
-    ) -> Task<Result<Option<extension::ContextServerConfiguration>>> {
-        Task::ready(Ok(None))
-    }
-}
-
-pub(crate) fn android_browser_enabled_path() -> Result<PathBuf> {
-    let (_, home) = zdroid_bootstrap_paths()?;
-    Ok(home.join(".config/zdroid/browser-tools.enabled"))
-}
-
-pub(crate) fn android_browser_status_path() -> Result<PathBuf> {
-    let (_, home) = zdroid_bootstrap_paths()?;
-    Ok(home.join(".local/share/zdroid/browser-tools/status"))
-}
-
-pub(crate) fn set_android_browser_enabled(enabled: bool) -> Result<()> {
-    let marker = android_browser_enabled_path()?;
-    if enabled {
-        if let Some(parent) = marker.parent() {
-            std::fs::create_dir_all(parent).context("create browser tools settings directory")?;
-        }
-        std::fs::write(marker, "enabled\n").context("enable browser tools")?;
-    } else if let Err(error) = std::fs::remove_file(marker)
-        && error.kind() != std::io::ErrorKind::NotFound
-    {
-        return Err(error).context("disable browser tools");
-    }
-    Ok(())
-}
-
-pub(crate) fn android_browser_status() -> String {
-    let enabled = android_browser_enabled_path().is_ok_and(|path| path.is_file());
-    if !enabled {
-        return "Disabled. Browser contents are not exposed to agents.".to_string();
-    }
-    android_browser_status_path()
-        .ok()
-        .and_then(|path| std::fs::read_to_string(path).ok())
-        .map(|status| status.trim().to_string())
-        .filter(|status| !status.is_empty())
-        .unwrap_or_else(|| "Enabled. Waiting for the first browser-tools connection.".to_string())
-}
-
-pub(crate) fn ensure_android_browser_launcher() -> Result<PathBuf> {
-    let (prefix, home) = zdroid_bootstrap_paths()?;
-    let managed_bin = prefix.join(".zed/bin");
-    std::fs::create_dir_all(&managed_bin).context("create browser launcher directory")?;
-    let launcher = managed_bin.join("zdroid-playwright-android-mcp");
-    let marker = android_browser_enabled_path()?;
-    let status_dir = home.join(".local/share/zdroid/browser-tools");
-    let status = status_dir.join("status");
-    std::fs::create_dir_all(&status_dir).context("create browser tools data directory")?;
-    let adapter = status_dir.join("playwright_android_mcp.mjs");
-    std::fs::write(&adapter, PLAYWRIGHT_ANDROID_MCP_SOURCE)
-        .context("write Playwright Android MCP adapter")?;
-    let root = status_dir.join(format!("playwright-android-{PLAYWRIGHT_VERSION}"));
-    let script = format!(
-        r#"#!/system/bin/sh
-set -eu
-PREFIX="{prefix}"
-HOME="{home}"
-export PREFIX HOME
-marker="{marker}"
-status_dir="{status_dir}"
-status_file="{status}"
-root="{root}"
-adapter="{adapter}"
-playwright_version="{playwright_version}"
-mcp_version="{mcp_version}"
-zod_version="{zod_version}"
-mkdir -p "$status_dir"
-
-set_status() {{
-    printf '%s\n' "$1" > "$status_file.tmp"
-    mv "$status_file.tmp" "$status_file"
-    printf '%s\n' "Zdroid-B Browser Tools: $1" >&2
-}}
-
-if [ ! -f "$marker" ]; then
-    set_status 'Disabled. Enable Android Browser Tools from the Agent Panel first.'
-    exit 78
-fi
-
-NODE="$PREFIX/bin/node"
-NPM="$PREFIX/bin/npm"
-ADB="$PREFIX/bin/adb"
-PKG="$PREFIX/.zed/bin/pkg"
-if [ ! -x "$NODE" ] || [ ! -x "$NPM" ]; then
-    set_status 'Node.js and npm are missing. Finish Zdroid-B initialization, then retry.'
-    exit 127
-fi
-
-if [ ! -x "$ADB" ]; then
-    if [ ! -x "$PKG" ]; then
-        set_status 'Android debugging tools are missing and the package manager is unavailable.'
-        exit 127
-    fi
-    set_status 'Installing Android debugging tools'
-    env LD_LIBRARY_PATH="$PREFIX/lib" "$PKG" install -y android-tools -o DPkg::Lock::Timeout=120 >&2
-fi
-
-if ! "$ADB" start-server >&2; then
-    set_status 'Could not start the local Android debugging service.'
-    exit 69
-fi
-
-device_serial="$($ADB devices | awk 'NR > 1 && $2 == "device" {{ print $1; exit }}')"
-if [ -z "$device_serial" ]; then
-    set_status 'Pairing required. Enable Wireless debugging, pair this phone with adb, then retry.'
-    exit 69
-fi
-
-entry="$root/node_modules/playwright/index.js"
-mcp_entry="$root/node_modules/@modelcontextprotocol/server/package.json"
-if [ ! -f "$entry" ] || [ ! -f "$mcp_entry" ]; then
-    lock="$root.installing"
-    if mkdir "$lock" 2>/dev/null; then
-        trap 'rm -rf "$lock" "$root.staging"' EXIT INT TERM
-        rm -rf "$root.staging"
-        mkdir -p "$root.staging"
-        set_status "Downloading Playwright Android $playwright_version"
-        PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 "$NPM" install --prefix "$root.staging" \
-            --no-audit --no-fund --ignore-scripts \
-            "playwright@$playwright_version" \
-            "@modelcontextprotocol/server@$mcp_version" \
-            "zod@$zod_version" >&2
-        set_status 'Installing Playwright Android browser tools'
-        rm -rf "$root"
-        mv "$root.staging" "$root"
-        rm -rf "$lock"
-        trap - EXIT INT TERM
-    else
-        set_status 'Waiting for Playwright Android browser-tools installation'
-        waited=0
-        while {{ [ ! -f "$entry" ] || [ ! -f "$mcp_entry" ]; }} && [ "$waited" -lt 600 ]; do
-            sleep 1
-            waited=$((waited + 1))
-        done
-    fi
-fi
-
-if [ ! -f "$entry" ] || [ ! -f "$mcp_entry" ]; then
-    set_status 'Playwright Android browser-tools installation failed.'
-    exit 127
-fi
-
-if [ "${{1:-}}" = "--prepare" ]; then
-    set_status "Ready - local adb paired and Playwright Android $playwright_version installed"
-    exit 0
-fi
-
-set_status 'Starting Playwright Android MCP'
-export PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1
-export ZDROID_BROWSER_STATUS_FILE="$status_file"
-export ZDROID_ANDROID_DEVICE_SERIAL="$device_serial"
-installed_adapter="$root/playwright_android_mcp.mjs"
-cp "$adapter" "$installed_adapter"
-exec "$NODE" "$installed_adapter"
-"#,
-        prefix = prefix.to_string_lossy(),
-        home = home.to_string_lossy(),
-        marker = marker.to_string_lossy(),
-        status_dir = status_dir.to_string_lossy(),
-        status = status.to_string_lossy(),
-        root = root.to_string_lossy(),
-        adapter = adapter.to_string_lossy(),
-        playwright_version = PLAYWRIGHT_VERSION,
-        mcp_version = MCP_SERVER_VERSION,
-        zod_version = ZOD_VERSION,
-    );
-    std::fs::write(&launcher, script).context("write Playwright Android launcher")?;
-    let mut permissions = std::fs::metadata(&launcher)?.permissions();
-    permissions.set_mode(0o700);
-    std::fs::set_permissions(&launcher, permissions)
-        .context("chmod Playwright Android launcher")?;
-    Ok(launcher)
-}
-
-pub(crate) fn register_android_browser_context_server(launcher: PathBuf, cx: &mut App) {
-    project::context_server_store::registry::ContextServerDescriptorRegistry::default_global(cx)
-        .update(cx, |registry, cx| {
-            registry.register_context_server_descriptor(
-                ANDROID_BROWSER_CONTEXT_SERVER_ID.into(),
-                Arc::new(AndroidPlaywrightContextServerDescriptor { launcher }),
-                cx,
-            );
-        });
-}
-
-pub(crate) fn unregister_android_browser_context_server(cx: &mut App) {
-    project::context_server_store::registry::ContextServerDescriptorRegistry::default_global(cx)
-        .update(cx, |registry, cx| {
-            registry
-                .unregister_context_server_descriptor_by_id(ANDROID_BROWSER_CONTEXT_SERVER_ID, cx);
-        });
-}
-
-fn initialize_android_browser_tools(cx: &mut App) {
-    let launcher = match ensure_android_browser_launcher() {
-        Ok(launcher) => launcher,
-        Err(error) => {
-            log::error!("zed_android: failed to prepare browser tools launcher: {error:#}");
-            return;
-        }
-    };
-    if android_browser_enabled_path().is_ok_and(|path| path.is_file()) {
-        register_android_browser_context_server(launcher, cx);
-    }
-}
 
 #[derive(Clone, Copy)]
 enum AndroidFileFlow {
@@ -2459,8 +2217,9 @@ fn boot(cx: &mut App, data_path: &std::path::Path, dns_resolver: AndroidDnsResol
         false,
         cx,
     );
-    initialize_android_browser_tools(cx);
-    browser_tools::register(cx);
+    phone_use::initialize(cx);
+    phone_use::register(cx);
+    danger_zone::register(cx);
     agent_settings::init_user_agents_md(app_state.fs.clone(), cx, |state, _cx| {
         if let Some(error) = state.error() {
             log::warn!("zed_android: failed to load AGENTS.md: {error}");

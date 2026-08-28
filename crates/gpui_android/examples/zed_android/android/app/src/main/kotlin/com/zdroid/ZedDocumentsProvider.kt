@@ -154,11 +154,12 @@ class ZedDocumentsProvider : DocumentsProvider() {
         displayName: String,
     ): String {
         val parent = getFileForDocId(parentDocumentId)
-        var target = File(parent, displayName)
+        val safeName = requireSafeDisplayName(displayName)
+        var target = File(parent, safeName)
         var counter = 2
         while (target.exists()) {
             // Termux behavior: append " (N)" before extension on conflict.
-            val (base, ext) = splitNameAndExt(displayName)
+            val (base, ext) = splitNameAndExt(safeName)
             target = File(parent, "$base ($counter)$ext")
             counter++
         }
@@ -177,6 +178,9 @@ class ZedDocumentsProvider : DocumentsProvider() {
 
     override fun deleteDocument(documentId: String) {
         val file = getFileForDocId(documentId)
+        if (file.absoluteFile == baseDir.absoluteFile) {
+            throw FileNotFoundException("The Zdroid-B home root cannot be deleted")
+        }
         if (!file.deleteRecursively()) {
             throw FileNotFoundException("deleteDocument failed: $documentId")
         }
@@ -184,11 +188,15 @@ class ZedDocumentsProvider : DocumentsProvider() {
 
     override fun renameDocument(documentId: String, displayName: String): String {
         val file = getFileForDocId(documentId)
+        if (file.absoluteFile == baseDir.absoluteFile) {
+            throw FileNotFoundException("The Zdroid-B home root cannot be renamed")
+        }
         val parent = file.parentFile ?: throw FileNotFoundException("rename: no parent for $documentId")
-        var target = File(parent, displayName)
+        val safeName = requireSafeDisplayName(displayName)
+        var target = File(parent, safeName)
         var counter = 2
         while (target.exists() && target != file) {
-            val (base, ext) = splitNameAndExt(displayName)
+            val (base, ext) = splitNameAndExt(safeName)
             target = File(parent, "$base ($counter)$ext")
             counter++
         }
@@ -199,10 +207,9 @@ class ZedDocumentsProvider : DocumentsProvider() {
     }
 
     override fun isChildDocument(parentDocumentId: String, documentId: String): Boolean {
-        // Path-prefix check is enough for our absolute-path docId scheme.
-        // Append separator to avoid `/foo` matching `/foobar`.
-        return documentId == parentDocumentId
-            || documentId.startsWith("$parentDocumentId${File.separator}")
+        val parent = runCatching { requireWithinHome(File(parentDocumentId)) }.getOrNull() ?: return false
+        val child = runCatching { requireWithinHome(File(documentId)) }.getOrNull() ?: return false
+        return child == parent || child.path.startsWith("${parent.path}${File.separator}")
     }
 
     override fun getDocumentType(documentId: String): String =
@@ -211,7 +218,8 @@ class ZedDocumentsProvider : DocumentsProvider() {
     private fun includeFile(cursor: MatrixCursor, file: File) {
         val mime = getMime(file)
         var flags = 0
-        val parentWritable = file.parentFile?.canWrite() == true
+        val isRoot = file.absoluteFile == baseDir.absoluteFile
+        val parentWritable = !isRoot && file.parentFile?.canWrite() == true
         if (file.isDirectory) {
             if (file.canWrite()) {
                 flags = flags or DocumentsContract.Document.FLAG_DIR_SUPPORTS_CREATE
@@ -237,9 +245,32 @@ class ZedDocumentsProvider : DocumentsProvider() {
     }
 
     private fun getFileForDocId(docId: String): File {
-        val file = File(docId)
+        val file = requireWithinHome(File(docId))
         if (!file.exists()) throw FileNotFoundException("$docId not found")
         return file
+    }
+
+    /**
+     * Document IDs are lexical paths so intentional HOME symlinks such as ~/storage keep working,
+     * but callers may not forge an ID that directly addresses another app-private path.
+     */
+    private fun requireWithinHome(file: File): File {
+        val root = baseDir.absoluteFile.normalize()
+        val normalized = file.absoluteFile.normalize()
+        if (normalized != root && !normalized.path.startsWith("${root.path}${File.separator}")) {
+            throw FileNotFoundException("Document is outside the Zdroid-B home root")
+        }
+        return normalized
+    }
+
+    private fun requireSafeDisplayName(displayName: String): String {
+        val name = displayName.trim()
+        if (name.isEmpty() || name == "." || name == ".." ||
+            name.indexOf('/') >= 0 || name.indexOf('\\') >= 0 || name.indexOf('\u0000') >= 0
+        ) {
+            throw FileNotFoundException("Invalid document name")
+        }
+        return name
     }
 
     private fun getMime(file: File): String {

@@ -10,15 +10,11 @@ import android.content.Intent
 import android.os.Build
 import android.os.IBinder
 import android.os.Process
-import android.os.PowerManager
-import android.net.wifi.WifiManager
 import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
 
 class AgentForegroundService : Service() {
     private val activeTasks = linkedMapOf<String, String>()
-    private var wakeLock: PowerManager.WakeLock? = null
-    private var wifiLock: WifiManager.WifiLock? = null
     private var keepAliveEnabled = false
     private var wakeLockEnabled = false
     private var batchTaskCount = 0
@@ -141,31 +137,11 @@ class AgentForegroundService : Service() {
     }
 
     private fun acquireSessionLocks() {
-        if (wakeLock?.isHeld == true) return
-        val powerManager = getSystemService(Context.POWER_SERVICE) as PowerManager
-        wakeLock = powerManager.newWakeLock(
-            PowerManager.PARTIAL_WAKE_LOCK,
-            "Zdroid:AgentTask",
-        ).apply {
-            setReferenceCounted(false)
-            acquire()
-        }
-        val wifiManager = applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
-        @Suppress("DEPRECATION")
-        wifiLock = wifiManager.createWifiLock(
-            WifiManager.WIFI_MODE_FULL_HIGH_PERF,
-            "Zdroid:AgentNetwork",
-        ).apply {
-            setReferenceCounted(false)
-            acquire()
-        }
+        ZdroidSessionLocks.acquire(this, LOCK_OWNER)
     }
 
     private fun releaseSessionLocks() {
-        wakeLock?.let { if (it.isHeld) it.release() }
-        wakeLock = null
-        wifiLock?.let { if (it.isHeld) it.release() }
-        wifiLock = null
+        ZdroidSessionLocks.release(LOCK_OWNER)
     }
 
     private fun stopServiceNow() {
@@ -302,6 +278,7 @@ class AgentForegroundService : Service() {
         private const val PREFERENCES = "zdroid_background"
         private const val PREF_ENABLED = "enabled"
         private const val PREF_WAKE_LOCK = "wake_lock"
+        private const val LOCK_OWNER = "agent-background"
         private const val PREF_TASK_COMPLETION = "notify_task_completion"
         private const val PREF_AGENT_ATTENTION = "notify_agent_attention"
         private const val PREF_WHILE_APP_VISIBLE = "notify_while_app_visible"

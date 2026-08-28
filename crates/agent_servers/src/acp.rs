@@ -23,7 +23,7 @@ use project::{AgentId, Project};
 use remote::remote_client::Interactive;
 use serde::Deserialize;
 use settings::{AgentConfigOptionValue, SettingsStore};
-use std::path::PathBuf;
+use std::path::{Component, Path, PathBuf};
 use std::process::{ExitStatus, Stdio};
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
@@ -46,6 +46,89 @@ use crate::{CURSOR_ID, GEMINI_ID};
 pub const GEMINI_TERMINAL_AUTH_METHOD_ID: &str = "spawn-gemini-cli";
 const PARAMETERIZED_MODEL_PICKER_META_KEY: &str = "parameterizedModelPicker";
 const MAX_DEBUG_BACKLOG_MESSAGES: usize = 2000;
+
+#[derive(Clone, Copy, Debug)]
+struct ZdroidDangerZonePolicy {
+    allow_outside_project: bool,
+    protect_bootstrap_runtime: bool,
+}
+
+impl Default for ZdroidDangerZonePolicy {
+    fn default() -> Self {
+        Self {
+            allow_outside_project: false,
+            protect_bootstrap_runtime: true,
+        }
+    }
+}
+
+#[cfg(target_os = "android")]
+fn zdroid_danger_zone_policy() -> ZdroidDangerZonePolicy {
+    let Some(home) = std::env::var_os("TERMUX__HOME").map(PathBuf::from) else {
+        return ZdroidDangerZonePolicy::default();
+    };
+    let Some(files) = home.parent() else {
+        return ZdroidDangerZonePolicy::default();
+    };
+    let path = files.join("policies/danger-zone.properties");
+    let Ok(contents) = std::fs::read_to_string(path) else {
+        return ZdroidDangerZonePolicy::default();
+    };
+    parse_zdroid_danger_zone_policy(&contents)
+}
+
+fn parse_zdroid_danger_zone_policy(contents: &str) -> ZdroidDangerZonePolicy {
+    let mut policy = ZdroidDangerZonePolicy::default();
+    for line in contents.lines().map(str::trim) {
+        if let Some(value) = line.strip_prefix("allow_agent_outside_project=") {
+            policy.allow_outside_project = value == "true";
+        } else if let Some(value) = line.strip_prefix("protect_bootstrap_runtime=") {
+            policy.protect_bootstrap_runtime = value != "false";
+        }
+    }
+    policy
+}
+
+#[cfg(target_os = "android")]
+fn command_is_zd_exec(command: &str, launcher: &Path) -> bool {
+    Path::new(command) == launcher
+        || Path::new(command)
+            .file_name()
+            .is_some_and(|name| name == "zd-exec")
+}
+
+#[cfg(target_os = "android")]
+fn already_in_managed_linux() -> bool {
+    std::env::var("ZDROID_RUNTIME")
+        .is_ok_and(|runtime| runtime.contains("Ubuntu") || runtime.contains("glibc"))
+}
+
+#[cfg(not(target_os = "android"))]
+fn zdroid_danger_zone_policy() -> ZdroidDangerZonePolicy {
+    ZdroidDangerZonePolicy {
+        allow_outside_project: true,
+        protect_bootstrap_runtime: false,
+    }
+}
+
+fn path_is_inside_project(path: &Path, project: &Project, cx: &App) -> bool {
+    if path.is_absolute() {
+        return project.project_path_for_absolute_path(path, cx).is_some();
+    }
+    !path.components().any(|component| {
+        matches!(
+            component,
+            Component::ParentDir | Component::RootDir | Component::Prefix(_)
+        )
+    })
+}
+
+fn project_boundary_error(path: &Path) -> acp::Error {
+    acp::Error::invalid_params().data(format!(
+        "Zdroid-B blocked access outside the active project: {}. Change this only in Settings > Danger Zone.",
+        path.display()
+    ))
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AcpDebugMessageDirection {
@@ -4802,6 +4885,17 @@ fn handle_write_text_file(
         Err(e) => return respond_err(responder, e),
     };
 
+    if !zdroid_danger_zone_policy().allow_outside_project {
+        let allowed = thread
+            .read_with(cx, |thread, cx| {
+                path_is_inside_project(&args.path, thread.project().read(cx), cx)
+            })
+            .unwrap_or(false);
+        if !allowed {
+            return respond_err(responder, project_boundary_error(&args.path));
+        }
+    }
+
     cx.spawn(async move |cx| {
         let result: Result<_, acp::Error> = async {
             thread
@@ -4836,6 +4930,17 @@ fn handle_read_text_file(
         Ok(t) => t,
         Err(e) => return respond_err(responder, e),
     };
+
+    if !zdroid_danger_zone_policy().allow_outside_project {
+        let allowed = thread
+            .read_with(cx, |thread, cx| {
+                path_is_inside_project(&args.path, thread.project().read(cx), cx)
+            })
+            .unwrap_or(false);
+        if !allowed {
+            return respond_err(responder, project_boundary_error(&args.path));
+        }
+    }
 
     cx.spawn(async move |cx| {
         let cancellation = responder.cancellation();
@@ -5029,15 +5134,56 @@ fn handle_create_terminal(
         Err(e) => return respond_err(responder, e),
     };
 
+    let policy = zdroid_danger_zone_policy();
+    if !policy.allow_outside_project
+        && let Some(cwd) = args.cwd.as_deref()
+        && !project.read_with(cx, |project, cx| path_is_inside_project(cwd, project, cx))
+    {
+        return respond_err(responder, project_boundary_error(cwd));
+    }
+
+    #[allow(unused_mut)] // Mutated by the Android-only Ubuntu routing policy below.
+    let mut command = args.command.clone();
+    #[allow(unused_mut)]
+    let mut command_args = args.args.clone();
+    #[allow(unused_mut)]
+    let mut command_env = args
+        .env
+        .into_iter()
+        .map(|env| (env.name, env.value))
+        .collect::<Vec<_>>();
+    if policy.protect_bootstrap_runtime {
+        #[cfg(target_os = "android")]
+        if let Some(home) = std::env::var_os("TERMUX__HOME").map(PathBuf::from)
+            && let Some(files) = home.parent()
+        {
+            let launcher = files.join("bin/zd-exec");
+            if launcher.is_file() {
+                command_env.push(("ZDROID_AGENT_RUNTIME_POLICY".into(), "ubuntu-only".into()));
+                // Full Linux already uses zd-exec as its terminal shell. Wrapping
+                // it again translates the launcher path into the guest rootfs and
+                // can fail with ENOENT. Only bridge from the Bootstrap runtime.
+                if !already_in_managed_linux() && !command_is_zd_exec(&command, &launcher) {
+                    command_args.insert(0, command);
+                    command = launcher.to_string_lossy().into_owned();
+                }
+            } else {
+                return respond_err(
+                    responder,
+                    acp::Error::internal_error().data(
+                        "Zdroid-B's Ubuntu launcher is unavailable. Finish Full Linux setup or explicitly relax Bootstrap protection in Settings > Danger Zone.",
+                    ),
+                );
+            }
+        }
+    }
+
     cx.spawn(async move |cx| {
         let result: Result<_, acp::Error> = async {
             let terminal_entity = acp_thread::create_terminal_entity(
-                args.command.clone(),
-                &args.args,
-                args.env
-                    .into_iter()
-                    .map(|env| (env.name, env.value))
-                    .collect(),
+                command.clone(),
+                &command_args,
+                command_env,
                 args.cwd.clone(),
                 &project,
                 cx,
@@ -5047,7 +5193,7 @@ fn handle_create_terminal(
             let terminal_entity = thread.update(cx, |thread, cx| {
                 thread.register_terminal_created(
                     acp::TerminalId::new(uuid::Uuid::new_v4().to_string()),
-                    format!("{} {}", args.command, args.args.join(" ")),
+                    format!("{} {}", command, command_args.join(" ")),
                     args.cwd.clone(),
                     args.output_byte_limit,
                     terminal_entity,
@@ -5069,6 +5215,27 @@ fn handle_create_terminal(
         }
     })
     .detach();
+}
+
+#[cfg(test)]
+mod zdroid_danger_zone_policy_tests {
+    use super::*;
+
+    #[test]
+    fn missing_values_keep_fail_closed_defaults() {
+        let policy = parse_zdroid_danger_zone_policy("");
+        assert!(!policy.allow_outside_project);
+        assert!(policy.protect_bootstrap_runtime);
+    }
+
+    #[test]
+    fn explicit_relaxations_are_loaded() {
+        let policy = parse_zdroid_danger_zone_policy(
+            "allow_agent_outside_project=true\nprotect_bootstrap_runtime=false\n",
+        );
+        assert!(policy.allow_outside_project);
+        assert!(!policy.protect_bootstrap_runtime);
+    }
 }
 
 fn handle_kill_terminal(

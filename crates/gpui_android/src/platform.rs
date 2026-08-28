@@ -40,6 +40,27 @@ unsafe extern "C" {
 }
 
 type ChoreographerFrameCallback = unsafe extern "C" fn(frame_time_nanos: i64, data: *mut c_void);
+static VOICE_CONVERSATION_ENABLED: AtomicBool = AtomicBool::new(false);
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_com_zdroid_NativeBridge_nativeSetVoiceConversationEnabled<'local>(
+    _env: jni::JNIEnv<'local>,
+    _bridge: jni::objects::JObject<'local>,
+    enabled: jni::sys::jboolean,
+) {
+    VOICE_CONVERSATION_ENABLED.store(enabled != 0, Ordering::Release);
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_com_zdroid_NativeBridge_nativeInterruptVoiceAgent<'local>(
+    _env: jni::JNIEnv<'local>,
+    _bridge: jni::objects::JObject<'local>,
+) {
+    // The Agent input remains the focused GPUI editor beneath the Android call
+    // surface. Dispatch Escape through the normal IME event queue so the GPUI
+    // thread cancels the active ACP turn without blocking Android's UI thread.
+    crate::ime::dispatch_escape(0);
+}
 
 /// `ANativeWindow_setFrameRate` is NDK API 30+. minSdk is 26, so we
 /// can't direct-link the symbol (it would `dlopen`-fail at app load on
@@ -408,6 +429,7 @@ fn jni_set_voice_conversation(android_app: &AndroidApp, enabled: bool) -> Result
     use anyhow::Context;
     use jni::{JavaVM, objects::JObject};
 
+    VOICE_CONVERSATION_ENABLED.store(enabled, Ordering::Release);
     let vm = unsafe { JavaVM::from_raw(android_app.vm_as_ptr().cast())? };
     let mut env = vm
         .attach_current_thread()
@@ -423,23 +445,69 @@ fn jni_set_voice_conversation(android_app: &AndroidApp, enabled: bool) -> Result
     Ok(())
 }
 
-fn jni_speak_voice_response(android_app: &AndroidApp, text: &str) -> Result<()> {
+fn jni_set_voice_conversation_context(
+    android_app: &AndroidApp,
+    agent_name: &str,
+    model_name: &str,
+) -> Result<()> {
     use anyhow::Context;
     use jni::{JavaVM, objects::JObject};
 
     let vm = unsafe { JavaVM::from_raw(android_app.vm_as_ptr().cast())? };
     let mut env = vm
         .attach_current_thread()
-        .context("attach_current_thread for voice response")?;
+        .context("attach_current_thread for voice conversation context")?;
     let activity = unsafe { JObject::from_raw(android_app.activity_as_ptr() as _) };
+    let agent_name = env
+        .new_string(agent_name)
+        .context("alloc voice agent name")?;
+    let model_name = env
+        .new_string(model_name)
+        .context("alloc voice model name")?;
+    env.call_method(
+        &activity,
+        "setVoiceConversationContext",
+        "(Ljava/lang/String;Ljava/lang/String;)V",
+        &[(&agent_name).into(), (&model_name).into()],
+    )
+    .context("MainActivity.setVoiceConversationContext")?;
+    Ok(())
+}
+
+fn jni_send_voice_agent_event(android_app: &AndroidApp, kind: &str, text: &str) -> Result<()> {
+    use anyhow::Context;
+    use jni::{JavaVM, objects::JObject};
+
+    let vm = unsafe { JavaVM::from_raw(android_app.vm_as_ptr().cast())? };
+    let mut env = vm
+        .attach_current_thread()
+        .context("attach_current_thread for voice Agent event")?;
+    let activity = unsafe { JObject::from_raw(android_app.activity_as_ptr() as _) };
+    let kind = env
+        .new_string(kind)
+        .context("alloc voice Agent event kind")?;
     let text = env.new_string(text).context("alloc voice response")?;
     env.call_method(
         &activity,
-        "speakVoiceResponse",
-        "(Ljava/lang/String;)V",
-        &[(&text).into()],
+        "onVoiceAgentEvent",
+        "(Ljava/lang/String;Ljava/lang/String;)V",
+        &[(&kind).into(), (&text).into()],
     )
-    .context("MainActivity.speakVoiceResponse")?;
+    .context("MainActivity.onVoiceAgentEvent")?;
+    Ok(())
+}
+
+fn jni_open_phone_use_settings(android_app: &AndroidApp) -> Result<()> {
+    use anyhow::Context;
+    use jni::{JavaVM, objects::JObject};
+
+    let vm = unsafe { JavaVM::from_raw(android_app.vm_as_ptr().cast())? };
+    let mut env = vm
+        .attach_current_thread()
+        .context("attach_current_thread for Phone Use settings")?;
+    let activity = unsafe { JObject::from_raw(android_app.activity_as_ptr() as _) };
+    env.call_method(&activity, "openPhoneUseSettings", "()V", &[])
+        .context("MainActivity.openPhoneUseSettings")?;
     Ok(())
 }
 
@@ -1570,9 +1638,27 @@ impl Platform for AndroidPlatform {
         }
     }
 
-    fn speak_voice_response(&self, text: &str) {
-        if let Err(err) = jni_speak_voice_response(&self.android_app, text) {
-            log::warn!("Android voice response failed: {err:#}");
+    fn set_voice_conversation_context(&self, agent_name: &str, model_name: &str) {
+        if let Err(err) =
+            jni_set_voice_conversation_context(&self.android_app, agent_name, model_name)
+        {
+            log::warn!("Android voice conversation context failed: {err:#}");
+        }
+    }
+
+    fn voice_conversation_enabled(&self) -> bool {
+        VOICE_CONVERSATION_ENABLED.load(Ordering::Acquire)
+    }
+
+    fn send_voice_agent_event(&self, kind: &str, text: &str) {
+        if let Err(err) = jni_send_voice_agent_event(&self.android_app, kind, text) {
+            log::warn!("Android voice Agent event failed: {err:#}");
+        }
+    }
+
+    fn open_phone_use_settings(&self) {
+        if let Err(err) = jni_open_phone_use_settings(&self.android_app) {
+            log::warn!("Android Phone Use settings failed: {err:#}");
         }
     }
 

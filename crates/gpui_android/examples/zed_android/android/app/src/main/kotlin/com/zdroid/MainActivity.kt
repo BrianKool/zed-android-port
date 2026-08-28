@@ -2,6 +2,7 @@ package com.zdroid
 
 import android.Manifest
 import android.app.Activity
+import android.app.AlertDialog
 import android.content.ActivityNotFoundException
 import android.content.ClipData
 import android.content.Context
@@ -15,13 +16,9 @@ import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.os.Process
-import android.speech.RecognitionListener
-import android.speech.RecognizerIntent
-import android.speech.SpeechRecognizer
-import android.speech.tts.TextToSpeech
-import android.speech.tts.UtteranceProgressListener
 import android.provider.DocumentsContract
 import android.provider.OpenableColumns
+import android.provider.Settings
 import android.util.Log
 import android.view.InputDevice
 import android.view.KeyEvent
@@ -32,9 +29,12 @@ import android.view.ViewGroup
 import android.view.animation.AccelerateDecelerateInterpolator
 import android.webkit.MimeTypeMap
 import android.widget.FrameLayout
+import android.widget.CheckBox
+import android.widget.EditText
 import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.ProgressBar
+import android.widget.Space
 import android.widget.TextView
 import android.widget.Toast
 import androidx.core.app.ActivityCompat
@@ -47,7 +47,7 @@ import com.google.androidgamesdk.GameActivity
 import java.io.File
 import java.io.FileOutputStream
 import java.security.MessageDigest
-import java.util.Locale
+import java.util.concurrent.atomic.AtomicBoolean
 
 /// SAF flows go through legacy `startActivityForResult` instead of
 /// `ActivityResultLauncher` because `ActivityResultRegistry` silently
@@ -73,23 +73,65 @@ class MainActivity : GameActivity(), ImeHost {
     @Volatile
     private var initialPermissionFlowSettled = false
     private var initialNotificationStage = 0
+    @Volatile
     private var voiceConversationEnabled = false
-    private var voiceRecognizer: SpeechRecognizer? = null
-    private var voiceTts: TextToSpeech? = null
-    private var voiceTtsReady = false
-    private var voicePendingResponse: String? = null
-    private var voiceWaitingForAgent = false
+    private var voiceAgentName = "Agent"
+    private var voiceModelName = "Current model"
+    private data class PendingVoiceResponse(val kind: String, val text: String, val epoch: Long)
+    private val pendingVoiceEvents = ArrayDeque<PendingVoiceResponse>()
+    private val voiceEventLock = Any()
+    private val voiceResponseDispatchScheduled = AtomicBoolean(false)
+    private val voiceResponseHandler = Handler(Looper.getMainLooper())
+    private val dispatchLatestVoiceResponse = object : Runnable {
+        override fun run() {
+            val response = synchronized(voiceEventLock) {
+                if (pendingVoiceEvents.isEmpty()) null else pendingVoiceEvents.removeFirst()
+            }
+            response?.let {
+                if (VoiceConversationService.isSessionActive()) {
+                    VoiceConversationService.agentEvent(
+                        this@MainActivity,
+                        it.kind,
+                        it.text,
+                        it.epoch,
+                    )
+                }
+            }
+            val hasMore = synchronized(voiceEventLock) { pendingVoiceEvents.isNotEmpty() }
+            if (hasMore) {
+                voiceResponseHandler.postDelayed(this, VOICE_RESPONSE_FRAME_MS)
+            } else {
+                voiceResponseDispatchScheduled.set(false)
+                if (synchronized(voiceEventLock) { pendingVoiceEvents.isNotEmpty() } &&
+                    voiceResponseDispatchScheduled.compareAndSet(false, true)
+                ) {
+                    voiceResponseHandler.post(this)
+                }
+            }
+        }
+    }
+
+    @Suppress("unused")
+    fun setVoiceConversationContext(agentName: String, modelName: String) {
+        runOnUiThread {
+            voiceAgentName = friendlyVoiceAgentName(agentName, modelName)
+            voiceModelName = modelName.ifBlank { "Current model" }
+        }
+    }
+
+    @Suppress("unused")
+    fun openPhoneUseSettings() {
+        runOnUiThread {
+            startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
+        }
+    }
 
     @Suppress("unused")
     fun setVoiceConversationEnabled(enabled: Boolean) {
         runOnUiThread {
             voiceConversationEnabled = enabled
             if (!enabled) {
-                voiceWaitingForAgent = false
-                voicePendingResponse = null
-                voiceRecognizer?.cancel()
-                voiceTts?.stop()
-                Toast.makeText(this, "Voice conversation stopped", Toast.LENGTH_SHORT).show()
+                VoiceConversationService.stop(this)
                 return@runOnUiThread
             }
             if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) !=
@@ -102,136 +144,52 @@ class MainActivity : GameActivity(), ImeHost {
                 )
                 return@runOnUiThread
             }
-            ensureVoiceTts()
-            startVoiceListening()
+            launchVoiceCallActivity()
+            VoiceConversationService.start(this)
         }
+    }
+
+    private fun launchVoiceCallActivity() {
+        hideIme()
+        startActivity(
+            Intent(this, VoiceCallActivity::class.java)
+                .putExtra(VoiceCallActivity.EXTRA_AGENT_NAME, voiceAgentName)
+                .putExtra(VoiceCallActivity.EXTRA_MODEL_NAME, voiceModelName)
+                .addFlags(Intent.FLAG_ACTIVITY_REORDER_TO_FRONT),
+        )
     }
 
     @Suppress("unused")
-    fun speakVoiceResponse(text: String) {
-        runOnUiThread {
-            if (!voiceConversationEnabled || text.isBlank()) return@runOnUiThread
-            voiceWaitingForAgent = false
-            voiceRecognizer?.cancel()
-            ensureVoiceTts()
-            if (!voiceTtsReady) {
-                voicePendingResponse = text
-                return@runOnUiThread
+    fun onVoiceAgentEvent(kind: String, text: String) {
+        if (!VoiceConversationService.isSessionActive()) return
+        synchronized(voiceEventLock) {
+            if (kind == "message" && pendingVoiceEvents.lastOrNull()?.kind == "message") {
+                pendingVoiceEvents.removeLast()
             }
-            voicePendingResponse = null
-            val chunks = text.chunked((TextToSpeech.getMaxSpeechInputLength() - 100).coerceAtLeast(500))
-            chunks.forEachIndexed { index, chunk ->
-                val utteranceId = if (index == chunks.lastIndex) {
-                    "$VOICE_UTTERANCE_ID-last"
-                } else {
-                    "$VOICE_UTTERANCE_ID-$index"
-                }
-                voiceTts?.speak(
-                    chunk,
-                    if (index == 0) TextToSpeech.QUEUE_FLUSH else TextToSpeech.QUEUE_ADD,
-                    null,
-                    utteranceId,
-                )
+            while (pendingVoiceEvents.size >= MAX_PENDING_VOICE_EVENTS) {
+                pendingVoiceEvents.removeFirst()
             }
+            pendingVoiceEvents.addLast(
+                PendingVoiceResponse(kind, text, VoiceConversationService.currentOutputEpoch()),
+            )
+        }
+        if (voiceResponseDispatchScheduled.compareAndSet(false, true)) {
+            voiceResponseHandler.post(dispatchLatestVoiceResponse)
         }
     }
 
-    private fun ensureVoiceTts() {
-        if (voiceTts != null) return
-        voiceTts = TextToSpeech(this) { status ->
-            voiceTtsReady = status == TextToSpeech.SUCCESS
-            if (voiceTtsReady) {
-                voiceTts?.language = Locale.getDefault()
-                voiceTts?.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
-                    override fun onStart(utteranceId: String?) = Unit
-                    override fun onError(utteranceId: String?) {
-                        if (utteranceId?.endsWith("-last") == true) {
-                            runOnUiThread { if (voiceConversationEnabled) startVoiceListening() }
-                        }
-                    }
-                    override fun onDone(utteranceId: String?) {
-                        if (utteranceId?.endsWith("-last") == true) {
-                            runOnUiThread { if (voiceConversationEnabled) startVoiceListening() }
-                        }
-                    }
-                })
-                val pendingResponse = voicePendingResponse
-                voicePendingResponse = null
-                if (pendingResponse != null) {
-                    speakVoiceResponse(pendingResponse)
-                }
-            } else {
-                voicePendingResponse = null
-                voiceConversationEnabled = false
-                Toast.makeText(
-                    this,
-                    "Text-to-speech is unavailable on this device",
-                    Toast.LENGTH_LONG,
-                ).show()
-            }
-        }
+    fun onNativeVoiceConversationEnded() = runOnUiThread {
+        voiceConversationEnabled = false
+        NativeBridge.nativeSetVoiceConversationEnabled(false)
     }
 
-    private fun startVoiceListening() {
-        if (!voiceConversationEnabled || voiceWaitingForAgent) return
-        if (!SpeechRecognizer.isRecognitionAvailable(this)) {
-            Toast.makeText(this, "Speech recognition is unavailable on this device", Toast.LENGTH_LONG).show()
-            voiceConversationEnabled = false
-            return
+    private fun friendlyVoiceAgentName(agentName: String, modelName: String): String {
+        val combined = "$agentName $modelName".lowercase()
+        return when {
+            combined.contains("claude") -> "Claude"
+            combined.contains("codex") || combined.contains("gpt") || combined.contains("openai") -> "Codex"
+            else -> "Zed Agent"
         }
-        if (voiceRecognizer == null) {
-            voiceRecognizer = SpeechRecognizer.createSpeechRecognizer(this).apply {
-                setRecognitionListener(object : RecognitionListener {
-                    override fun onReadyForSpeech(params: Bundle?) = Unit
-                    override fun onBeginningOfSpeech() = Unit
-                    override fun onRmsChanged(rmsdB: Float) = Unit
-                    override fun onBufferReceived(buffer: ByteArray?) = Unit
-                    override fun onEndOfSpeech() = Unit
-                    override fun onPartialResults(partialResults: Bundle?) = Unit
-                    override fun onEvent(eventType: Int, params: Bundle?) = Unit
-                    override fun onError(error: Int) {
-                        if (!voiceConversationEnabled || voiceWaitingForAgent) return
-                        Handler(Looper.getMainLooper()).postDelayed({ startVoiceListening() }, 600)
-                    }
-                    override fun onResults(results: Bundle?) {
-                        val text = results
-                            ?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
-                            ?.firstOrNull()
-                            ?.trim()
-                            .orEmpty()
-                        if (text.isBlank()) {
-                            if (voiceConversationEnabled) startVoiceListening()
-                            return
-                        }
-                        voiceWaitingForAgent = true
-                        NativeBridge.nativeImeCommitText(imeWindowId, text, 1)
-                        val sendMeta = KeyEvent.META_CTRL_ON or KeyEvent.META_SHIFT_ON
-                        NativeBridge.nativeImeSendKeyEvent(
-                            imeWindowId,
-                            KeyEvent.ACTION_DOWN,
-                            KeyEvent.KEYCODE_ENTER,
-                            sendMeta,
-                            0,
-                        )
-                        NativeBridge.nativeImeSendKeyEvent(
-                            imeWindowId,
-                            KeyEvent.ACTION_UP,
-                            KeyEvent.KEYCODE_ENTER,
-                            sendMeta,
-                            0,
-                        )
-                    }
-                })
-            }
-        }
-        val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
-            putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
-            putExtra(RecognizerIntent.EXTRA_LANGUAGE, Locale.getDefault().toLanguageTag())
-            putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, false)
-            putExtra(RecognizerIntent.EXTRA_PREFER_OFFLINE, false)
-        }
-        voiceRecognizer?.startListening(intent)
-        Toast.makeText(this, "Listening...", Toast.LENGTH_SHORT).show()
     }
 
     override fun onStart() {
@@ -789,6 +747,9 @@ class MainActivity : GameActivity(), ImeHost {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        currentActivity = java.lang.ref.WeakReference(this)
+        PhoneUseRuntime.initializeIfEnabled(this)
+        VoiceConversationService.attachMainActivity(this)
         installSplashOverlay()
         // Edge-to-edge: tell the OS we want to draw behind status / nav bars
         // and the cutout area, so gpui's surface gets the full display
@@ -1864,11 +1825,10 @@ class MainActivity : GameActivity(), ImeHost {
     /// the process here guarantees the next launch starts fresh with
     /// zero stale static state.
     override fun onDestroy() {
-        voiceRecognizer?.destroy()
-        voiceRecognizer = null
-        voicePendingResponse = null
-        voiceTts?.shutdown()
-        voiceTts = null
+        VoiceConversationService.attachMainActivity(null)
+        currentActivity = java.lang.ref.WeakReference<MainActivity>(null)
+        voiceResponseHandler.removeCallbacksAndMessages(null)
+        synchronized(voiceEventLock) { pendingVoiceEvents.clear() }
         selectionOverlay?.destroy()
         selectionOverlay = null
         Log.i(TAG, "onDestroy isFinishing=$isFinishing — exiting process for clean restart")
@@ -1897,10 +1857,11 @@ class MainActivity : GameActivity(), ImeHost {
         }
         if (requestCode == REQ_VOICE_PERMISSION) {
             if (grantResults.firstOrNull() == PackageManager.PERMISSION_GRANTED) {
-                ensureVoiceTts()
-                startVoiceListening()
+                launchVoiceCallActivity()
+                VoiceConversationService.start(this)
             } else {
                 voiceConversationEnabled = false
+                NativeBridge.nativeSetVoiceConversationEnabled(false)
                 Toast.makeText(
                     this,
                     "Microphone permission is required for voice conversation",
@@ -2142,6 +2103,9 @@ class MainActivity : GameActivity(), ImeHost {
     private external fun onPickerResult(uriString: String)
 
     companion object {
+        // Coalesce rapid full-text ACP updates without adding perceptible speech latency.
+        private const val VOICE_RESPONSE_FRAME_MS = 32L
+        private const val MAX_PENDING_VOICE_EVENTS = 64
         @Volatile
         var isAppVisible: Boolean = false
             private set
@@ -2155,7 +2119,6 @@ class MainActivity : GameActivity(), ImeHost {
         private const val REQ_NOTIFICATION_PERMISSION = 0xA4
         private const val REQ_OPEN_DOCUMENT = 0xA5
         private const val REQ_VOICE_PERMISSION = 0xA6
-        private const val VOICE_UTTERANCE_ID = "zdroid-agent-response"
         /// Software cursor side length in dp. Scaled by display
         /// density at instantiation time to give the sprite a
         /// consistent visual size across devices.
@@ -2165,5 +2128,142 @@ class MainActivity : GameActivity(), ImeHost {
         /// per-window hold-drag flag; spawned `ExtraWindowActivity`
         /// instances pass their own `extraWindowId`.
         const val PRIMARY_WINDOW_ID: Long = 0
+
+        @Volatile
+        private var currentActivity = java.lang.ref.WeakReference<MainActivity>(null)
+
+        /** Called from the Rust settings page; all changes apply immediately. */
+        @JvmStatic
+        fun showDangerZoneSettings() {
+            currentActivity.get()?.let { activity ->
+                activity.runOnUiThread { activity.showDangerZoneDialog() }
+            }
+        }
+    }
+
+    private fun showDangerZoneDialog() {
+        var state = DangerZonePolicy.load(this)
+        val container = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            val pad = (20 * resources.displayMetrics.density).toInt()
+            setPadding(pad, pad / 2, pad, 0)
+        }
+        container.addView(TextView(this).apply {
+            text = "These controls change the boundary between AI agents, your projects, and Zdroid-B's own runtime. Safeguards apply immediately."
+            textSize = 15f
+        })
+        val outside = CheckBox(this).apply {
+            text = "Allow direct AI file tools outside the active project"
+            isChecked = state.allowOutsideProject
+        }
+        val bootstrap = CheckBox(this).apply {
+            text = "Protect Zdroid Bootstrap (install and run project tools in Ubuntu)"
+            isChecked = state.protectBootstrapRuntime
+        }
+        container.addView(outside)
+        container.addView(bootstrap)
+        container.addView(TextView(this).apply {
+            text = "The project boundary protects direct ACP file tools and working-directory requests. It is a guardrail, not an OS sandbox for arbitrary shell commands. Agent launchers remain in Android Bootstrap because Android-native Node compatibility requires it; runtime protection routes package installs and project commands into Ubuntu."
+            textSize = 13f
+        })
+
+        fun restoreChecks() {
+            outside.isChecked = state.allowOutsideProject
+            bootstrap.isChecked = state.protectBootstrapRuntime
+        }
+
+        fun saveState(candidate: DangerZonePolicy.State): Boolean {
+            if (!DangerZonePolicy.save(this, candidate)) {
+                Toast.makeText(this, "Could not update the Danger Zone policy", Toast.LENGTH_LONG).show()
+                restoreChecks()
+                return false
+            }
+            state = candidate
+            restoreChecks()
+            return true
+        }
+
+        outside.setOnClickListener {
+            if (outside.isChecked && !state.allowOutsideProject) {
+                requestDangerConfirmation(
+                    title = "Allow direct file tools outside projects?",
+                    warning = "Direct AI file tools may read or change credentials, configuration, downloads, and other files visible to Zdroid-B. This option is not an OS sandbox for arbitrary shell commands. Only enable it for agents and repositories you trust.",
+                    phrase = DangerZonePolicy.OUTSIDE_PROJECT_PHRASE,
+                ) {
+                    saveState(state.copy(allowOutsideProject = true))
+                }
+                outside.isChecked = false
+            } else {
+                saveState(state.copy(allowOutsideProject = false))
+            }
+        }
+        bootstrap.setOnClickListener {
+            if (!bootstrap.isChecked && state.protectBootstrapRuntime) {
+                requestDangerConfirmation(
+                    title = "Allow Bootstrap runtime changes?",
+                    warning = "Packages installed into Zdroid Bootstrap can replace core binaries, break AI launchers, or make future upgrades fail. Ubuntu isolation will no longer be enforced for Agent project commands.",
+                    phrase = DangerZonePolicy.BOOTSTRAP_PHRASE,
+                ) {
+                    saveState(state.copy(protectBootstrapRuntime = false))
+                }
+                bootstrap.isChecked = true
+            } else {
+                saveState(state.copy(protectBootstrapRuntime = true))
+            }
+        }
+
+        AlertDialog.Builder(this)
+            .setTitle("Danger Zone")
+            .setView(container)
+            .setPositiveButton("Close", null)
+            .show()
+    }
+
+    private fun requestDangerConfirmation(
+        title: String,
+        warning: String,
+        phrase: String,
+        onConfirmed: () -> Unit,
+    ) {
+        val input = EditText(this).apply {
+            hint = phrase
+            isSingleLine = true
+        }
+        val container = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            val pad = (20 * resources.displayMetrics.density).toInt()
+            setPadding(pad, 0, pad, 0)
+            addView(TextView(this@MainActivity).apply {
+                text = "$warning\n\nType the following phrase exactly to continue:\n$phrase"
+                textSize = 15f
+            })
+            addView(input)
+        }
+        val dialog = AlertDialog.Builder(this)
+            .setTitle(title)
+            .setView(container)
+            .setNegativeButton("Cancel", null)
+            .setPositiveButton("Enable", null)
+            .create()
+        dialog.setOnShowListener {
+            val enable = dialog.getButton(AlertDialog.BUTTON_POSITIVE)
+            enable.isEnabled = false
+            input.addTextChangedListener(object : android.text.TextWatcher {
+                override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) = Unit
+                override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {
+                    enable.isEnabled = s?.toString() == phrase
+                }
+                override fun afterTextChanged(s: android.text.Editable?) = Unit
+            })
+            enable.setOnClickListener {
+                if (input.text.toString() == phrase) {
+                    onConfirmed()
+                    dialog.dismiss()
+                }
+            }
+            input.requestFocus()
+            dialog.window?.setSoftInputMode(android.view.WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_VISIBLE)
+        }
+        dialog.show()
     }
 }

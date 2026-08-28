@@ -43,6 +43,11 @@ fn android_app() -> Result<&'static AndroidApp> {
         .ok_or_else(|| anyhow!("updater: AndroidApp not registered yet"))
 }
 
+/// Returns the process-global Android handle for app-internal JNI integrations.
+pub fn registered_android_app() -> Result<&'static AndroidApp> {
+    android_app()
+}
+
 /// Repo we ship APK releases from. Kept here (not in a config file)
 /// so a malicious user-config tweak can't redirect the auto-updater
 /// at a third-party APK.

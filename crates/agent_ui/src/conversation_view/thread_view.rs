@@ -4641,6 +4641,9 @@ impl ThreadView {
                                             .children(self.mode_selector.clone())
                                             .children(self.model_selector.clone()),
                                     })
+                                    .when(cfg!(target_os = "android"), |this| {
+                                        this.child(self.render_voice_conversation_button(cx))
+                                    })
                                     .child(self.render_send_button(cx)),
                             ),
                     ),
@@ -5683,6 +5686,40 @@ impl ThreadView {
         }
     }
 
+    fn render_voice_conversation_button(&self, cx: &mut Context<Self>) -> AnyElement {
+        let enabled = cx.voice_conversation_enabled();
+        let editor = self.message_editor.clone();
+        let agent_name = self.agent_id.0.to_string();
+        let model_name = self.current_model_name(cx).to_string();
+        IconButton::new(
+            "voice-conversation",
+            if enabled {
+                IconName::Pencil
+            } else {
+                IconName::VoiceWaveform
+            },
+        )
+        .icon_size(IconSize::Small)
+        .style(ButtonStyle::Tinted(TintColor::Accent))
+        .tooltip(Tooltip::text(if enabled {
+            "Return to Writing"
+        } else {
+            "Start Voice Conversation (Beta)"
+        }))
+        .on_click(move |_, window, cx| {
+            if cx.voice_conversation_enabled() {
+                // Re-open the call surface after the user temporarily returned
+                // to the normal chat. Ending the call remains an explicit action.
+                cx.set_voice_conversation_enabled(true);
+            } else {
+                editor.read(cx).focus_handle(cx).focus(window, cx);
+                cx.set_voice_conversation_context(&agent_name, &model_name);
+                cx.set_voice_conversation_enabled(true);
+            }
+        })
+        .into_any_element()
+    }
+
     fn render_add_context_button(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let focus_handle = self.message_editor.focus_handle(cx);
         let weak_self = cx.weak_entity();
@@ -5727,6 +5764,10 @@ impl ThreadView {
         let supports_images = session_capabilities.supports_images();
         let supports_embedded_context = session_capabilities.supports_embedded_context();
         let available_skills = session_capabilities.completion_skills();
+        let browser_skill = available_skills
+            .iter()
+            .find(|skill| skill.name.as_ref() == "browser-use")
+            .cloned();
         let personnel = crate::company::load_companies(cx).personnel;
         drop(session_capabilities);
 
@@ -5752,6 +5793,38 @@ impl ThreadView {
 
         ContextMenu::build(window, cx, move |menu, _window, _cx| {
             menu.key_context("AddContextMenu")
+                .when(cfg!(target_os = "android"), |menu| {
+                    let browser_editor = message_editor.clone();
+                    let browser_skill = browser_skill.clone();
+                    menu.item(
+                        ContextMenuEntry::new("Use Browser")
+                            .icon(IconName::ToolWeb)
+                            .icon_color(Color::Muted)
+                            .handler(move |window, cx| {
+                                browser_editor.focus_handle(cx).focus(window, cx);
+                                browser_editor.update(cx, |editor, cx| {
+                                    if let Some(skill) = &browser_skill {
+                                        editor.insert_skill_crease(skill, window, cx);
+                                    }
+                                    editor.insert_text(
+                                        "Use the coordinated Crawl4AI + Droid-MCP browser workflow for this task. ",
+                                        window,
+                                        cx,
+                                    );
+                                });
+                            }),
+                    )
+                    .item(
+                        ContextMenuEntry::new("Phone Use")
+                            .icon(IconName::ToolWeb)
+                            .icon_color(Color::Muted)
+                            .icon_size(IconSize::XSmall)
+                            .handler(|window, cx| {
+                                window.dispatch_action(Box::new(crate::ConfigurePhoneUse), cx);
+                            }),
+                    )
+                    .separator()
+                })
                 .item(
                     ContextMenuEntry::new("Files & Directories")
                         .icon(IconName::File)

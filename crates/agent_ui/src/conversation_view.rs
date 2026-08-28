@@ -1941,6 +1941,9 @@ impl ConversationView {
                         active.sync_generating_indicator(cx);
                     });
                 }
+                if !is_subagent && cx.voice_conversation_enabled() {
+                    cx.send_voice_agent_event("thinking", "");
+                }
             }
             AcpThreadEvent::NewEntry => {
                 let len = thread.read(cx).entries().len();
@@ -1978,6 +1981,15 @@ impl ConversationView {
                         active.sync_generating_indicator(cx);
                     });
                 }
+                if !is_subagent
+                    && cx.voice_conversation_enabled()
+                    && let Some(response) = thread.read(cx).latest_assistant_text(cx)
+                {
+                    // Android de-duplicates the growing response and queues only
+                    // newly completed phrases, so speech can begin while the
+                    // Agent is still streaming the rest of its answer.
+                    cx.send_voice_agent_event("message", &response);
+                }
             }
             AcpThreadEvent::EntriesRemoved(range) => {
                 if let Some(active) = self.thread_view(&session_id) {
@@ -2001,10 +2013,19 @@ impl ConversationView {
                     );
                 }
                 self.notify_with_sound("Waiting for tool confirmation", IconName::Info, window, cx);
+                if !is_subagent && cx.voice_conversation_enabled() {
+                    cx.send_voice_agent_event(
+                        "waiting_for_user",
+                        "The agent is waiting for tool confirmation.",
+                    );
+                }
             }
             AcpThreadEvent::ToolAuthorizationReceived(_) => {
                 if !is_subagent {
                     cx.start_background_task(&session_id.to_string(), "Agent is working");
+                    if cx.voice_conversation_enabled() {
+                        cx.send_voice_agent_event("thinking", "");
+                    }
                 }
             }
             AcpThreadEvent::ElicitationRequested(_) => {
@@ -2013,12 +2034,21 @@ impl ConversationView {
                         &session_id.to_string(),
                         "Agent is waiting for your answer",
                     );
+                    if cx.voice_conversation_enabled() {
+                        cx.send_voice_agent_event(
+                            "waiting_for_user",
+                            "The agent is waiting for your answer.",
+                        );
+                    }
                 }
                 self.notify_with_sound("Waiting for input", IconName::Info, window, cx);
             }
             AcpThreadEvent::ElicitationResponded(_) => {
                 if !is_subagent {
                     cx.start_background_task(&session_id.to_string(), "Agent is working");
+                    if cx.voice_conversation_enabled() {
+                        cx.send_voice_agent_event("thinking", "");
+                    }
                 }
             }
             AcpThreadEvent::Retry(retry) => {
@@ -2095,11 +2125,11 @@ impl ConversationView {
                         window,
                         cx,
                     );
-                    if successful
-                        && crate::agent_panel::android_voice_conversation_enabled()
-                        && let Some(response) = thread.read(cx).latest_assistant_text(cx)
-                    {
-                        cx.speak_voice_response(&response);
+                    if cx.voice_conversation_enabled() {
+                        cx.send_voice_agent_event(
+                            if successful { "finished" } else { "failed" },
+                            "",
+                        );
                     }
                 }
             }
@@ -2121,8 +2151,8 @@ impl ConversationView {
                     let notification_message =
                         format!("{} refused to respond to this request", model_or_agent_name);
                     self.notify_with_sound(&notification_message, IconName::Warning, window, cx);
-                    if crate::agent_panel::android_voice_conversation_enabled() {
-                        cx.speak_voice_response("The agent refused this request.");
+                    if cx.voice_conversation_enabled() {
+                        cx.send_voice_agent_event("failed", "The agent refused this request.");
                     }
                 }
             }
@@ -2152,8 +2182,11 @@ impl ConversationView {
                         window,
                         cx,
                     );
-                    if crate::agent_panel::android_voice_conversation_enabled() {
-                        cx.speak_voice_response("The agent stopped because of an error.");
+                    if cx.voice_conversation_enabled() {
+                        cx.send_voice_agent_event(
+                            "failed",
+                            "The agent stopped because of an error.",
+                        );
                     }
                 }
             }

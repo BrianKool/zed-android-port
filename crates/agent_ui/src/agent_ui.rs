@@ -327,8 +327,8 @@ actions!(
         ImportThreadsFromOtherChannels,
         /// Starts a new terminal thread.
         NewTerminalThread,
-        /// Opens the Android browser-tools setup and status dialog.
-        ConfigureBrowserTools,
+        /// Opens the Android-native Phone Use setup and status dialog.
+        ConfigurePhoneUse,
     ]
 );
 

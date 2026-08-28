@@ -322,7 +322,8 @@ android {
         // minSdk = 26 enforces bionic â‰¥ Oreo. `forkpty()` is on the symbol
         // table from API 23, but cpal/livekit transitive crates require
         // libaaudio which is API 26.
-        minSdk = 26
+        // droid-mcp's Android-native Accessibility transport requires API 28.
+        minSdk = 28
         // targetSdk = 28 is the linchpin of the bundled Termux runtime:
         // SELinux puts us in the `untrusted_app_27` domain where
         // `execute_no_trans` on `app_data_file` is permitted, so we can
@@ -331,8 +332,8 @@ android {
         // denied â€” the entire L2 plan stops working. Skipping Play Store
         // eligibility is the explicit trade.
         targetSdk = 28
-        versionCode = 159
-        versionName = "1.1.6-beta-1r"
+        versionCode = 168
+        versionName = "1.1.6-beta-2a"
         ndk {
             abiFilters += listOf("arm64-v8a")
         }
@@ -350,6 +351,19 @@ android {
     // the bootstrap extractor from using the mmap-able buffer path.
     androidResources {
         noCompress += listOf("zip")
+    }
+
+    // droid-mcp uses Ktor/Netty, whose component jars repeat documentation
+    // metadata. These files are not loaded at runtime and Android can package
+    // only one resource at each path.
+    packaging {
+        resources.excludes += setOf(
+            "META-INF/INDEX.LIST",
+            "META-INF/DEPENDENCIES",
+            "META-INF/LICENSE*",
+            "META-INF/NOTICE*",
+            "META-INF/io.netty.versions.properties",
+        )
     }
 
     compileOptions {
@@ -426,4 +440,10 @@ dependencies {
     implementation("androidx.core:core-ktx:1.13.1")
     // ActivityResultLauncher / ActivityResultContracts for SAF picker.
     implementation("androidx.activity:activity-ktx:1.9.3")
+    implementation("com.github.stixez.droid-mcp:droid-mcp-core:0.10.1")
+    implementation("com.github.stixez.droid-mcp:droid-mcp-accessibility:0.10.1")
+    implementation("com.github.stixez.droid-mcp:droid-mcp-apps:0.10.1")
+    implementation("com.github.stixez.droid-mcp:droid-mcp-intent:0.10.1")
+    implementation("com.github.stixez.droid-mcp:droid-mcp-device:0.10.1")
+    testImplementation("junit:junit:4.13.2")
 }

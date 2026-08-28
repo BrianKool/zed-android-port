@@ -289,6 +289,7 @@ pub enum IconName {
     UserGroup,
     UserRoundPen,
     Warning,
+    VoiceWaveform,
     WholeWord,
     XCircle,
     XCircleFilled,

@@ -301,6 +301,23 @@ fn dispatch_event(window_id: u64, event: ImeEvent) {
     }
 }
 
+pub(crate) fn dispatch_escape(window_id: u64) {
+    const ACTION_DOWN: i32 = 0;
+    const ACTION_UP: i32 = 1;
+    const KEYCODE_ESCAPE: u32 = 111;
+    for action in [ACTION_DOWN, ACTION_UP] {
+        dispatch_event(
+            window_id,
+            ImeEvent::KeyEvent {
+                action,
+                keycode: KEYCODE_ESCAPE,
+                meta_state: 0,
+                repeat_count: 0,
+            },
+        );
+    }
+}
+
 fn debug_event(event: &ImeEvent) -> String {
     match event {
         ImeEvent::CommitText {

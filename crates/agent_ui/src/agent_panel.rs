@@ -57,7 +57,7 @@ use crate::{
     NewNativeAgentThreadFromSummary,
 };
 use crate::{
-    AgentDiffPane, ConfigureBrowserTools, ConversationView, CopyThreadToClipboard, Follow,
+    AgentDiffPane, ConfigurePhoneUse, ConversationView, CopyThreadToClipboard, Follow,
     LoadThreadFromClipboard, NewTerminalThread, NewThread, OpenActiveThreadAsMarkdown,
     OpenAgentDiff, ResetFastModeWarnings, ResetTrialEndUpsell, ResetTrialUpsell,
     ShowAllSidebarThreadMetadata, ShowThreadMetadata, ToggleNewThreadMenu, ToggleOptionsMenu,
@@ -113,11 +113,6 @@ use workspace::{
 };
 
 const AGENT_PANEL_KEY: &str = "agent_panel";
-static ANDROID_VOICE_CONVERSATION_ENABLED: AtomicBool = AtomicBool::new(false);
-
-pub(crate) fn android_voice_conversation_enabled() -> bool {
-    ANDROID_VOICE_CONVERSATION_ENABLED.load(Ordering::Acquire)
-}
 const MIN_PANEL_WIDTH: Pixels = px(220.);
 const LAST_USED_AGENT_KEY: &str = "agent_panel__last_used_external_agent";
 const LAST_CREATED_ENTRY_KIND_KEY: &str = "agent_panel__last_created_entry_kind";
@@ -8490,6 +8485,17 @@ impl AgentPanel {
                                 );
                         }
 
+                        if cfg!(target_os = "android") {
+                            menu = menu.separator().header("AI Auto").item(
+                                ContextMenuEntry::new("AI Auto Settings")
+                                    .icon(IconName::ToolWeb)
+                                    .icon_color(Color::Muted)
+                                    .handler(|window, cx| {
+                                        window.dispatch_action(Box::new(ConfigurePhoneUse), cx);
+                                    }),
+                            );
+                        }
+
                         menu = menu
                             .separator()
                             .action("Settings", Box::new(OpenSettings))
@@ -8933,48 +8939,6 @@ impl AgentPanel {
             })
         };
 
-        let browser_tools_button = cfg!(target_os = "android").then(|| {
-            IconButton::new("configure-browser-tools", IconName::ToolWeb)
-                .icon_size(IconSize::Small)
-                .tooltip(Tooltip::text("Android Browser Tools"))
-                .on_click(|_, window, cx| {
-                    window.dispatch_action(Box::new(ConfigureBrowserTools), cx);
-                })
-        });
-
-        let voice_conversation_button =
-            (cfg!(target_os = "android") && !showing_terminal).then(|| {
-                let enabled = android_voice_conversation_enabled();
-                IconButton::new(
-                    "toggle-voice-conversation",
-                    if enabled {
-                        IconName::MicMute
-                    } else {
-                        IconName::Mic
-                    },
-                )
-                .icon_size(IconSize::Small)
-                .toggle_state(enabled)
-                .tooltip(Tooltip::text(if enabled {
-                    "Stop Voice Conversation"
-                } else {
-                    "Start Voice Conversation (Beta)"
-                }))
-                .on_click(cx.listener(|this, _, window, cx| {
-                    let enabled = !android_voice_conversation_enabled();
-                    ANDROID_VOICE_CONVERSATION_ENABLED.store(enabled, Ordering::Release);
-                    if enabled
-                        && let Some(view) = this.active_conversation_view().cloned()
-                        && let Some(thread) = view.read(cx).active_thread().cloned()
-                    {
-                        let editor = thread.read(cx).message_editor.clone();
-                        editor.read(cx).focus_handle(cx).focus(window, cx);
-                    }
-                    cx.set_voice_conversation_enabled(enabled);
-                    cx.notify();
-                }))
-            });
-
         let max_content_width = AgentSettings::get_global(cx).max_content_width;
         let company_session_active = self.active_company_session(cx).is_some();
 
@@ -9050,8 +9014,6 @@ impl AgentPanel {
                             this.child(button)
                         })
                         .when_some(refresh_agent_button(cx), |this, button| this.child(button))
-                        .when_some(voice_conversation_button, |this, button| this.child(button))
-                        .when_some(browser_tools_button, |this, button| this.child(button))
                         .child(history_button(cx))
                         .when(can_create_entries, |this| this.child(new_thread_menu))
                         .child(full_screen_button)

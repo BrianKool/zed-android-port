@@ -1,0 +1,4 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="phone_use_accessibility_description">Lets Zdroid-B agents inspect and operate Android apps only when you ask them to use Phone Use.</string>
+</resources>

@@ -1449,14 +1449,30 @@ impl App {
             .finish_background_task(task_id, description, successful);
     }
 
+    /// Updates the agent identity shown by Android's hands-free conversation UI.
+    pub fn set_voice_conversation_context(&self, agent_name: &str, model_name: &str) {
+        self.platform
+            .set_voice_conversation_context(agent_name, model_name);
+    }
+
     /// Enables or disables Android's hands-free Agent conversation loop.
     pub fn set_voice_conversation_enabled(&self, enabled: bool) {
         self.platform.set_voice_conversation_enabled(enabled);
     }
 
-    /// Speaks an Agent response and resumes listening when speech completes.
-    pub fn speak_voice_response(&self, text: &str) {
-        self.platform.speak_voice_response(text);
+    /// Returns whether Android's hands-free Agent conversation loop is active.
+    pub fn voice_conversation_enabled(&self) -> bool {
+        self.platform.voice_conversation_enabled()
+    }
+
+    /// Sends a typed Agent lifecycle event to Android's voice orchestrator.
+    pub fn send_voice_agent_event(&self, kind: &str, text: &str) {
+        self.platform.send_voice_agent_event(kind, text);
+    }
+
+    /// Opens the Android Accessibility settings used by Zdroid-B Phone Use.
+    pub fn open_phone_use_settings(&self) {
+        self.platform.open_phone_use_settings();
     }
 
     /// Registers the given URL scheme (e.g. `zed` for `zed://` urls) to be

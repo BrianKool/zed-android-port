@@ -199,6 +199,7 @@ Read these before touching the relevant area:
 - `docs/ZDROID_B_TERMINAL_ENVIRONMENT.md`
 - `docs/ZDROID_B_TECH_STACK.md`
 - `docs/ZDROID_B_CONVERSATION_HANDOFF.md`
+- `docs/ZDROID_PHONE_BROWSER_VOICE_AUDIT.md`
 
 ## Default Engineering Rule
 

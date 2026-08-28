@@ -13,6 +13,8 @@ import android.view.Surface
 /// `Java_com_zdroid_NativeBridge_<methodName>` symbols. Class name
 /// changes here require matching renames on the Rust side.
 object NativeBridge {
+    external fun nativeSetVoiceConversationEnabled(enabled: Boolean)
+    external fun nativeInterruptVoiceAgent()
     /// Process-death recovery probe. `ExtraWindowActivity.onCreate` calls
     /// this BEFORE any other JNI work. Returns true if the gpui-side has a
     /// live AndroidWindow registered for this `windowId` (this Activity was

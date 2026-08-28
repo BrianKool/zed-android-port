@@ -92,9 +92,42 @@ pub(crate) fn settings_data(cx: &App) -> Vec<SettingsPage> {
     #[cfg(target_os = "android")]
     pages.push(android_input_page());
 
+    #[cfg(target_os = "android")]
+    pages.push(android_danger_zone_page());
+
     pages.push(developer_page(cx));
 
     pages
+}
+
+#[cfg(target_os = "android")]
+fn android_danger_zone_page() -> SettingsPage {
+    SettingsPage {
+        title: "Danger Zone",
+        items: Box::new([
+            SettingsPageItem::SectionHeader("Agent safety boundaries"),
+            SettingsPageItem::StaticInfo(StaticInfo {
+                title: "Protected by default".into(),
+                description: Some("AI agents are limited to the active project and project commands are routed into Ubuntu. Relaxing either boundary requires an exact typed confirmation and applies immediately.".into()),
+                value: "Project-only + Ubuntu".into(),
+                files: USER,
+            }),
+            SettingsPageItem::ActionLink(ActionLink {
+                title: "Review dangerous permissions".into(),
+                description: Some("Control access outside the active project and whether agents may modify the Zdroid Bootstrap runtime.".into()),
+                button_text: "Review".into(),
+                on_click: Arc::new(|_settings_window, _window, cx| {
+                    workspace::with_active_or_new_workspace(cx, |_workspace, window, cx| {
+                        match cx.build_action("zdroid_danger_zone::OpenDangerZone", None) {
+                            Ok(action) => window.dispatch_action(action, cx),
+                            Err(error) => log::warn!("Danger Zone action unavailable: {error}"),
+                        }
+                    });
+                }),
+                files: USER,
+            }),
+        ]),
+    }
 }
 
 /// Android-specific: lets the user choose which userland Zdroid routes

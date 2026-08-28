@@ -81,6 +81,7 @@ tab_switcher = { path = "../../../tab_switcher" }
 tasks_ui = { path = "../../../tasks_ui" }
 terminal = { path = "../../../terminal" }
 terminal_view = { path = "../../../terminal_view" }
+task = { path = "../../../task" }
 theme_selector = { path = "../../../theme_selector" }
 toolchain_selector = { path = "../../../toolchain_selector" }
 which_key = { path = "../../../which_key" }
