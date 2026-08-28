@@ -8510,6 +8510,22 @@ fn ai_page(cx: &App) -> SettingsPage {
             render: render_local_llm_page,
         }));
 
+        #[cfg(target_os = "android")]
+        items.push(SettingsPageItem::ActionLink(ActionLink {
+            title: "Plugins".into(),
+            description: Some("Install and activate Mobile Use, Browser Use, PDF, Excel, Word, and PowerPoint tools for Agents.".into()),
+            button_text: "Manage".into(),
+            on_click: Arc::new(|_settings_window, _window, cx| {
+                workspace::with_active_or_new_workspace(cx, |_workspace, window, cx| {
+                    match cx.build_action("agent::ConfigurePhoneUse", None) {
+                        Ok(action) => window.dispatch_action(action, cx),
+                        Err(error) => log::warn!("Plugin settings unavailable: {error}"),
+                    }
+                });
+            }),
+            files: USER,
+        }));
+
         items.extend([
             SettingsPageItem::SubPageLink(SubPageLink {
                 title: "LLM Providers".into(),

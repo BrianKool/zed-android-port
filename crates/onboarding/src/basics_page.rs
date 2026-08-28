@@ -825,6 +825,19 @@ fn render_android_input_section(tab_index: &mut isize, cx: &mut App) -> impl Int
         )
 }
 
+#[cfg(target_os = "android")]
+fn render_android_plugin_info() -> impl IntoElement {
+    v_flex()
+        .gap_2()
+        .child(Label::new("Optional Agent Plugins"))
+        .child(Label::new("Mobile Use and Browser Use connect Agents to Android. PDF, Excel, Word, and PowerPoint tools can be installed later from Settings > AI > Plugins. Office plugins run in Ubuntu, preserve source files, validate new outputs, and remain installed when inactive.").color(Color::Muted).size(LabelSize::Small))
+        .child(
+            h_flex().gap_2()
+                .child(Icon::new(IconName::ToolWeb).size(IconSize::Small).color(Color::Accent))
+                .child(Label::new("Install only the capabilities you need; every plugin has an independent Active/Inactive switch.").size(LabelSize::Small)),
+        )
+}
+
 fn render_ai_section(user_store: &Entity<UserStore>, cx: &mut App) -> impl IntoElement {
     let registry_agents = AgentRegistryStore::try_global(cx)
         .map(|store| store.read(cx).agents().to_vec())
@@ -890,6 +903,7 @@ pub(crate) fn render_basics_page(user_store: &Entity<UserStore>, cx: &mut App) -
     let page = {
         let _ = user_store;
         page.child(render_android_input_section(&mut tab_index, cx))
+            .child(render_android_plugin_info())
     };
 
     let page = page

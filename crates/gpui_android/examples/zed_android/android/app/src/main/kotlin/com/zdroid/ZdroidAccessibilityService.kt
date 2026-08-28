@@ -12,7 +12,10 @@ class ZdroidAccessibilityService : DroidMcpAccessibilityService() {
 
     override fun onUnbind(intent: Intent?): Boolean {
         val result = super.onUnbind(intent)
-        PhoneUseRuntime.shutdown(this)
+        // The authenticated MCP transport also hosts Office plugins, which do
+        // not depend on Accessibility. Keep it alive and only update Phone Use
+        // readiness when the accessibility service disconnects.
+        PhoneUseRuntime.updateStatus(this)
         return result
     }
 }

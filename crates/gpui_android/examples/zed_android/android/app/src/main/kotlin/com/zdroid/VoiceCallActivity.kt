@@ -6,6 +6,7 @@ import android.app.Dialog
 import android.content.Context
 import android.content.res.ColorStateList
 import android.graphics.Color
+import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
 import android.os.Bundle
 import android.util.Log
@@ -28,8 +29,7 @@ import androidx.core.view.WindowInsetsCompat
 /** Touch-safe call surface hosted outside GameActivity's native input queue. */
 class VoiceCallActivity : Activity() {
     private lateinit var stateLabel: TextView
-    private lateinit var transcriptLabel: TextView
-    private lateinit var responseLabel: TextView
+    private lateinit var conversationContainer: LinearLayout
     private lateinit var muteButton: ImageView
     private lateinit var pauseButton: ImageView
     private lateinit var input: EditText
@@ -38,8 +38,10 @@ class VoiceCallActivity : Activity() {
     private lateinit var heroBottomSpacer: View
     private lateinit var conversationScroll: ScrollView
     private var speechOutputEnabled = true
+    private var showChat = false
     private var typingLayout = false
     private var voicePaused = false
+    private var threadId = ""
     private var agentName = "Agent"
     private var modelName = "Current model"
 
@@ -47,6 +49,7 @@ class VoiceCallActivity : Activity() {
         super.onCreate(savedInstanceState)
         agentName = intent.getStringExtra(EXTRA_AGENT_NAME).orEmpty().ifBlank { "Agent" }
         modelName = intent.getStringExtra(EXTRA_MODEL_NAME).orEmpty().ifBlank { "Current model" }
+        threadId = intent.getStringExtra(EXTRA_THREAD_ID).orEmpty()
         val content = buildContent()
         setContentView(content)
         ViewCompat.setOnApplyWindowInsetsListener(content) { _, insets ->
@@ -61,6 +64,7 @@ class VoiceCallActivity : Activity() {
         setIntent(intent)
         agentName = intent.getStringExtra(EXTRA_AGENT_NAME).orEmpty().ifBlank { agentName }
         modelName = intent.getStringExtra(EXTRA_MODEL_NAME).orEmpty().ifBlank { modelName }
+        threadId = intent.getStringExtra(EXTRA_THREAD_ID).orEmpty().ifBlank { threadId }
     }
 
     override fun onStart() {
@@ -74,8 +78,31 @@ class VoiceCallActivity : Activity() {
     }
 
     fun updateState(value: String) = runOnUiThread { stateLabel.text = value }
-    fun updateTranscript(value: String) = runOnUiThread { transcriptLabel.text = value }
-    fun updateResponse(value: String) = runOnUiThread { responseLabel.text = value }
+    fun updateConversation(bubbles: List<VoiceConversationStore.Bubble>) = runOnUiThread {
+        if (!::conversationContainer.isInitialized) return@runOnUiThread
+        val child = conversationScroll.getChildAt(0)
+        val distanceFromBottom = child.height - conversationScroll.height - conversationScroll.scrollY
+        val following = distanceFromBottom <= dp(56)
+        val oldScroll = conversationScroll.scrollY
+        var common = 0
+        val sharedCount = minOf(conversationContainer.childCount, bubbles.size)
+        while (common < sharedCount) {
+            val view = conversationContainer.getChildAt(common) as? TextView ?: break
+            if (view.tag != bubbles[common].id) break
+            bindBubble(view, bubbles[common])
+            common += 1
+        }
+        if (conversationContainer.childCount > common) {
+            conversationContainer.removeViews(common, conversationContainer.childCount - common)
+        }
+        for (index in common until bubbles.size) {
+            conversationContainer.addView(bubbleView(bubbles[index]), fullWidth(top = 8))
+        }
+        conversationScroll.post {
+            if (following) conversationScroll.fullScroll(View.FOCUS_DOWN)
+            else conversationScroll.scrollTo(0, oldScroll.coerceAtMost(conversationContainer.height))
+        }
+    }
     fun updateMuteState(muted: Boolean) = runOnUiThread {
         muteButton.setImageResource(if (muted) R.drawable.ic_voice_mic_off else R.drawable.ic_voice_mic)
         muteButton.imageTintList = ColorStateList.valueOf(if (muted) Color.rgb(220, 64, 72) else Color.WHITE)
@@ -92,6 +119,8 @@ class VoiceCallActivity : Activity() {
     private fun buildContent(): View {
         speechOutputEnabled = getSharedPreferences("zdroid_voice", Context.MODE_PRIVATE)
             .getBoolean("speech_output", true)
+        showChat = getSharedPreferences("zdroid_voice", Context.MODE_PRIVATE)
+            .getBoolean("show_chat", false)
         val content = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             gravity = Gravity.CENTER_HORIZONTAL
@@ -111,7 +140,7 @@ class VoiceCallActivity : Activity() {
             LinearLayout.LayoutParams(dp(52), dp(52)),
         )
         content.addView(topBar, LinearLayout.LayoutParams(-1, -2))
-        if (speechOutputEnabled) {
+        if (speechOutputEnabled && !showChat) {
             heroTopSpacer = Space(this)
             content.addView(heroTopSpacer, LinearLayout.LayoutParams(1, 0, 1f))
             voiceHero = LinearLayout(this).apply {
@@ -142,13 +171,13 @@ class VoiceCallActivity : Activity() {
             orientation = LinearLayout.VERTICAL
             setPadding(0, dp(8), 0, dp(8))
         }
-        transcriptLabel = label("", 17f, Color.WHITE, if (speechOutputEnabled) Gravity.CENTER else Gravity.START)
-        conversation.addView(transcriptLabel, fullWidth(top = 10))
-        responseLabel = label("", 16f, Color.LTGRAY, if (speechOutputEnabled) Gravity.CENTER else Gravity.START)
-        conversation.addView(responseLabel, fullWidth(top = 12))
+        conversationContainer = conversation
         conversationScroll = ScrollView(this).apply { addView(conversation) }
-        content.addView(conversationScroll, LinearLayout.LayoutParams(-1, 0, if (speechOutputEnabled) 0.55f else 1f))
-        if (speechOutputEnabled) {
+        content.addView(
+            conversationScroll,
+            LinearLayout.LayoutParams(-1, 0, if (speechOutputEnabled && !showChat) 0.55f else 1f),
+        )
+        if (speechOutputEnabled && !showChat) {
             heroBottomSpacer = Space(this)
             content.addView(heroBottomSpacer, LinearLayout.LayoutParams(1, 0, 1f))
         } else {
@@ -219,15 +248,13 @@ class VoiceCallActivity : Activity() {
     }
 
     private fun setTypingLayout(typing: Boolean) {
-        val compact = !speechOutputEnabled || typing
+        val compact = !speechOutputEnabled || showChat || typing
         if (typingLayout == compact) return
         typingLayout = compact
         if (speechOutputEnabled) {
             voiceHero.visibility = if (compact) View.GONE else View.VISIBLE
             heroTopSpacer.visibility = if (compact) View.GONE else View.VISIBLE
             heroBottomSpacer.visibility = if (compact) View.GONE else View.VISIBLE
-            transcriptLabel.gravity = if (compact) Gravity.START else Gravity.CENTER
-            responseLabel.gravity = if (compact) Gravity.START else Gravity.CENTER
             (conversationScroll.layoutParams as LinearLayout.LayoutParams).also {
                 it.weight = if (compact) 1f else 0.55f
                 conversationScroll.layoutParams = it
@@ -254,17 +281,28 @@ class VoiceCallActivity : Activity() {
         val preferences = getSharedPreferences("zdroid_voice", Context.MODE_PRIVATE)
         val selected = (preferences.getStringSet("languages", setOf("zh-TW", "en-US"))
             ?: setOf("zh-TW", "en-US")).toMutableSet()
-        val labels = arrayOf("繁體中文", "English")
         val codes = arrayOf("zh-TW", "en-US")
         val speechEnabled = preferences.getBoolean("speech_output", true)
+        val chatVisible = preferences.getBoolean("show_chat", false)
+        var showChatChoice = chatVisible
+        val optionLabels = arrayOf("繁體中文", "English", "Show Chat")
+        val checked = booleanArrayOf("zh-TW" in selected, "en-US" in selected, chatVisible)
         AlertDialog.Builder(this)
             .setTitle("Voice settings")
-            .setMultiChoiceItems(labels, BooleanArray(codes.size) { codes[it] in selected }) { _, which, checked ->
-                if (checked) selected.add(codes[which]) else if (selected.size > 1) selected.remove(codes[which])
+            .setMultiChoiceItems(optionLabels, checked) { _, which, enabled ->
+                if (which < codes.size) {
+                    if (enabled) selected.add(codes[which]) else if (selected.size > 1) selected.remove(codes[which])
+                } else {
+                    showChatChoice = enabled
+                }
             }
             .setPositiveButton("Apply") { _, _ ->
-                preferences.edit().putStringSet("languages", selected).apply()
+                preferences.edit()
+                    .putStringSet("languages", selected)
+                    .putBoolean("show_chat", showChatChoice)
+                    .apply()
                 VoiceConversationService.setLanguages(this, selected)
+                recreate()
             }
             .setNeutralButton("Audio output") { _, _ ->
                 val speaker = !preferences.getBoolean("speaker", true)
@@ -292,6 +330,32 @@ class VoiceCallActivity : Activity() {
         setOnClickListener { click() }
     }
 
+    private fun bubbleView(bubble: VoiceConversationStore.Bubble): View {
+        return TextView(this).apply {
+            textSize = 16f
+            setPadding(dp(14), dp(11), dp(14), dp(11))
+            bindBubble(this, bubble)
+        }
+    }
+
+    private fun bindBubble(view: TextView, bubble: VoiceConversationStore.Bubble) {
+        val user = bubble.role == VoiceConversationStore.Role.USER
+        view.tag = bubble.id
+        view.text = bubble.text
+        view.setTextColor(if (bubble.partial) Color.LTGRAY else Color.WHITE)
+        view.setTypeface(Typeface.DEFAULT, if (bubble.partial) Typeface.ITALIC else Typeface.NORMAL)
+        view.gravity = if (user) Gravity.END else Gravity.START
+        view.background = rounded(
+            if (user) Color.rgb(40, 84, 68) else Color.rgb(39, 41, 46),
+            12,
+        )
+        view.contentDescription = when {
+            bubble.partial -> "Partial transcript"
+            user -> "You"
+            else -> "Agent"
+        }
+    }
+
     private fun label(text: String, size: Float, color: Int, gravityValue: Int) = TextView(this).apply {
         this.text = text; textSize = size; setTextColor(color); gravity = gravityValue
     }
@@ -305,5 +369,6 @@ class VoiceCallActivity : Activity() {
         private const val TAG = "ZdroidVoiceUI"
         const val EXTRA_AGENT_NAME = "agent_name"
         const val EXTRA_MODEL_NAME = "model_name"
+        const val EXTRA_THREAD_ID = "thread_id"
     }
 }

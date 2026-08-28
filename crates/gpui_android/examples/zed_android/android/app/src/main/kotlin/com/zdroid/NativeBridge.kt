@@ -15,6 +15,7 @@ import android.view.Surface
 object NativeBridge {
     external fun nativeSetVoiceConversationEnabled(enabled: Boolean)
     external fun nativeInterruptVoiceAgent()
+    external fun nativeSubmitVoicePrompt(threadId: String, text: String): Boolean
     /// Process-death recovery probe. `ExtraWindowActivity.onCreate` calls
     /// this BEFORE any other JNI work. Returns true if the gpui-side has a
     /// live AndroidWindow registered for this `windowId` (this Activity was

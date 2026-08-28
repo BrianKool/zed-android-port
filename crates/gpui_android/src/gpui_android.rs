@@ -22,6 +22,7 @@ pub mod storage;
 pub mod termux_bootstrap;
 mod touch;
 pub mod updater;
+mod voice_prompt;
 mod window;
 pub mod zd_exec_install;
 
@@ -111,5 +112,27 @@ where
     updater::register_android_app(android_app.clone());
     let platform: Rc<dyn gpui::Platform> = Rc::new(AndroidPlatform::new(android_app, false));
     let app = gpui::Application::with_platform(platform).with_assets(assets);
+    app.run(on_finish_launching);
+}
+
+/// Runs a GPUI Android application with a focus-independent voice prompt router.
+///
+/// Voice prompts arrive from the foreground service with the stable Agent thread
+/// id that started the call. The handler runs on GPUI's application thread, so it
+/// can update that thread without synthesizing text or keyboard events.
+pub fn run_with_voice_prompt_handler<A, V, F>(
+    android_app: android_activity::AndroidApp,
+    assets: A,
+    on_voice_prompt: V,
+    on_finish_launching: F,
+) where
+    A: gpui::AssetSource,
+    V: 'static + FnMut(String, String, &mut gpui::App),
+    F: 'static + FnOnce(&mut gpui::App),
+{
+    updater::register_android_app(android_app.clone());
+    let platform: Rc<dyn gpui::Platform> = Rc::new(AndroidPlatform::new(android_app, false));
+    let app = gpui::Application::with_platform(platform).with_assets(assets);
+    app.on_voice_prompt(on_voice_prompt);
     app.run(on_finish_launching);
 }

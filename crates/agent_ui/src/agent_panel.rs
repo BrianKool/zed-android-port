@@ -5922,6 +5922,21 @@ impl AgentPanel {
         }
     }
 
+    pub fn submit_voice_prompt(
+        &mut self,
+        thread_id: ThreadId,
+        text: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(conversation) = self.conversation_view_for_id(&thread_id, cx).cloned() else {
+            return false;
+        };
+        conversation.update(cx, |conversation, cx| {
+            conversation.submit_voice_prompt(text, window, cx)
+        })
+    }
+
     /// Drops a thread — retained or the active ephemeral draft — from
     /// the panel and deletes its metadata row. Used by the sidebar when
     /// the user dismisses a parked draft.

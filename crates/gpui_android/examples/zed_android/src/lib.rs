@@ -1354,11 +1354,52 @@ fn android_main(app: AndroidApp) {
     }
 
     let dns_resolver = AndroidDnsResolver::new(&app);
-    gpui_android::run(app, assets::Assets, move |cx: &mut App| {
-        if let Err(err) = boot(cx, &data_path, dns_resolver) {
-            error!("zed_android: boot failed: {err:#}");
-        }
-    });
+    gpui_android::run_with_voice_prompt_handler(
+        app,
+        assets::Assets,
+        |thread_id, text, cx| {
+            let thread_id = match agent_ui::ThreadId::from_key_string(&thread_id) {
+                Ok(thread_id) => thread_id,
+                Err(error) => {
+                    log::warn!("voice prompt ignored: invalid thread id: {error:#}");
+                    return;
+                }
+            };
+            let windows = cx
+                .window_stack()
+                .unwrap_or_else(|| cx.windows())
+                .into_iter()
+                .filter_map(|handle| handle.downcast::<MultiWorkspace>())
+                .collect::<Vec<_>>();
+            for handle in windows {
+                let submitted = handle
+                    .update(cx, |multi_workspace, window, cx| {
+                        for workspace in multi_workspace.workspaces().cloned() {
+                            let Some(panel) = workspace.read(cx).panel::<agent_ui::AgentPanel>(cx)
+                            else {
+                                continue;
+                            };
+                            if panel.update(cx, |panel, cx| {
+                                panel.submit_voice_prompt(thread_id, text.clone(), window, cx)
+                            }) {
+                                return true;
+                            }
+                        }
+                        false
+                    })
+                    .unwrap_or(false);
+                if submitted {
+                    return;
+                }
+            }
+            log::warn!("voice prompt ignored: Agent thread is not loaded");
+        },
+        move |cx: &mut App| {
+            if let Err(err) = boot(cx, &data_path, dns_resolver) {
+                error!("zed_android: boot failed: {err:#}");
+            }
+        },
+    );
 }
 
 /// Bind the default keymap plus the vim keymap when vim/helix mode is

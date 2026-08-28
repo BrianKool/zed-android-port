@@ -267,6 +267,24 @@ impl Application {
         self
     }
 
+    /// Registers a handler for a committed Android voice prompt. The prompt is
+    /// addressed to a stable Agent thread and never depends on text focus.
+    pub fn on_voice_prompt<F>(&self, mut callback: F) -> &Self
+    where
+        F: 'static + FnMut(String, String, &mut App),
+    {
+        let this = Rc::downgrade(&self.0);
+        self.0
+            .borrow()
+            .platform
+            .on_voice_prompt(Box::new(move |thread_id, text| {
+                if let Some(app) = this.upgrade() {
+                    callback(thread_id, text, &mut app.borrow_mut());
+                }
+            }));
+        self
+    }
+
     /// Invokes a handler when an already-running application is launched.
     /// On macOS, this can occur when the application icon is double-clicked or the app is launched via the dock.
     pub fn on_reopen<F>(&self, mut callback: F) -> &Self
@@ -1450,9 +1468,14 @@ impl App {
     }
 
     /// Updates the agent identity shown by Android's hands-free conversation UI.
-    pub fn set_voice_conversation_context(&self, agent_name: &str, model_name: &str) {
+    pub fn set_voice_conversation_context(
+        &self,
+        thread_id: &str,
+        agent_name: &str,
+        model_name: &str,
+    ) {
         self.platform
-            .set_voice_conversation_context(agent_name, model_name);
+            .set_voice_conversation_context(thread_id, agent_name, model_name);
     }
 
     /// Enables or disables Android's hands-free Agent conversation loop.
@@ -1466,8 +1489,8 @@ impl App {
     }
 
     /// Sends a typed Agent lifecycle event to Android's voice orchestrator.
-    pub fn send_voice_agent_event(&self, kind: &str, text: &str) {
-        self.platform.send_voice_agent_event(kind, text);
+    pub fn send_voice_agent_event(&self, thread_id: &str, kind: &str, text: &str) {
+        self.platform.send_voice_agent_event(thread_id, kind, text);
     }
 
     /// Opens the Android Accessibility settings used by Zdroid-B Phone Use.

@@ -27,11 +27,10 @@ object PhoneUseRuntime {
     @Volatile private var desiredRunning = false
 
     fun initializeIfEnabled(context: Context) {
-        if (isAccessibilityEnabled(context)) {
-            initialize(context)
-        } else {
-            writeStatus(context.applicationContext, "Accessibility permission required")
-        }
+        // Office plugins share this authenticated process-local MCP transport and
+        // remain useful without Accessibility permission. Phone tools still fail
+        // closed until Android reports the service as enabled.
+        initialize(context)
     }
 
     fun initialize(context: Context) {
@@ -42,7 +41,7 @@ object PhoneUseRuntime {
             return
         }
         starting = true
-        writeStatus(appContext, "Starting Android-native Phone Use...")
+        writeStatus(appContext, "Starting plugin service...")
         executor.execute {
             try {
                 val token = loadOrCreateToken(appContext)
@@ -55,6 +54,10 @@ object PhoneUseRuntime {
                             BrowserUseRouterTool(appContext),
                             ObserveSemanticUiTool(),
                             PerformSemanticActionTool(),
+                            OfficeDocumentTool(appContext, OfficePlugin.EXCEL),
+                            OfficeDocumentTool(appContext, OfficePlugin.WORD),
+                            OfficeDocumentTool(appContext, OfficePlugin.POWERPOINT),
+                            OfficeDocumentTool(appContext, OfficePlugin.PDF),
                         ),
                     )
                     .addTools(DeviceTools.all(appContext))
@@ -104,9 +107,9 @@ object PhoneUseRuntime {
 
     fun updateStatus(context: Context) {
         val status = when {
-            server?.isServerRunning() != true -> "Starting Android-native Phone Use..."
-            isAccessibilityEnabled(context) -> "Ready - Android Accessibility is connected"
-            else -> "Accessibility permission required"
+            server?.isServerRunning() != true -> "Starting plugin service..."
+            isAccessibilityEnabled(context) -> "Ready - Office plugins and Android Accessibility are connected"
+            else -> "Office plugins ready - Accessibility permission required for Mobile Use"
         }
         writeStatus(context, status)
     }

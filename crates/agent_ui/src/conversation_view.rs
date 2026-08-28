@@ -1912,6 +1912,21 @@ impl ConversationView {
         self.thread_id
     }
 
+    pub fn submit_voice_prompt(
+        &mut self,
+        text: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(thread) = self.root_thread_view() else {
+            return false;
+        };
+        thread.update(cx, |thread, cx| {
+            thread.submit_voice_prompt(text, window, cx);
+        });
+        true
+    }
+
     pub fn is_loading(&self) -> bool {
         matches!(self.server_state, ServerState::Loading { .. })
     }
@@ -1942,7 +1957,7 @@ impl ConversationView {
                     });
                 }
                 if !is_subagent && cx.voice_conversation_enabled() {
-                    cx.send_voice_agent_event("thinking", "");
+                    cx.send_voice_agent_event(&self.thread_id.to_key_string(), "thinking", "");
                 }
             }
             AcpThreadEvent::NewEntry => {
@@ -1988,7 +2003,11 @@ impl ConversationView {
                     // Android de-duplicates the growing response and queues only
                     // newly completed phrases, so speech can begin while the
                     // Agent is still streaming the rest of its answer.
-                    cx.send_voice_agent_event("message", &response);
+                    cx.send_voice_agent_event(
+                        &self.thread_id.to_key_string(),
+                        "message",
+                        &response,
+                    );
                 }
             }
             AcpThreadEvent::EntriesRemoved(range) => {
@@ -2015,6 +2034,7 @@ impl ConversationView {
                 self.notify_with_sound("Waiting for tool confirmation", IconName::Info, window, cx);
                 if !is_subagent && cx.voice_conversation_enabled() {
                     cx.send_voice_agent_event(
+                        &self.thread_id.to_key_string(),
                         "waiting_for_user",
                         "The agent is waiting for tool confirmation.",
                     );
@@ -2024,7 +2044,7 @@ impl ConversationView {
                 if !is_subagent {
                     cx.start_background_task(&session_id.to_string(), "Agent is working");
                     if cx.voice_conversation_enabled() {
-                        cx.send_voice_agent_event("thinking", "");
+                        cx.send_voice_agent_event(&self.thread_id.to_key_string(), "thinking", "");
                     }
                 }
             }
@@ -2036,6 +2056,7 @@ impl ConversationView {
                     );
                     if cx.voice_conversation_enabled() {
                         cx.send_voice_agent_event(
+                            &self.thread_id.to_key_string(),
                             "waiting_for_user",
                             "The agent is waiting for your answer.",
                         );
@@ -2047,7 +2068,7 @@ impl ConversationView {
                 if !is_subagent {
                     cx.start_background_task(&session_id.to_string(), "Agent is working");
                     if cx.voice_conversation_enabled() {
-                        cx.send_voice_agent_event("thinking", "");
+                        cx.send_voice_agent_event(&self.thread_id.to_key_string(), "thinking", "");
                     }
                 }
             }
@@ -2127,6 +2148,7 @@ impl ConversationView {
                     );
                     if cx.voice_conversation_enabled() {
                         cx.send_voice_agent_event(
+                            &self.thread_id.to_key_string(),
                             if successful { "finished" } else { "failed" },
                             "",
                         );
@@ -2152,7 +2174,11 @@ impl ConversationView {
                         format!("{} refused to respond to this request", model_or_agent_name);
                     self.notify_with_sound(&notification_message, IconName::Warning, window, cx);
                     if cx.voice_conversation_enabled() {
-                        cx.send_voice_agent_event("failed", "The agent refused this request.");
+                        cx.send_voice_agent_event(
+                            &self.thread_id.to_key_string(),
+                            "failed",
+                            "The agent refused this request.",
+                        );
                     }
                 }
             }
@@ -2184,6 +2210,7 @@ impl ConversationView {
                     );
                     if cx.voice_conversation_enabled() {
                         cx.send_voice_agent_event(
+                            &self.thread_id.to_key_string(),
                             "failed",
                             "The agent stopped because of an error.",
                         );

@@ -75,6 +75,7 @@ class MainActivity : GameActivity(), ImeHost {
     private var initialNotificationStage = 0
     @Volatile
     private var voiceConversationEnabled = false
+    private var voiceThreadId = ""
     private var voiceAgentName = "Agent"
     private var voiceModelName = "Current model"
     private data class PendingVoiceResponse(val kind: String, val text: String, val epoch: Long)
@@ -112,8 +113,9 @@ class MainActivity : GameActivity(), ImeHost {
     }
 
     @Suppress("unused")
-    fun setVoiceConversationContext(agentName: String, modelName: String) {
+    fun setVoiceConversationContext(threadId: String, agentName: String, modelName: String) {
         runOnUiThread {
+            voiceThreadId = threadId
             voiceAgentName = friendlyVoiceAgentName(agentName, modelName)
             voiceModelName = modelName.ifBlank { "Current model" }
         }
@@ -145,7 +147,7 @@ class MainActivity : GameActivity(), ImeHost {
                 return@runOnUiThread
             }
             launchVoiceCallActivity()
-            VoiceConversationService.start(this)
+            VoiceConversationService.start(this, voiceThreadId)
         }
     }
 
@@ -153,6 +155,7 @@ class MainActivity : GameActivity(), ImeHost {
         hideIme()
         startActivity(
             Intent(this, VoiceCallActivity::class.java)
+                .putExtra(VoiceCallActivity.EXTRA_THREAD_ID, voiceThreadId)
                 .putExtra(VoiceCallActivity.EXTRA_AGENT_NAME, voiceAgentName)
                 .putExtra(VoiceCallActivity.EXTRA_MODEL_NAME, voiceModelName)
                 .addFlags(Intent.FLAG_ACTIVITY_REORDER_TO_FRONT),
@@ -160,8 +163,9 @@ class MainActivity : GameActivity(), ImeHost {
     }
 
     @Suppress("unused")
-    fun onVoiceAgentEvent(kind: String, text: String) {
+    fun onVoiceAgentEvent(threadId: String, kind: String, text: String) {
         if (!VoiceConversationService.isSessionActive()) return
+        if (threadId != voiceThreadId) return
         synchronized(voiceEventLock) {
             if (kind == "message" && pendingVoiceEvents.lastOrNull()?.kind == "message") {
                 pendingVoiceEvents.removeLast()
@@ -1858,7 +1862,7 @@ class MainActivity : GameActivity(), ImeHost {
         if (requestCode == REQ_VOICE_PERMISSION) {
             if (grantResults.firstOrNull() == PackageManager.PERMISSION_GRANTED) {
                 launchVoiceCallActivity()
-                VoiceConversationService.start(this)
+                VoiceConversationService.start(this, voiceThreadId)
             } else {
                 voiceConversationEnabled = false
                 NativeBridge.nativeSetVoiceConversationEnabled(false)

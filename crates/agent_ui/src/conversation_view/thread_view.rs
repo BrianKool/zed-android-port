@@ -1866,6 +1866,41 @@ impl ThreadView {
         self.stop_current_and_send_new_message(message_editor, window, cx);
     }
 
+    pub fn submit_voice_prompt(
+        &mut self,
+        text: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let text = text.trim().to_string();
+        if text.is_empty() || self.is_loading_contents {
+            return;
+        }
+        cx.emit(AcpThreadViewEvent::Interacted);
+        let contents = move || {
+            Task::ready(Ok(Some((
+                vec![acp::ContentBlock::Text(acp::TextContent::new(text.clone()))],
+                Vec::new(),
+            ))))
+        };
+        if self.thread.read(cx).status() == ThreadStatus::Idle {
+            self.send_content(contents(), false, window, cx);
+            return;
+        }
+
+        self.message_queue.pause();
+        let cancelled = self.thread.update(cx, |thread, cx| thread.cancel(cx));
+        cx.spawn_in(window, async move |this, cx| {
+            cancelled.await;
+            this.update_in(cx, |this, window, cx| {
+                this.message_queue.resume();
+                this.send_content(contents(), false, window, cx);
+            })
+            .ok();
+        })
+        .detach();
+    }
+
     fn stop_current_and_send_new_message(
         &mut self,
         message_editor: Entity<MessageEditor>,
@@ -4641,10 +4676,17 @@ impl ThreadView {
                                             .children(self.mode_selector.clone())
                                             .children(self.model_selector.clone()),
                                     })
-                                    .when(cfg!(target_os = "android"), |this| {
-                                        this.child(self.render_voice_conversation_button(cx))
-                                    })
-                                    .child(self.render_send_button(cx)),
+                                    .child(
+                                        h_flex()
+                                            .flex_none()
+                                            .gap_1()
+                                            .when(cfg!(target_os = "android"), |this| {
+                                                this.child(
+                                                    self.render_voice_conversation_button(cx),
+                                                )
+                                            })
+                                            .child(self.render_send_button(cx)),
+                                    ),
                             ),
                     ),
             )
@@ -5689,6 +5731,7 @@ impl ThreadView {
     fn render_voice_conversation_button(&self, cx: &mut Context<Self>) -> AnyElement {
         let enabled = cx.voice_conversation_enabled();
         let editor = self.message_editor.clone();
+        let thread_id = self.root_thread_id.to_key_string();
         let agent_name = self.agent_id.0.to_string();
         let model_name = self.current_model_name(cx).to_string();
         IconButton::new(
@@ -5713,7 +5756,7 @@ impl ThreadView {
                 cx.set_voice_conversation_enabled(true);
             } else {
                 editor.read(cx).focus_handle(cx).focus(window, cx);
-                cx.set_voice_conversation_context(&agent_name, &model_name);
+                cx.set_voice_conversation_context(&thread_id, &agent_name, &model_name);
                 cx.set_voice_conversation_enabled(true);
             }
         })

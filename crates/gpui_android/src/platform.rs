@@ -194,6 +194,7 @@ pub(crate) struct PlatformHandlers {
     pub(crate) will_open_app_menu: Option<Box<dyn FnMut()>>,
     pub(crate) validate_app_menu_command: Option<Box<dyn FnMut(&dyn Action) -> bool>>,
     pub(crate) keyboard_layout_change: Option<Box<dyn FnMut()>>,
+    pub(crate) voice_prompt: Option<Box<dyn FnMut(String, String)>>,
 }
 
 pub(crate) struct AndroidCommon {
@@ -233,6 +234,8 @@ pub(crate) struct AndroidCommon {
     /// right window's `PlatformInputHandler`.
     pub(crate) ime_event_rx:
         Option<futures::channel::mpsc::UnboundedReceiver<(u64, crate::ime::ImeEvent)>>,
+    pub(crate) voice_prompt_rx:
+        Option<futures::channel::mpsc::UnboundedReceiver<crate::voice_prompt::VoicePrompt>>,
     /// Tracks whether the soft keyboard was visible last tick.
     /// When this disagrees with the atomic Kotlin pushes via
     /// `nativeSetSoftKeyboardVisible`, we force a `window.refresh()`
@@ -301,6 +304,7 @@ impl AndroidCommon {
             extra_event_rx: Some(crate::multi_window::init_event_channel()),
             captured_pointer_rx: Some(crate::captured_pointer::init_event_channel()),
             ime_event_rx: Some(crate::ime::init_event_channel()),
+            voice_prompt_rx: Some(crate::voice_prompt::init_event_channel()),
             last_soft_keyboard_visible: false,
             last_trackpad_mode_enabled: false,
             last_extras_row_enabled: None,
@@ -447,6 +451,7 @@ fn jni_set_voice_conversation(android_app: &AndroidApp, enabled: bool) -> Result
 
 fn jni_set_voice_conversation_context(
     android_app: &AndroidApp,
+    thread_id: &str,
     agent_name: &str,
     model_name: &str,
 ) -> Result<()> {
@@ -458,6 +463,7 @@ fn jni_set_voice_conversation_context(
         .attach_current_thread()
         .context("attach_current_thread for voice conversation context")?;
     let activity = unsafe { JObject::from_raw(android_app.activity_as_ptr() as _) };
+    let thread_id = env.new_string(thread_id).context("alloc voice thread id")?;
     let agent_name = env
         .new_string(agent_name)
         .context("alloc voice agent name")?;
@@ -467,14 +473,23 @@ fn jni_set_voice_conversation_context(
     env.call_method(
         &activity,
         "setVoiceConversationContext",
-        "(Ljava/lang/String;Ljava/lang/String;)V",
-        &[(&agent_name).into(), (&model_name).into()],
+        "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)V",
+        &[
+            (&thread_id).into(),
+            (&agent_name).into(),
+            (&model_name).into(),
+        ],
     )
     .context("MainActivity.setVoiceConversationContext")?;
     Ok(())
 }
 
-fn jni_send_voice_agent_event(android_app: &AndroidApp, kind: &str, text: &str) -> Result<()> {
+fn jni_send_voice_agent_event(
+    android_app: &AndroidApp,
+    thread_id: &str,
+    kind: &str,
+    text: &str,
+) -> Result<()> {
     use anyhow::Context;
     use jni::{JavaVM, objects::JObject};
 
@@ -483,6 +498,9 @@ fn jni_send_voice_agent_event(android_app: &AndroidApp, kind: &str, text: &str) 
         .attach_current_thread()
         .context("attach_current_thread for voice Agent event")?;
     let activity = unsafe { JObject::from_raw(android_app.activity_as_ptr() as _) };
+    let thread_id = env
+        .new_string(thread_id)
+        .context("alloc voice Agent event thread id")?;
     let kind = env
         .new_string(kind)
         .context("alloc voice Agent event kind")?;
@@ -490,8 +508,8 @@ fn jni_send_voice_agent_event(android_app: &AndroidApp, kind: &str, text: &str) 
     env.call_method(
         &activity,
         "onVoiceAgentEvent",
-        "(Ljava/lang/String;Ljava/lang/String;)V",
-        &[(&kind).into(), (&text).into()],
+        "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)V",
+        &[(&thread_id).into(), (&kind).into(), (&text).into()],
     )
     .context("MainActivity.onVoiceAgentEvent")?;
     Ok(())
@@ -879,6 +897,18 @@ impl AndroidPlatform {
             &mut rx,
         );
         self.common.borrow_mut().ime_event_rx = Some(rx);
+    }
+
+    fn drain_voice_prompts(&self) {
+        let mut rx = match self.common.borrow_mut().voice_prompt_rx.take() {
+            Some(rx) => rx,
+            None => return,
+        };
+        {
+            let mut common = self.common.borrow_mut();
+            crate::voice_prompt::drain(&mut rx, &mut common.callbacks.voice_prompt);
+        }
+        self.common.borrow_mut().voice_prompt_rx = Some(rx);
     }
 
     /// Sample every window's text-input focus at frame boundary
@@ -1426,6 +1456,7 @@ impl Platform for AndroidPlatform {
             // thread). Dispatches into the primary window's
             // `PlatformInputHandler` / `handle_input`.
             self.drain_ime_events();
+            self.drain_voice_prompts();
 
             // Reconcile IME visibility against the primary window's
             // `input_handler` presence. Edge-triggered at frame
@@ -1638,9 +1669,9 @@ impl Platform for AndroidPlatform {
         }
     }
 
-    fn set_voice_conversation_context(&self, agent_name: &str, model_name: &str) {
+    fn set_voice_conversation_context(&self, thread_id: &str, agent_name: &str, model_name: &str) {
         if let Err(err) =
-            jni_set_voice_conversation_context(&self.android_app, agent_name, model_name)
+            jni_set_voice_conversation_context(&self.android_app, thread_id, agent_name, model_name)
         {
             log::warn!("Android voice conversation context failed: {err:#}");
         }
@@ -1650,10 +1681,14 @@ impl Platform for AndroidPlatform {
         VOICE_CONVERSATION_ENABLED.load(Ordering::Acquire)
     }
 
-    fn send_voice_agent_event(&self, kind: &str, text: &str) {
-        if let Err(err) = jni_send_voice_agent_event(&self.android_app, kind, text) {
+    fn send_voice_agent_event(&self, thread_id: &str, kind: &str, text: &str) {
+        if let Err(err) = jni_send_voice_agent_event(&self.android_app, thread_id, kind, text) {
             log::warn!("Android voice Agent event failed: {err:#}");
         }
+    }
+
+    fn on_voice_prompt(&self, callback: Box<dyn FnMut(String, String)>) {
+        self.common.borrow_mut().callbacks.voice_prompt = Some(callback);
     }
 
     fn open_phone_use_settings(&self) {

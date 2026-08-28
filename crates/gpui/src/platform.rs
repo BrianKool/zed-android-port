@@ -188,12 +188,19 @@ pub trait Platform: 'static {
     fn open_url(&self, url: &str);
     fn start_background_task(&self, _task_id: &str, _description: &str) {}
     fn finish_background_task(&self, _task_id: &str, _description: &str, _successful: bool) {}
-    fn set_voice_conversation_context(&self, _agent_name: &str, _model_name: &str) {}
+    fn set_voice_conversation_context(
+        &self,
+        _thread_id: &str,
+        _agent_name: &str,
+        _model_name: &str,
+    ) {
+    }
     fn set_voice_conversation_enabled(&self, _enabled: bool) {}
     fn voice_conversation_enabled(&self) -> bool {
         false
     }
-    fn send_voice_agent_event(&self, _kind: &str, _text: &str) {}
+    fn send_voice_agent_event(&self, _thread_id: &str, _kind: &str, _text: &str) {}
+    fn on_voice_prompt(&self, _callback: Box<dyn FnMut(String, String)>) {}
     fn open_phone_use_settings(&self) {}
     fn on_open_urls(&self, callback: Box<dyn FnMut(Vec<String>)>);
     fn register_url_scheme(&self, url: &str) -> Task<Result<()>>;
