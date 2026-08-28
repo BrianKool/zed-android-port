@@ -4662,32 +4662,65 @@ impl ThreadView {
                                     .children(self.render_fast_mode_control(cx))
                                     .children(self.render_thinking_control(cx)),
                             )
-                            .child(
-                                h_flex()
-                                    .min_w_0()
-                                    .max_w_full()
-                                    .flex_wrap()
-                                    .gap_1()
-                                    .children(self.render_token_usage(cx))
-                                    .children(self.profile_selector.clone())
-                                    .map(|this| match self.config_options_view.clone() {
-                                        Some(config_view) => this.child(config_view),
-                                        None => this
-                                            .children(self.mode_selector.clone())
-                                            .children(self.model_selector.clone()),
-                                    })
-                                    .child(
-                                        h_flex()
-                                            .flex_none()
-                                            .gap_1()
-                                            .when(cfg!(target_os = "android"), |this| {
-                                                this.child(
-                                                    self.render_voice_conversation_button(cx),
-                                                )
-                                            })
-                                            .child(self.render_send_button(cx)),
-                                    ),
-                            ),
+                            .when(cfg!(target_os = "android"), |this| {
+                                this.child(
+                                    v_flex()
+                                        .w_full()
+                                        .min_w_0()
+                                        .gap_1()
+                                        .child(
+                                            h_flex()
+                                                .w_full()
+                                                .min_w_0()
+                                                .flex_wrap()
+                                                .gap_1()
+                                                .children(self.render_token_usage(cx))
+                                                .children(self.profile_selector.clone())
+                                                .map(|this| {
+                                                    match self.config_options_view.clone() {
+                                                        Some(config_view) => {
+                                                            this.child(config_view)
+                                                        }
+                                                        None => this
+                                                            .children(self.mode_selector.clone())
+                                                            .children(self.model_selector.clone()),
+                                                    }
+                                                }),
+                                        )
+                                        .child(
+                                            h_flex()
+                                                .w_full()
+                                                .flex_none()
+                                                .justify_end()
+                                                .gap_1()
+                                                .child(self.render_voice_conversation_button(cx))
+                                                .child(self.render_send_button(cx)),
+                                        ),
+                                )
+                            })
+                            .when(!cfg!(target_os = "android"), |this| {
+                                this.child(
+                                    h_flex()
+                                        .min_w_0()
+                                        .max_w_full()
+                                        .flex_wrap()
+                                        .gap_1()
+                                        .children(self.render_token_usage(cx))
+                                        .children(self.profile_selector.clone())
+                                        .map(|this| match self.config_options_view.clone() {
+                                            Some(config_view) => this.child(config_view),
+                                            None => this
+                                                .children(self.mode_selector.clone())
+                                                .children(self.model_selector.clone()),
+                                        })
+                                        .child(
+                                            h_flex()
+                                                .flex_none()
+                                                .gap_1()
+                                                .child(self.render_send_button(cx)),
+                                        ),
+                                )
+                            }),
                     ),
             )
             .into_any()

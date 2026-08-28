@@ -34,6 +34,7 @@ import androidx.core.app.ServiceCompat
 import androidx.core.content.ContextCompat
 import java.lang.ref.WeakReference
 import java.util.Locale
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicLong
@@ -45,6 +46,7 @@ class VoiceConversationService : Service(), RecognitionListener, TextToSpeech.On
         LISTENING("Listening", 0L),
         PROCESSING("Processing speech", 15_000L),
         SENDING("Sending", 10_000L),
+        EXECUTING("Executing Phone Use", 30_000L),
         THINKING("Thinking", 300_000L),
         TOOL("Using a tool", 300_000L),
         SPEAKING("Speaking", 180_000L),
@@ -54,6 +56,7 @@ class VoiceConversationService : Service(), RecognitionListener, TextToSpeech.On
 
     private var recognizer: SpeechRecognizer? = null
     private var wakeRecognizerIsOnDevice = false
+    private var wakeRecognizerFallbackAttempted = false
     private var realtimeCapture: RealtimeVoiceCapture? = null
     private var recognizerAudioSource: ParcelFileDescriptor? = null
     private var usesRealtimeCapture = false
@@ -93,6 +96,8 @@ class VoiceConversationService : Service(), RecognitionListener, TextToSpeech.On
     private val speechScheduler = VoiceSpeechScheduler()
     private val endpointing = DynamicEndpointing()
     private val latency = VoiceLatencyTelemetry(TAG)
+    private val ttsRequestTimes = ConcurrentHashMap<String, Long>()
+    private val ttsPcmTimes = ConcurrentHashMap<String, Long>()
     private val vadBenchmark = MobileVadBenchmark(RealtimeVoiceCapture.SAMPLE_RATE) { elapsed, rms, threshold ->
         Log.i(
             TAG,
@@ -302,6 +307,8 @@ class VoiceConversationService : Service(), RecognitionListener, TextToSpeech.On
         inputWorker.shutdownNow()
         outputWorker.shutdownNow()
         tts?.shutdown()
+        ttsRequestTimes.clear()
+        ttsPcmTimes.clear()
         releaseCallResources()
         sessionActive.set(false)
         (getSystemService(AUDIO_SERVICE) as AudioManager).mode = AudioManager.MODE_NORMAL
@@ -323,19 +330,38 @@ class VoiceConversationService : Service(), RecognitionListener, TextToSpeech.On
                         "after-agent-text" to "agent_first_text->audio_start",
                         "total" to "agent_request->audio_start",
                     )
+                    utteranceId?.let { id ->
+                        val now = SystemClock.elapsedRealtime()
+                        val requestAt = ttsRequestTimes[id]
+                        val pcmAt = ttsPcmTimes[id]
+                        Log.i(
+                            TAG,
+                            "tts utterance=$id request_to_audio_ms=" +
+                                (requestAt?.let { now - it } ?: -1L) +
+                                " pcm_to_audio_ms=" + (pcmAt?.let { now - it } ?: -1L),
+                        )
+                    }
                 }
                 override fun onAudioAvailable(utteranceId: String?, audio: ByteArray?) {
-                    latency.mark("tts_first_pcm")
-                    latency.log(
-                        "tts-pipeline",
-                        "text-to-pcm" to "tts_request->tts_first_pcm",
-                        "pcm-to-audio" to "tts_first_pcm->audio_start",
-                    )
+                    utteranceId?.let { id ->
+                        val now = SystemClock.elapsedRealtime()
+                        if (ttsPcmTimes.putIfAbsent(id, now) == null) {
+                            Log.i(
+                                TAG,
+                                "tts utterance=$id request_to_pcm_ms=" +
+                                    (ttsRequestTimes[id]?.let { now - it } ?: -1L),
+                            )
+                        }
+                    }
                 }
                 override fun onRangeStart(utteranceId: String?, start: Int, end: Int, frame: Int) {
                     utteranceId?.let { speechScheduler.markRange(it, end) }
                 }
                 override fun onError(utteranceId: String?) {
+                    utteranceId?.let {
+                        ttsRequestTimes.remove(it)
+                        ttsPcmTimes.remove(it)
+                    }
                     if (!isSoftInterruptionActive()) {
                         val failed = utteranceId?.let(speechScheduler::fail)
                         if (failed != null) {
@@ -345,6 +371,10 @@ class VoiceConversationService : Service(), RecognitionListener, TextToSpeech.On
                     }
                 }
                 override fun onDone(utteranceId: String?) {
+                    utteranceId?.let {
+                        ttsRequestTimes.remove(it)
+                        ttsPcmTimes.remove(it)
+                    }
                     val completed = utteranceId?.let(speechScheduler::complete)
                     if (completed != null) {
                         orchestrator.playbackFinished()
@@ -372,14 +402,14 @@ class VoiceConversationService : Service(), RecognitionListener, TextToSpeech.On
             val primaryLanguage = if ("zh-TW" in selected) "zh-TW" else selected.firstOrNull() ?: "en-US"
             putExtra(RecognizerIntent.EXTRA_LANGUAGE, primaryLanguage)
             putExtra(RecognizerIntent.EXTRA_LANGUAGE_PREFERENCE, primaryLanguage)
-            if (Build.VERSION.SDK_INT >= 34 && selected.size > 1) {
+            if (!wakeOnly && Build.VERSION.SDK_INT >= 34 && selected.size > 1) {
                 putExtra(RecognizerIntent.EXTRA_ENABLE_LANGUAGE_DETECTION, true)
                 putExtra(RecognizerIntent.EXTRA_ENABLE_LANGUAGE_SWITCH, RecognizerIntent.LANGUAGE_SWITCH_BALANCED)
                 putStringArrayListExtra(RecognizerIntent.EXTRA_LANGUAGE_DETECTION_ALLOWED_LANGUAGES, ArrayList(selected))
                 putStringArrayListExtra(RecognizerIntent.EXTRA_LANGUAGE_SWITCH_ALLOWED_LANGUAGES, ArrayList(selected))
             }
             putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
-            putExtra(RecognizerIntent.EXTRA_PREFER_OFFLINE, wakeOnly)
+            putExtra(RecognizerIntent.EXTRA_PREFER_OFFLINE, wakeOnly && wakeRecognizerIsOnDevice)
             if (canTryRealtime) {
                 runCatching {
                     val source = realtimeCapture?.start()
@@ -475,6 +505,7 @@ class VoiceConversationService : Service(), RecognitionListener, TextToSpeech.On
         if (voiceMode != VoiceMode.ACTIVE) return
         Log.i(TAG, "entering wake-only voice mode")
         voiceMode = VoiceMode.WAKE_ONLY
+        wakeRecognizerFallbackAttempted = false
         waitingForAgent = false
         invalidateOutput()
         orchestrator.cancelCurrentTurn()
@@ -494,6 +525,7 @@ class VoiceConversationService : Service(), RecognitionListener, TextToSpeech.On
         stopListening()
         createRecognizer(preferOnDevice = false)
         voiceMode = VoiceMode.ACTIVE
+        wakeRecognizerFallbackAttempted = false
         ZdroidSessionLocks.acquire(this, LOCK_OWNER)
         acquireAudioFocusOnly()
         callActivity.get()?.updatePauseState(false)
@@ -568,7 +600,19 @@ class VoiceConversationService : Service(), RecognitionListener, TextToSpeech.On
             }
             when (event) {
                 is VoiceOrchestrator.AgentEvent.Thinking -> publishStage(Stage.THINKING)
-                is VoiceOrchestrator.AgentEvent.ToolStarted -> publishStage(Stage.TOOL, event.label)
+                is VoiceOrchestrator.AgentEvent.ToolStarted -> {
+                    latency.replace("tool_start")
+                    publishStage(Stage.TOOL, event.label)
+                }
+                is VoiceOrchestrator.AgentEvent.ToolFinished -> {
+                    latency.replace("tool_done")
+                    latency.log(
+                        "agent-tool",
+                        "request-to-tool" to "agent_request->tool_start",
+                        "tool-duration" to "tool_start->tool_done",
+                    )
+                    publishStage(Stage.THINKING)
+                }
                 is VoiceOrchestrator.AgentEvent.WaitingForUser -> publishStage(Stage.WAITING)
                 is VoiceOrchestrator.AgentEvent.Failed -> publishStage(Stage.ERROR, event.text)
                 is VoiceOrchestrator.AgentEvent.Finished -> if (speechScheduler.hasPending()) {
@@ -671,7 +715,7 @@ class VoiceConversationService : Service(), RecognitionListener, TextToSpeech.On
             Locale.US
         }
         tts?.language = locale
-        latency.mark("tts_request")
+        ttsRequestTimes[speech.id] = SystemClock.elapsedRealtime()
         tts?.speak(speech.text, TextToSpeech.QUEUE_FLUSH, null, speech.id)
     }
 
@@ -904,14 +948,39 @@ class VoiceConversationService : Service(), RecognitionListener, TextToSpeech.On
 
     private fun submitNormalizedTranscript(normalizedText: String) {
         if (normalizedText.isBlank()) return
-        val reflex = PhoneControlSession.resolveAndExecute(this, normalizedText)
+        latency.mark("route_start")
+        publishStage(Stage.PROCESSING, "Voice command received")
+        val reflex = PhoneControlSession.resolveAndExecute(this, normalizedText) { progress ->
+            latency.mark("phone_action_start")
+            publishStage(Stage.EXECUTING, progress.appLabel ?: progress.packageName.orEmpty())
+        }
         if (reflex.handled) {
             lastSubmittedTranscript = normalizedText
             speechStartedAt = 0L
             latestPartialTranscript = ""
             commitUserTranscript(normalizedText)
             publishResponse(reflex.message)
-            publishState("Phone action completed")
+            latency.mark("phone_action_done")
+            latency.log(
+                "phone-reflex",
+                "route" to "route_start->phone_action_start",
+                "action" to "phone_action_start->phone_action_done",
+                "speech-to-action" to "speech_end->phone_action_done",
+            )
+            when (reflex.outcome) {
+                PhoneControlSession.Outcome.EXECUTED -> publishState(
+                    "Completed in ${reflex.appLabel ?: reflex.packageName ?: "the current app"}",
+                )
+                PhoneControlSession.Outcome.PAUSED -> publishStage(Stage.WAITING, reflex.message)
+                PhoneControlSession.Outcome.UNAVAILABLE,
+                PhoneControlSession.Outcome.FAILED -> publishStage(Stage.ERROR, reflex.message)
+                PhoneControlSession.Outcome.NOT_MATCHED -> Unit
+            }
+            Log.i(
+                TAG,
+                "phone reflex outcome=${reflex.outcome} package=${reflex.packageName} " +
+                    "duration_ms=${reflex.durationMs}",
+            )
             if (!usesRealtimeCapture) scheduleListening(200)
             return
         }
@@ -943,7 +1012,7 @@ class VoiceConversationService : Service(), RecognitionListener, TextToSpeech.On
             if (!usesRealtimeCapture) scheduleListening(250)
             return
         }
-        publishStage(Stage.THINKING)
+        publishStage(Stage.THINKING, "Agent is working")
     }
 
     private fun interruptOutputForNewPrompt() {
@@ -957,6 +1026,8 @@ class VoiceConversationService : Service(), RecognitionListener, TextToSpeech.On
 
     private fun interruptSpeechOutput() {
         tts?.stop()
+        ttsRequestTimes.clear()
+        ttsPcmTimes.clear()
         streamingHandler.removeCallbacks(flushStreamingSpeech)
         streamingFlushScheduled = false
         streamingBuffer.clear()
@@ -970,6 +1041,8 @@ class VoiceConversationService : Service(), RecognitionListener, TextToSpeech.On
         voiceMode = VoiceMode.ENDED
         stopListening()
         tts?.stop()
+        ttsRequestTimes.clear()
+        ttsPcmTimes.clear()
         streamingHandler.removeCallbacksAndMessages(null)
         streamingBuffer.clear()
         lastStreamingResponse = ""
@@ -995,9 +1068,17 @@ class VoiceConversationService : Service(), RecognitionListener, TextToSpeech.On
 
     private fun buildNotification(): android.app.Notification {
         val endCallIntent = serviceIntent(ACTION_STOP, 3)
-        val resumeTitle = SpannableString("▶ Resume").apply {
+        val pauseResumeTitle = SpannableString(
+            if (voiceMode == VoiceMode.WAKE_ONLY) "▶ Resume" else "Ⅱ Pause",
+        ).apply {
             setSpan(
-                ForegroundColorSpan(android.graphics.Color.rgb(50, 205, 112)),
+                ForegroundColorSpan(
+                    if (voiceMode == VoiceMode.WAKE_ONLY) {
+                        android.graphics.Color.rgb(50, 205, 112)
+                    } else {
+                        android.graphics.Color.rgb(210, 146, 0)
+                    },
+                ),
                 0,
                 length,
                 Spanned.SPAN_EXCLUSIVE_EXCLUSIVE,
@@ -1006,7 +1087,7 @@ class VoiceConversationService : Service(), RecognitionListener, TextToSpeech.On
         }
         val pauseResumeAction = NotificationCompat.Action.Builder(
             if (voiceMode == VoiceMode.WAKE_ONLY) R.drawable.ic_voice_play else R.drawable.ic_voice_pause,
-            if (voiceMode == VoiceMode.WAKE_ONLY) resumeTitle else "Pause",
+            pauseResumeTitle,
             serviceIntent(if (voiceMode == VoiceMode.WAKE_ONLY) ACTION_RESUME else ACTION_PAUSE, 4),
         ).build()
         val agent = Person.Builder()
@@ -1016,14 +1097,7 @@ class VoiceConversationService : Service(), RecognitionListener, TextToSpeech.On
         return NotificationCompat.Builder(this, CHANNEL_ID)
             .setSmallIcon(android.R.drawable.sym_action_call)
             .setContentTitle("Zdroid-B live audio chat")
-            .setContentText(
-                when {
-                    voiceMode == VoiceMode.WAKE_ONLY -> "Paused. Say 開始通話 to resume"
-                    muted -> "Microphone muted. Live audio chat is in progress"
-                    lastPublishedState.isNotBlank() -> lastPublishedState
-                    else -> "Listening"
-                },
-            )
+            .setContentText(currentNotificationStatus())
             .setOngoing(true)
             .setOnlyAlertOnce(true)
             .setSilent(true)
@@ -1037,12 +1111,16 @@ class VoiceConversationService : Service(), RecognitionListener, TextToSpeech.On
             )
             .setContentIntent(activityIntent())
             .setStyle(NotificationCompat.CallStyle.forOngoingCall(agent, endCallIntent))
-            // CallStyle permits at most two custom actions. Keep the controls
-            // that change conversation state visible; audio routing remains in
-            // the call UI settings.
             .addAction(pauseResumeAction)
             .addAction(0, if (muted) "Unmute" else "Mute", serviceIntent(ACTION_TOGGLE_MUTE, 1))
             .build()
+    }
+
+    private fun currentNotificationStatus(): String = when {
+        voiceMode == VoiceMode.WAKE_ONLY -> "Paused. Say 開始通話 to resume"
+        muted -> "Microphone muted. Live audio chat is in progress"
+        lastPublishedState.isNotBlank() -> lastPublishedState
+        else -> "Listening"
     }
 
     private fun activityIntent(): PendingIntent = PendingIntent.getActivity(
@@ -1169,7 +1247,6 @@ class VoiceConversationService : Service(), RecognitionListener, TextToSpeech.On
         Log.i(TAG, "recognizer final results")
         streamingHandler.removeCallbacks(finalizePartialTurn)
         if (!usesRealtimeCapture) isListening = false
-        latency.replace("speech_end")
         val transcript = results
             ?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
             ?.firstOrNull()
@@ -1182,7 +1259,6 @@ class VoiceConversationService : Service(), RecognitionListener, TextToSpeech.On
     override fun onSegmentResults(segmentResults: Bundle) {
         Log.i(TAG, "recognizer segment results")
         streamingHandler.removeCallbacks(finalizePartialTurn)
-        latency.replace("speech_end")
         submitRecognizedTranscript(
             segmentResults
                 .getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
@@ -1203,6 +1279,22 @@ class VoiceConversationService : Service(), RecognitionListener, TextToSpeech.On
         val wasRealtime = usesRealtimeCapture
         val realtimeStartedSuccessfully = realtimeSessionReady
         stopRealtimeCapture()
+        if (voiceMode == VoiceMode.WAKE_ONLY &&
+            wakeRecognizerIsOnDevice &&
+            !wakeRecognizerFallbackAttempted &&
+            error in setOf(
+                SpeechRecognizer.ERROR_LANGUAGE_NOT_SUPPORTED,
+                SpeechRecognizer.ERROR_LANGUAGE_UNAVAILABLE,
+            )
+        ) {
+            wakeRecognizerFallbackAttempted = true
+            consecutiveRecognizerErrors = 0
+            Log.w(TAG, "on-device wake language unavailable; falling back to the system recognizer")
+            createRecognizer(preferOnDevice = false)
+            publishState("Voice paused - compatible wake recognition enabled")
+            scheduleListening(250)
+            return
+        }
         if (wasRealtime && !realtimeStartedSuccessfully) {
             realtimeCaptureDisabledForSession = true
         }

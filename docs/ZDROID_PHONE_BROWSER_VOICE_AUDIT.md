@@ -316,6 +316,44 @@ These are inherited upstream constraints rather than blockers introduced by
 Phone Use or Voice. Revisit them as isolated dependency migrations with Android
 rendering, debugger, networking, and Agent UI regression coverage.
 
+## Background Voice Phone Use Routing
+
+Device traces show that ordinary Accessibility observations and gestures are
+normally tens of milliseconds. The multi-second delay for short spoken commands
+was caused by sending every phrase through a complete Agent/ACP reasoning loop,
+not by the Android gesture itself.
+
+The voice service therefore routes high-confidence, low-risk commands through a
+session-aware local reflex path first. This includes app launch, back, home,
+directional scroll, and contextual repeat phrases such as `再滑一下`. Polite
+prefixes and suffixes do not force these commands back through the Agent. More
+complex or ambiguous requests continue to use the normal Agent session.
+
+Reflex routing is all-or-nothing for a spoken turn. If any sub-command needs
+semantic reasoning, no partial local action is executed and the complete turn is
+sent to the Agent. This prevents mixed requests from silently dropping their
+complex portion after an early local action succeeds.
+
+While a local Phone Use action is running:
+
+- the voice state and foreground notification show `Executing Phone Use` and
+  the target app;
+- the current foreground package is checked before a gesture or semantic action;
+- switching back to Zdroid-B pauses the action instead of scrolling or clicking
+  the editor interface;
+- batched action plans stop if the foreground package changes;
+- action and routing latency are recorded separately from Agent and TTS latency.
+
+Foreground notifications report lifecycle stages and the target application,
+but never include the recognized prompt text. This keeps spoken content out of
+lock-screen notification previews.
+
+Wake-only recognition prefers an on-device recognizer when the device supports
+it, but falls back once to the system recognizer on Android language-support
+errors instead of retrying forever. TTS request timestamps are per utterance and
+are cleared whenever output is interrupted or the service stops, so long-running
+voice sessions do not accumulate stale latency state.
+
 Verification required before installation:
 
 ```text

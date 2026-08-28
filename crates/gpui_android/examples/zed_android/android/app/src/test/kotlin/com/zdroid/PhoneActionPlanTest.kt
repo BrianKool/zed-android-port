@@ -36,6 +36,18 @@ class PhoneActionPlanTest {
             PhoneControlSession.Direction.DOWN,
             PhoneControlSession.directionForCommand("再滑一下"),
         )
+        assertEquals(
+            PhoneControlSession.Direction.DOWN,
+            PhoneControlSession.directionForCommand("幫我往下滑"),
+        )
+        assertEquals(
+            PhoneControlSession.Direction.DOWN,
+            PhoneControlSession.directionForCommand("可以幫我再滑一下嗎"),
+        )
+        assertEquals(
+            PhoneControlSession.Direction.UP,
+            PhoneControlSession.directionForCommand("請往上滑一下"),
+        )
     }
 
     @Test

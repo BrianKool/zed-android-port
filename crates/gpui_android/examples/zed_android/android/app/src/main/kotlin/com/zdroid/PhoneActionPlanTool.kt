@@ -34,6 +34,7 @@ class PhoneActionPlanTool(context: Context) : McpTool {
     private val gesture = GestureTool(context)
     private val global = GlobalActionTool(context)
     private val displayMetrics = context.resources.displayMetrics
+    private val ownPackageName = context.packageName
 
     override suspend fun execute(params: Map<String, Any>): ToolResult {
         val raw = params["plan_json"]?.toString()
@@ -46,6 +47,7 @@ class PhoneActionPlanTool(context: Context) : McpTool {
 
         val planStarted = SystemClock.elapsedRealtime()
         val results = mutableListOf<Map<String, Any?>>()
+        var expectedPackage = activePackage()
         for (index in 0 until actions.length()) {
             val action = actions.optJSONObject(index)
                 ?: return ToolResult.error("invalid_plan", "action $index must be an object")
@@ -53,15 +55,19 @@ class PhoneActionPlanTool(context: Context) : McpTool {
             val started = SystemClock.elapsedRealtime()
             val result = when (type) {
                 "launch_app" -> action.nonEmptyString("package_name")?.let {
+                    expectedPackage = it
                     launch.execute(mapOf("package_name" to it))
                 } ?: ToolResult.error("invalid_plan", "package_name is required")
                 "wait_for_package" -> action.nonEmptyString("package_name")?.let {
-                    waitForPackage(
+                    val waited = waitForPackage(
                         it,
                         action.optLong("timeout_ms", DEFAULT_WAIT_MS).coerceIn(100L, MAX_WAIT_MS),
                     )
+                    if (waited.isSuccess) expectedPackage = it
+                    waited
                 } ?: ToolResult.error("invalid_plan", "package_name is required")
-                "scroll" -> executeScroll(action.optString("direction", "down"))
+                "scroll" -> ensureForegroundPackage(expectedPackage)?.let { it }
+                    ?: executeScroll(action.optString("direction", "down"))
                 "global_action" -> {
                     val name = action.nonEmptyString("action")
                     if (name == null) {
@@ -69,7 +75,8 @@ class PhoneActionPlanTool(context: Context) : McpTool {
                     } else if (name !in ALLOWED_GLOBAL_ACTIONS) {
                         ToolResult.error("unsafe_action", "global action '$name' is not allowed in a batch")
                     } else {
-                        global.execute(mapOf("action" to name))
+                        ensureForegroundPackage(expectedPackage)?.let { it }
+                            ?: global.execute(mapOf("action" to name))
                     }
                 }
                 "delay" -> {
@@ -120,6 +127,31 @@ class PhoneActionPlanTool(context: Context) : McpTool {
             delay(POLL_MS)
         } while (SystemClock.elapsedRealtime() - started < timeoutMs)
         return ToolResult.error("timeout", "foreground package did not become $packageName within ${timeoutMs}ms")
+    }
+
+    private suspend fun activePackage(): String? {
+        val result = activeWindow.execute(emptyMap())
+        return if (result.isSuccess) result.data?.get("package_name")?.toString() else null
+    }
+
+    private suspend fun ensureForegroundPackage(expectedPackage: String?): ToolResult? {
+        if (expectedPackage == null) return null
+        if (expectedPackage == ownPackageName) {
+            return ToolResult.error(
+                "foreground_changed",
+                "Phone Use will not operate the Zdroid-B interface; return to the target app and retry.",
+            )
+        }
+        val actualPackage = activePackage()
+        return if (actualPackage == expectedPackage) {
+            null
+        } else {
+            ToolResult.error(
+                "foreground_changed",
+                "Expected $expectedPackage but the foreground app is ${actualPackage ?: "unavailable"}; " +
+                    "return to the target app and retry.",
+            )
+        }
     }
 
     private suspend fun executeScroll(rawDirection: String): ToolResult {

@@ -283,6 +283,14 @@ internal object SemanticUiRegistry {
             ?: return ToolResult.error("unknown_element", "Element ID is not in revision $revision")
         val service = AccessibilityServiceHolder.service
             ?: return ToolResult.error("accessibility_not_enabled", null)
+        val activePackage = service.rootInActiveWindow?.packageName?.toString()
+        if (locator.packageName != null && activePackage != locator.packageName) {
+            return ToolResult.error(
+                "foreground_changed",
+                "Expected ${locator.packageName} but the foreground app is " +
+                    "${activePackage ?: "unavailable"}; re-open the target app and observe again.",
+            )
+        }
         val roots = service.windows.orEmpty().filter { it.id == locator.windowId }.mapNotNull { it.root } +
             listOfNotNull(service.rootInActiveWindow)
         val node = roots.asSequence().mapNotNull { resolve(it, locator) }.firstOrNull()
