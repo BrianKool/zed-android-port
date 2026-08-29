@@ -1227,7 +1227,7 @@ When something says "not found" even though the user installed it, first ask:
 
 That question solved the final Git issue and should guide future fixes.
 
-## 1.1.6-beta-2f Safety And Runtime Decisions
+## 1.1.6 Safety And Runtime Decisions
 
 - Default project access is current worktree roots plus per-session temporary storage. Other projects and shared/download storage require an explicit grant; credentials are brokered rather than exposed as files.
 - Zdroid Bootstrap stays protected by default. Android-native compatibility launchers may live there, while Agent package installs and project tooling belong to the Ubuntu runtime.
