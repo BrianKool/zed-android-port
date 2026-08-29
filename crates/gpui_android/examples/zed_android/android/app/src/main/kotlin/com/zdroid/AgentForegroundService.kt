@@ -64,6 +64,7 @@ class AgentForegroundService : Service() {
                     batchTaskDescriptions.add(description)
                 }
                 activeTasks[taskId] = description
+                reconcileLocks()
                 startForeground(RUNNING_NOTIFICATION_ID, runningNotification())
                 if (isWaitingForUser(description)) {
                     if (previousDescription != description && shouldNotifyAttention()) {
@@ -79,6 +80,7 @@ class AgentForegroundService : Service() {
             ACTION_FINISH -> {
                 val successful = intent.getBooleanExtra(EXTRA_SUCCESSFUL, false)
                 val wasActive = activeTasks.remove(taskId) != null
+                reconcileLocks()
                 notificationManager.cancel(attentionNotificationId(taskId))
                 if (!wasActive && activeTasks.isEmpty()) {
                     startForeground(RUNNING_NOTIFICATION_ID, runningNotification())
@@ -133,7 +135,8 @@ class AgentForegroundService : Service() {
     override fun onBind(intent: Intent?): IBinder? = null
 
     private fun reconcileLocks() {
-        if (wakeLockEnabled) acquireSessionLocks() else releaseSessionLocks()
+        if (wakeLockEnabled && activeTasks.isNotEmpty()) acquireSessionLocks()
+        else releaseSessionLocks()
     }
 
     private fun acquireSessionLocks() {
@@ -228,7 +231,7 @@ class AgentForegroundService : Service() {
             .setContentIntent(openAppIntent())
             .setCategory(NotificationCompat.CATEGORY_STATUS)
             .setAutoCancel(true)
-            .setPriority(NotificationCompat.PRIORITY_DEFAULT)
+            .setPriority(NotificationCompat.PRIORITY_HIGH)
             .build()
     }
 
@@ -270,10 +273,13 @@ class AgentForegroundService : Service() {
         private const val EXTRA_DESCRIPTION = "description"
         private const val EXTRA_SUCCESSFUL = "successful"
         private const val CHANNEL_RUNNING = "zdroid_agent_running"
-        private const val CHANNEL_COMPLETION = "zdroid_task_completion"
+        // Channel importance is immutable after first creation. The v2 ID
+        // migrates existing installs from the previous non-heads-up channel.
+        private const val CHANNEL_COMPLETION = "zdroid_task_completion_v2"
         private const val CHANNEL_ATTENTION = "zdroid_agent_attention"
         private const val RUNNING_NOTIFICATION_ID = 1401
-        private const val COMPLETION_NOTIFICATION_ID = 1402
+        private const val LEGACY_COMPLETION_NOTIFICATION_ID = 1402
+        private const val COMPLETION_NOTIFICATION_ID = 1403
         private const val ATTENTION_NOTIFICATION_ID_BASE = 2000
         private const val PREFERENCES = "zdroid_background"
         private const val PREF_ENABLED = "enabled"
@@ -295,7 +301,7 @@ class AgentForegroundService : Service() {
 
         private fun isWakeLockEnabled(context: Context): Boolean =
             context.getSharedPreferences(PREFERENCES, Context.MODE_PRIVATE)
-                .getBoolean(PREF_WAKE_LOCK, true)
+                .getBoolean(PREF_WAKE_LOCK, false)
 
         private fun persistWakeLockEnabled(context: Context, enabled: Boolean) {
             context.getSharedPreferences(PREFERENCES, Context.MODE_PRIVATE)
@@ -347,6 +353,7 @@ class AgentForegroundService : Service() {
         fun ensureNotificationChannels(context: Context) {
             if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
             val manager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+            manager.cancel(LEGACY_COMPLETION_NOTIFICATION_ID)
             manager.createNotificationChannel(
                 NotificationChannel(
                     CHANNEL_RUNNING,
@@ -360,8 +367,8 @@ class AgentForegroundService : Service() {
             manager.createNotificationChannel(
                 NotificationChannel(
                     CHANNEL_COMPLETION,
-                    "Zdroid-B task completion",
-                    NotificationManager.IMPORTANCE_DEFAULT,
+                    "Zdroid-B task completion alerts",
+                    NotificationManager.IMPORTANCE_HIGH,
                 ).apply {
                     description = "Notifies when every active Zdroid-B task has finished"
                     setShowBadge(true)

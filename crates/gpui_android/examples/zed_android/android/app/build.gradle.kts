@@ -332,8 +332,8 @@ android {
         // denied â€” the entire L2 plan stops working. Skipping Play Store
         // eligibility is the explicit trade.
         targetSdk = 28
-        versionCode = 171
-        versionName = "1.1.6-beta-2d"
+        versionCode = 174
+        versionName = "1.1.6-beta-2f"
         ndk {
             abiFilters += listOf("arm64-v8a")
         }
@@ -440,10 +440,14 @@ dependencies {
     implementation("androidx.core:core-ktx:1.13.1")
     // ActivityResultLauncher / ActivityResultContracts for SAF picker.
     implementation("androidx.activity:activity-ktx:1.9.3")
-    implementation("com.github.stixez.droid-mcp:droid-mcp-core:0.10.1")
-    implementation("com.github.stixez.droid-mcp:droid-mcp-accessibility:0.10.1")
-    implementation("com.github.stixez.droid-mcp:droid-mcp-apps:0.10.1")
-    implementation("com.github.stixez.droid-mcp:droid-mcp-intent:0.10.1")
-    implementation("com.github.stixez.droid-mcp:droid-mcp-device:0.10.1")
+    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.9.0")
+    // This release is checksum-pinned by gradle/verification-metadata.xml.
+    // Keep the version and verification metadata in sync when upgrading.
+    val droidMcpRevision = "0.10.1"
+    implementation("com.github.stixez.droid-mcp:droid-mcp-core:$droidMcpRevision")
+    implementation("com.github.stixez.droid-mcp:droid-mcp-accessibility:$droidMcpRevision")
+    implementation("com.github.stixez.droid-mcp:droid-mcp-apps:$droidMcpRevision")
+    implementation("com.github.stixez.droid-mcp:droid-mcp-intent:$droidMcpRevision")
+    implementation("com.github.stixez.droid-mcp:droid-mcp-device:$droidMcpRevision")
     testImplementation("junit:junit:4.13.2")
 }

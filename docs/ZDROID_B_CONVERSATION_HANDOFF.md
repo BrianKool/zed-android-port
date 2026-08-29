@@ -1226,3 +1226,16 @@ When something says "not found" even though the user installed it, first ask:
 > Which runtime owns this executable path?
 
 That question solved the final Git issue and should guide future fixes.
+
+## 1.1.6-beta-2f Safety And Runtime Decisions
+
+- Default project access is current worktree roots plus per-session temporary storage. Other projects and shared/download storage require an explicit grant; credentials are brokered rather than exposed as files.
+- Zdroid Bootstrap stays protected by default. Android-native compatibility launchers may live there, while Agent package installs and project tooling belong to the Ubuntu runtime.
+- Mobile Use sends compact semantic Accessibility state first. Screenshot, coordinates, raw selectors, raw text, and arbitrary intents are controlled fallbacks with independent Danger Zone switches, all off by default.
+- Password fields reject raw text permanently. Secure assistance opens a protected Android surface for user typing or Autofill and reports only success or cancellation to the Agent.
+- Payment, submission, deletion, publication, transfer, and unknown-target raw mutations require a short-lived host confirmation token unless the user explicitly disables final confirmation.
+- The Phone Use MCP transport binds only to `127.0.0.1`, requires a random bearer token, limits headers/body/concurrency, and shuts down its worker pool on reload.
+- Company metadata, the session index, and each session are persisted separately. Frequent activity updates rewrite one session instead of serializing every historical session.
+- Window layout explicitly keeps Android activities edge-to-edge through display cutouts. GPUI uses status-bar top and navigation/IME bottom insets only, avoiding the full-height camera-side gutter Samsung otherwise introduces in landscape; voice UI becomes compact in landscape or while text chat is visible.
+- IME composition is cumulative and content is not written to logcat. Collapsing the Agent composer blurs focus so it cannot reopen the keyboard.
+- Gradle dependencies, including Droid-MCP from the restricted JitPack group, are SHA-256 pinned in `android/gradle/verification-metadata.xml`.

@@ -4,6 +4,7 @@ import android.app.Activity
 import android.app.AlertDialog
 import android.app.Dialog
 import android.content.Context
+import android.content.res.Configuration
 import android.content.res.ColorStateList
 import android.graphics.Color
 import android.graphics.Typeface
@@ -24,6 +25,7 @@ import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
 import androidx.core.view.ViewCompat
+import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 
 /** Touch-safe call surface hosted outside GameActivity's native input queue. */
@@ -34,6 +36,7 @@ class VoiceCallActivity : Activity() {
     private lateinit var pauseButton: ImageView
     private lateinit var input: EditText
     private lateinit var voiceHero: View
+    private lateinit var profileView: View
     private lateinit var heroTopSpacer: View
     private lateinit var heroBottomSpacer: View
     private lateinit var conversationScroll: ScrollView
@@ -47,15 +50,33 @@ class VoiceCallActivity : Activity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        window.attributes = window.attributes.apply {
+            layoutInDisplayCutoutMode = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) {
+                android.view.WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS
+            } else {
+                android.view.WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
+            }
+        }
+        WindowCompat.setDecorFitsSystemWindows(window, false)
         agentName = intent.getStringExtra(EXTRA_AGENT_NAME).orEmpty().ifBlank { "Agent" }
         modelName = intent.getStringExtra(EXTRA_MODEL_NAME).orEmpty().ifBlank { "Current model" }
         threadId = intent.getStringExtra(EXTRA_THREAD_ID).orEmpty()
         val content = buildContent()
         setContentView(content)
         ViewCompat.setOnApplyWindowInsetsListener(content) { _, insets ->
+            val statusBarTop = insets.getInsets(WindowInsetsCompat.Type.statusBars()).top
+            val navigationBarBottom = insets.getInsets(WindowInsetsCompat.Type.navigationBars()).bottom
+            val ime = insets.getInsets(WindowInsetsCompat.Type.ime())
+            content.setPadding(
+                dp(22),
+                dp(24) + statusBarTop,
+                dp(22),
+                dp(22) + maxOf(navigationBarBottom, ime.bottom),
+            )
             setTypingLayout(insets.isVisible(WindowInsetsCompat.Type.ime()))
             insets
         }
+        ViewCompat.requestApplyInsets(content)
         Log.i(TAG, "call surface created for agent=$agentName model=$modelName")
     }
 
@@ -140,31 +161,26 @@ class VoiceCallActivity : Activity() {
             LinearLayout.LayoutParams(dp(52), dp(52)),
         )
         content.addView(topBar, LinearLayout.LayoutParams(-1, -2))
-        if (speechOutputEnabled && !showChat) {
-            heroTopSpacer = Space(this)
-            content.addView(heroTopSpacer, LinearLayout.LayoutParams(1, 0, 1f))
-            voiceHero = LinearLayout(this).apply {
-                orientation = LinearLayout.VERTICAL
-                gravity = Gravity.CENTER_HORIZONTAL
-                addView(View(this@VoiceCallActivity).apply {
-                    contentDescription = "$agentName voice profile"
-                    background = GradientDrawable().apply {
-                        shape = GradientDrawable.OVAL
-                        colors = intArrayOf(Color.rgb(226, 228, 232), Color.rgb(132, 136, 145), Color.rgb(56, 59, 65))
-                        gradientType = GradientDrawable.RADIAL_GRADIENT
-                        gradientRadius = dp(145).toFloat()
-                    }
-                    setOnClickListener { VoiceConversationService.interruptSpeech(this@VoiceCallActivity) }
-                }, LinearLayout.LayoutParams(dp(188), dp(188)))
-                addView(label(agentName, 25f, Color.WHITE, Gravity.CENTER), fullWidth(top = 20))
-                addView(label(modelName, 14f, Color.LTGRAY, Gravity.CENTER), fullWidth(top = 4))
+        heroTopSpacer = Space(this)
+        content.addView(heroTopSpacer, LinearLayout.LayoutParams(1, 0, 1f))
+        voiceHero = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER_HORIZONTAL
+            profileView = View(this@VoiceCallActivity).apply {
+                contentDescription = "$agentName voice profile"
+                background = GradientDrawable().apply {
+                    shape = GradientDrawable.OVAL
+                    colors = intArrayOf(Color.rgb(226, 228, 232), Color.rgb(132, 136, 145), Color.rgb(56, 59, 65))
+                    gradientType = GradientDrawable.RADIAL_GRADIENT
+                    gradientRadius = dp(145).toFloat()
+                }
+                setOnClickListener { VoiceConversationService.interruptSpeech(this@VoiceCallActivity) }
             }
-            content.addView(voiceHero, LinearLayout.LayoutParams(-1, -2))
-        } else {
-            heroTopSpacer = Space(this)
-            voiceHero = Space(this)
-            content.addView(label(agentName, 20f, Color.WHITE, Gravity.START), fullWidth(top = 6))
+            addView(profileView, LinearLayout.LayoutParams(dp(188), dp(188)))
+            addView(label(agentName, 25f, Color.WHITE, Gravity.CENTER), fullWidth(top = 12))
+            addView(label(modelName, 14f, Color.LTGRAY, Gravity.CENTER), fullWidth(top = 4))
         }
+        content.addView(voiceHero, LinearLayout.LayoutParams(-1, -2))
         stateLabel = label("Starting microphone...", 16f, Color.rgb(116, 204, 168), Gravity.CENTER)
         content.addView(stateLabel, fullWidth(top = 10))
         val conversation = LinearLayout(this).apply {
@@ -177,12 +193,8 @@ class VoiceCallActivity : Activity() {
             conversationScroll,
             LinearLayout.LayoutParams(-1, 0, if (speechOutputEnabled && !showChat) 0.55f else 1f),
         )
-        if (speechOutputEnabled && !showChat) {
-            heroBottomSpacer = Space(this)
-            content.addView(heroBottomSpacer, LinearLayout.LayoutParams(1, 0, 1f))
-        } else {
-            heroBottomSpacer = Space(this)
-        }
+        heroBottomSpacer = Space(this)
+        content.addView(heroBottomSpacer, LinearLayout.LayoutParams(1, 0, 1f))
 
         val composer = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
@@ -248,17 +260,20 @@ class VoiceCallActivity : Activity() {
     }
 
     private fun setTypingLayout(typing: Boolean) {
-        val compact = !speechOutputEnabled || showChat || typing
+        val compact = !speechOutputEnabled || showChat || typing ||
+            resources.configuration.orientation == Configuration.ORIENTATION_LANDSCAPE
         if (typingLayout == compact) return
         typingLayout = compact
-        if (speechOutputEnabled) {
-            voiceHero.visibility = if (compact) View.GONE else View.VISIBLE
-            heroTopSpacer.visibility = if (compact) View.GONE else View.VISIBLE
-            heroBottomSpacer.visibility = if (compact) View.GONE else View.VISIBLE
-            (conversationScroll.layoutParams as LinearLayout.LayoutParams).also {
-                it.weight = if (compact) 1f else 0.55f
-                conversationScroll.layoutParams = it
-            }
+        val avatarSize = if (compact) dp(72) else dp(188)
+        profileView.layoutParams = (profileView.layoutParams as LinearLayout.LayoutParams).also {
+            it.width = avatarSize
+            it.height = avatarSize
+        }
+        heroTopSpacer.visibility = if (compact) View.GONE else View.VISIBLE
+        heroBottomSpacer.visibility = if (compact) View.GONE else View.VISIBLE
+        (conversationScroll.layoutParams as LinearLayout.LayoutParams).also {
+            it.weight = if (compact) 1f else 0.55f
+            conversationScroll.layoutParams = it
         }
         if (compact) conversationScroll.post { conversationScroll.fullScroll(View.FOCUS_DOWN) }
     }

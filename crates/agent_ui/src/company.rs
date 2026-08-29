@@ -25,6 +25,9 @@ use crate::{
 };
 
 const COMPANY_STORE_KEY: &str = "zdroid_agent_companies_v1";
+const COMPANY_STORE_METADATA_KEY: &str = "zdroid_agent_companies_v2_metadata";
+const COMPANY_STORE_SESSION_INDEX_KEY: &str = "zdroid_agent_companies_v2_sessions";
+const COMPANY_STORE_SESSION_PREFIX: &str = "zdroid_agent_company_session_v2_";
 
 #[derive(Clone, Default)]
 struct GlobalCompanyStore(CompanyStoreData);
@@ -212,11 +215,36 @@ pub fn load_companies(cx: &App) -> CompanyStoreData {
         return store.0.clone();
     }
 
-    let mut data: CompanyStoreData = KeyValueStore::global(cx)
-        .read_kvp(COMPANY_STORE_KEY)
+    let kvp = KeyValueStore::global(cx);
+    let mut data: CompanyStoreData = kvp
+        .read_kvp(COMPANY_STORE_METADATA_KEY)
         .ok()
         .flatten()
         .and_then(|json| serde_json::from_str(&json).ok())
+        .map(|mut metadata: CompanyStoreData| {
+            let session_ids = kvp
+                .read_kvp(COMPANY_STORE_SESSION_INDEX_KEY)
+                .ok()
+                .flatten()
+                .and_then(|json| serde_json::from_str::<Vec<Uuid>>(&json).ok())
+                .unwrap_or_default();
+            metadata.sessions = session_ids
+                .into_iter()
+                .filter_map(|id| {
+                    kvp.read_kvp(&company_session_key(id))
+                        .ok()
+                        .flatten()
+                        .and_then(|json| serde_json::from_str(&json).ok())
+                })
+                .collect();
+            metadata
+        })
+        .or_else(|| {
+            kvp.read_kvp(COMPANY_STORE_KEY)
+                .ok()
+                .flatten()
+                .and_then(|json| serde_json::from_str(&json).ok())
+        })
         .unwrap_or_default();
 
     // Migrate the original company-owned member records into the global
@@ -250,14 +278,55 @@ fn save_companies(data: &CompanyStoreData, cx: &mut App) {
         cx.set_global(GlobalCompanyStore(data.clone()));
     }
 
-    let Ok(json) = serde_json::to_string(data) else {
+    let metadata = CompanyStoreData {
+        companies: data.companies.clone(),
+        personnel: data.personnel.clone(),
+        company_thread_ids: data.company_thread_ids.clone(),
+        personnel_thread_ids: data.personnel_thread_ids.clone(),
+        sessions: Vec::new(),
+    };
+    let Ok(metadata_json) = serde_json::to_string(&metadata) else {
         log::error!("failed to serialize Zdroid company settings");
         return;
     };
+    let Ok(session_index_json) = serde_json::to_string(
+        &data
+            .sessions
+            .iter()
+            .map(|session| session.id)
+            .collect::<Vec<_>>(),
+    ) else {
+        log::error!("failed to serialize Zdroid company session index");
+        return;
+    };
+    let sessions = data
+        .sessions
+        .iter()
+        .filter_map(|session| {
+            serde_json::to_string(session)
+                .map(|json| (company_session_key(session.id), json))
+                .map_err(|error| log::error!("failed to serialize company session: {error}"))
+                .ok()
+        })
+        .collect::<Vec<_>>();
     let kvp = KeyValueStore::global(cx);
     db::write_and_log(cx, move || async move {
-        kvp.write_kvp(COMPANY_STORE_KEY.to_string(), json).await
+        kvp.write_kvp(COMPANY_STORE_METADATA_KEY.to_string(), metadata_json)
+            .await?;
+        kvp.write_kvp(
+            COMPANY_STORE_SESSION_INDEX_KEY.to_string(),
+            session_index_json,
+        )
+        .await?;
+        for (key, json) in sessions {
+            kvp.write_kvp(key, json).await?;
+        }
+        Ok(())
     });
+}
+
+fn company_session_key(id: Uuid) -> String {
+    format!("{COMPANY_STORE_SESSION_PREFIX}{id}")
 }
 
 pub fn refresh_personnel_mention_highlights(
@@ -304,16 +373,30 @@ pub fn update_company_session(
     cx: &mut App,
     update: impl FnOnce(&mut CompanySessionRecord),
 ) {
-    let mut data = load_companies(cx);
-    let Some(session) = data
-        .sessions
-        .iter_mut()
-        .find(|session| session.id == session_id)
-    else {
+    if !cx.has_global::<GlobalCompanyStore>() {
+        let data = load_companies(cx);
+        cx.set_global(GlobalCompanyStore(data));
+    }
+    let json = {
+        let data = &mut cx.global_mut::<GlobalCompanyStore>().0;
+        let Some(session) = data
+            .sessions
+            .iter_mut()
+            .find(|session| session.id == session_id)
+        else {
+            return;
+        };
+        update(session);
+        serde_json::to_string(session)
+    };
+    let Ok(json) = json else {
+        log::error!("failed to serialize updated company session");
         return;
     };
-    update(session);
-    save_companies(&data, cx);
+    let kvp = KeyValueStore::global(cx);
+    db::write_and_log(cx, move || async move {
+        kvp.write_kvp(company_session_key(session_id), json).await
+    });
 }
 
 pub fn create_company_session(session: CompanySessionRecord, cx: &mut App) {
@@ -342,6 +425,10 @@ pub fn delete_company_session(session_id: Uuid, cx: &mut App) -> Vec<ThreadId> {
         data.company_thread_ids.remove(thread_id);
     }
     save_companies(&data, cx);
+    let kvp = KeyValueStore::global(cx);
+    db::write_and_log(cx, move || async move {
+        kvp.delete_kvp(company_session_key(session_id)).await
+    });
     thread_ids
 }
 

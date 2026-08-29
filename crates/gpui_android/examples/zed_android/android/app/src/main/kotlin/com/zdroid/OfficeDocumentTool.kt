@@ -8,6 +8,7 @@ import io.droidmcp.core.ToolParameter
 import io.droidmcp.core.ToolResult
 import java.io.File
 import java.util.concurrent.TimeUnit
+import java.util.zip.ZipFile
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
@@ -70,6 +71,12 @@ class OfficeDocumentTool(
         ).firstOrNull { !it.name.endsWith(".${plugin.extension}", ignoreCase = true) }?.let {
             return ToolResult.error("invalid_file_type", "${plugin.label} requires .${plugin.extension} files: $it")
         }
+        listOfNotNull(
+            (input as? PathResult.Valid)?.file,
+            (second as? PathResult.Valid)?.file,
+        ).forEach { file ->
+            inputBudgetError(file)?.let { return ToolResult.error("document_too_large", it) }
+        }
 
         val request = JSONObject()
             .put("plugin", plugin.id)
@@ -101,19 +108,55 @@ class OfficeDocumentTool(
             .getOrElse { return PathResult.Error("Invalid path: ${it.message}") }
         if (!output && !file.isFile) return PathResult.Error("Input file does not exist: $file")
         if (output && file.exists()) return PathResult.Error("Refusing to overwrite existing output: $file")
-        val projects = File(context.filesDir, "home/projects").canonicalFile
-        if (!DangerZonePolicy.load(context).allowOutsideProject &&
-            file.path != projects.path && !file.path.startsWith(projects.path + File.separator)
-        ) {
-            return PathResult.Error("Path is outside Zdroid-B projects. Import the document into a project, or explicitly review Settings > Danger Zone.")
+        if (!DangerZonePolicy.load(context).allowOutsideProject) {
+            val roots = DangerZonePolicy.activeProjectRoots(context)
+            if (roots.isEmpty() || roots.none { root ->
+                    file.path == root.path || file.path.startsWith(root.path + File.separator)
+                }
+            ) {
+                return PathResult.Error("Path is outside the active project. Import it into this project or grant access in Settings > Danger Zone.")
+            }
         }
         return PathResult.Valid(file)
+    }
+
+    private fun inputBudgetError(file: File): String? {
+        if (file.length() > MAX_INPUT_BYTES) return "Input exceeds the 100 MB safety limit: $file"
+        if (plugin == OfficePlugin.PDF) return null
+        return runCatching {
+            ZipFile(file).use { archive ->
+                var entries = 0
+                var expandedBytes = 0L
+                val iterator = archive.entries()
+                while (iterator.hasMoreElements()) {
+                    val entry = iterator.nextElement()
+                    entries += 1
+                    if (entries > MAX_ZIP_ENTRIES) return@use "Document has too many archive entries"
+                    if (entry.size < 0 || entry.compressedSize < 0) {
+                        return@use "Document contains an entry with an unknown expanded size"
+                    }
+                    expandedBytes += entry.size
+                    if (expandedBytes > MAX_EXPANDED_BYTES) return@use "Expanded document exceeds the 500 MB safety limit"
+                    if (entry.compressedSize > 0 && entry.size / entry.compressedSize > MAX_COMPRESSION_RATIO) {
+                        return@use "Document contains an unsafe compression ratio"
+                    }
+                }
+                null
+            }
+        }.getOrElse { "Document archive is invalid: ${it.message ?: it.javaClass.simpleName}" }
     }
 
     private sealed interface PathResult {
         data object Missing : PathResult
         data class Valid(val file: File) : PathResult
         data class Error(val message: String) : PathResult
+    }
+
+    companion object {
+        private const val MAX_INPUT_BYTES = 100_000_000L
+        private const val MAX_EXPANDED_BYTES = 500_000_000L
+        private const val MAX_ZIP_ENTRIES = 20_000
+        private const val MAX_COMPRESSION_RATIO = 200L
     }
 }
 

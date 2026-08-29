@@ -9,6 +9,9 @@ import io.droidmcp.core.ToolParameter
 import io.droidmcp.core.ToolResult
 import java.io.File
 import java.net.URI
+import java.net.Inet4Address
+import java.net.Inet6Address
+import java.net.InetAddress
 import java.util.Locale
 
 /** Chooses the cheapest safe Browser/Phone Use path without starting another runtime. */
@@ -30,7 +33,7 @@ class BrowserUseRouterTool(private val context: Context) : McpTool {
         val signedIn = params["signed_in"] as? Boolean ?: false
         val consequential = params["consequential"] as? Boolean ?: false
         val currentPackage = AccessibilityServiceHolder.service?.rootInActiveWindow?.packageName?.toString()
-        val validPublicUrl = url?.let(::isPotentiallyPublicWebUrl) == true
+        val validPublicUrl = url?.let(::isPublicWebUrl) == true
         val crawl4aiReady = File(context.filesDir, "home/.config/zdroid/crawl4ai-version").isFile
 
         val route = browserUseRoute(intent, validPublicUrl, signedIn, consequential, crawl4aiReady)
@@ -53,7 +56,12 @@ class BrowserUseRouterTool(private val context: Context) : McpTool {
         )
     }
 
-    private fun isPotentiallyPublicWebUrl(raw: String): Boolean = isPotentiallyPublicWebUrlSyntax(raw)
+    private fun isPublicWebUrl(raw: String): Boolean {
+        if (!isPotentiallyPublicWebUrlSyntax(raw)) return false
+        val host = runCatching { URI(raw).host }.getOrNull() ?: return false
+        return runCatching { InetAddress.getAllByName(host).all(::isPublicAddress) }
+            .getOrDefault(false)
+    }
 
     internal enum class Route(val steps: List<String>) {
         REFLEX_OR_SEMANTIC(
@@ -114,4 +122,26 @@ private fun isPrivateHostLiteral(host: String): Boolean {
         (octets[0] == 169 && octets[1] == 254) ||
         (octets[0] == 192 && octets[1] == 168) ||
         (octets[0] == 172 && octets[1] in 16..31)
+}
+
+private fun isPublicAddress(address: InetAddress): Boolean {
+    if (address.isAnyLocalAddress || address.isLoopbackAddress || address.isLinkLocalAddress ||
+        address.isSiteLocalAddress || address.isMulticastAddress
+    ) return false
+    return when (address) {
+        is Inet4Address -> {
+            val bytes = address.address.map(Byte::toInt).map { it and 0xff }
+            val first = bytes[0]
+            val second = bytes[1]
+            first !in setOf(0, 10, 127) &&
+                !(first == 100 && second in 64..127) &&
+                !(first == 169 && second == 254) &&
+                !(first == 172 && second in 16..31) &&
+                !(first == 192 && second == 168) &&
+                !(first == 198 && second in 18..19) &&
+                first < 224
+        }
+        is Inet6Address -> (address.address[0].toInt() and 0xfe) != 0xfc
+        else -> false
+    }
 }

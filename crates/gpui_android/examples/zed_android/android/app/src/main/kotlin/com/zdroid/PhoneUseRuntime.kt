@@ -7,7 +7,6 @@ import android.util.Base64
 import android.util.Log
 import io.droidmcp.accessibility.AccessibilityTools
 import io.droidmcp.apps.AppsTools
-import io.droidmcp.core.DroidMcp
 import io.droidmcp.device.DeviceTools
 import io.droidmcp.intent.IntentTools
 import java.io.File
@@ -22,7 +21,7 @@ object PhoneUseRuntime {
     private const val TOKEN_KEY = "mcp_token"
     private val executor = Executors.newSingleThreadExecutor()
 
-    @Volatile private var server: DroidMcp? = null
+    @Volatile private var server: LoopbackMcpServer? = null
     @Volatile private var starting = false
     @Volatile private var desiredRunning = false
 
@@ -36,7 +35,7 @@ object PhoneUseRuntime {
     fun initialize(context: Context) {
         val appContext = context.applicationContext
         desiredRunning = true
-        if (server?.isServerRunning() == true || starting) {
+        if (server?.isRunning() == true || starting) {
             updateStatus(appContext)
             return
         }
@@ -47,41 +46,38 @@ object PhoneUseRuntime {
                 val token = loadOrCreateToken(appContext)
                 writePrivateFile(appContext, "token", token)
                 val supportedAccessibilityTools = AccessibilityTools.supportedTools(appContext)
-                val instance = DroidMcp.builder()
-                    .addTools(
+                val policy = DangerZonePolicy.load(appContext)
+                val rawAccessibilityTools = AccessibilityTools.all(appContext).filter {
+                    it.name in supportedAccessibilityTools && it.name != "set_node_text"
+                }
+                val tools = buildList {
+                    addAll(
                         listOf(
                             PhoneActionPlanTool(appContext),
                             BrowserUseRouterTool(appContext),
                             ObserveSemanticUiTool(),
-                            PerformSemanticActionTool(),
+                            PerformSemanticActionTool(appContext),
+                            RequestSecurePasswordTool(appContext),
                             OfficeDocumentTool(appContext, OfficePlugin.EXCEL),
                             OfficeDocumentTool(appContext, OfficePlugin.WORD),
                             OfficeDocumentTool(appContext, OfficePlugin.POWERPOINT),
                             OfficeDocumentTool(appContext, OfficePlugin.PDF),
                         ),
                     )
-                    .addTools(DeviceTools.all(appContext))
-                    .addTools(AppsTools.all(appContext))
-                    .addTools(IntentTools.all(appContext))
-                    .addTools(
-                        AccessibilityTools.all(appContext).filter {
-                            it.name in supportedAccessibilityTools
-                        },
-                    )
-                    .enableHttpServer(
-                        port = PORT,
-                        token = token,
-                        requireAuth = true,
-                        readOnly = false,
-                        // The server is app-internal; do not advertise it over mDNS.
-                        context = null,
-                    )
-                    .build()
-                instance.startServer()
+                    addAll(DeviceTools.all(appContext))
+                    addAll(AppsTools.all(appContext).filter { it.name in SAFE_APP_TOOLS })
+                    if (policy.allowRawUiFallback) add(ControlledUiFallbackTool(appContext, rawAccessibilityTools))
+                    if (policy.allowRawTextInput) add(ControlledRawTextTool(appContext))
+                    if (policy.allowArbitraryIntents) {
+                        addAll(IntentTools.all(appContext).map { ControlledIntentTool(appContext, it) })
+                    }
+                }
+                val instance = LoopbackMcpServer(tools, PORT, token)
+                instance.start()
                 if (desiredRunning) {
                     server = instance
                 } else {
-                    instance.stopServer()
+                    instance.stop()
                 }
                 updateStatus(appContext)
             } catch (error: Throwable) {
@@ -93,12 +89,24 @@ object PhoneUseRuntime {
         }
     }
 
+    fun reload(context: Context) {
+        val appContext = context.applicationContext
+        desiredRunning = false
+        executor.execute {
+            runCatching { server?.stop() }
+            server = null
+            starting = false
+            desiredRunning = true
+            initialize(appContext)
+        }
+    }
+
     fun shutdown(context: Context) {
         val appContext = context.applicationContext
         desiredRunning = false
         executor.execute {
             if (desiredRunning) return@execute
-            runCatching { server?.stopServer() }
+            runCatching { server?.stop() }
                 .onFailure { Log.w(TAG, "Unable to stop Phone Use MCP cleanly", it) }
             server = null
             writeStatus(appContext, "Accessibility permission required")
@@ -107,7 +115,7 @@ object PhoneUseRuntime {
 
     fun updateStatus(context: Context) {
         val status = when {
-            server?.isServerRunning() != true -> "Starting plugin service..."
+            server?.isRunning() != true -> "Starting plugin service..."
             isAccessibilityEnabled(context) -> "Ready - Office plugins and Android Accessibility are connected"
             else -> "Office plugins ready - Accessibility permission required for Mobile Use"
         }
@@ -153,4 +161,6 @@ object PhoneUseRuntime {
             setWritable(true, true)
         }
     }
+
+    private val SAFE_APP_TOOLS = setOf("get_app_info", "list_installed_apps")
 }

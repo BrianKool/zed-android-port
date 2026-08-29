@@ -41,7 +41,7 @@ class ObserveSemanticUiTool : McpTool {
     }
 }
 
-class PerformSemanticActionTool : McpTool {
+class PerformSemanticActionTool(private val context: android.content.Context) : McpTool {
     override val name = "perform_semantic_action"
     override val description = "Act on the latest semantic snapshot using its exact revision and action ID. Stale state is rejected and coordinates are never exposed."
     override val parameters = listOf(
@@ -49,16 +49,35 @@ class PerformSemanticActionTool : McpTool {
         ToolParameter("element_id", "Revision-scoped action element ID.", ParameterType.STRING, true),
         ToolParameter("action", "CLICK, LONG_CLICK, FOCUS, SET_TEXT, SCROLL_FORWARD, or SCROLL_BACKWARD.", ParameterType.STRING, true),
         ToolParameter("text", "Text for SET_TEXT only.", ParameterType.STRING, false),
+        ToolParameter("consequential", "True for payment, submit, delete, publish, account, or irreversible actions.", ParameterType.BOOLEAN, false),
+        ToolParameter("confirmation_token", "Token returned after final notification approval.", ParameterType.STRING, false),
     )
     override val annotations = ToolAnnotations(destructiveHint = true, title = "Perform semantic UI action")
 
     override suspend fun execute(params: Map<String, Any>): ToolResult {
         val revision = (params["revision"] as? Number)?.toLong()
             ?: return ToolResult.error("invalid_action", "revision is required")
+        val action = params["action"]?.toString()?.uppercase(Locale.ROOT).orEmpty()
+        val elementId = params["element_id"]?.toString().orEmpty()
+        val consequential = params["consequential"] as? Boolean == true ||
+            SemanticUiRegistry.requiresFinalConfirmation(revision, elementId, action)
+        if (consequential) {
+            val policy = DangerZonePolicy.load(context)
+            if (!policy.allowConsequentialActions) {
+                return ToolResult.error("consequential_actions_disabled", "Enable consequential Mobile Use actions first")
+            }
+            if (!policy.skipFinalConfirmations) {
+                val operation = "semantic_${action.lowercase(Locale.ROOT)}_$elementId"
+                if (!MobileActionConfirmation.consumeApproved(params["confirmation_token"]?.toString(), operation)) {
+                    val token = MobileActionConfirmation.request(context, operation)
+                    return ToolResult.error("confirmation_required", "Approve notification, then retry with confirmation_token=$token")
+                }
+            }
+        }
         return SemanticUiRegistry.perform(
             revision,
-            params["element_id"]?.toString().orEmpty(),
-            params["action"]?.toString()?.uppercase(Locale.ROOT).orEmpty(),
+            elementId,
+            action,
             params["text"]?.toString(),
         )
     }
@@ -321,6 +340,51 @@ internal object SemanticUiRegistry {
         }
     }
 
+    @Synchronized
+    fun isSecureTarget(revision: Long, id: String): Boolean {
+        if (revision != currentRevision) return false
+        val locator = locators[id] ?: return false
+        val service = AccessibilityServiceHolder.service ?: return false
+        return resolveAcrossWindows(service, locator)?.isPassword == true
+    }
+
+    @Synchronized
+    fun requiresFinalConfirmation(revision: Long, id: String, action: String): Boolean {
+        if (revision != currentRevision || action !in setOf("CLICK", "LONG_CLICK")) return false
+        val label = locators[id]?.label?.lowercase(Locale.ROOT) ?: return true
+        return CONSEQUENTIAL_LABELS.any(label::contains)
+    }
+
+    @Synchronized
+    fun performSecureText(revision: Long, id: String, text: CharSequence): ToolResult {
+        if (revision != currentRevision) return ToolResult.error("stale_snapshot", "UI changed; request password assistance again")
+        val locator = locators[id] ?: return ToolResult.error("unknown_element", id)
+        val service = AccessibilityServiceHolder.service
+            ?: return ToolResult.error("accessibility_not_enabled", null)
+        val node = resolveAcrossWindows(service, locator)
+            ?: return ToolResult.error("stale_element", "Password field is no longer available")
+        if (!node.isPassword || !node.isEditable) {
+            return ToolResult.error("not_secure_field", "Target is not an editable password field")
+        }
+        val args = Bundle().apply {
+            putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, text)
+        }
+        return if (node.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args)) {
+            ToolResult.success(mapOf("performed" to true, "secret_exposed_to_agent" to false))
+        } else ToolResult.error("action_failed", "Password field rejected secure input")
+    }
+
+    private fun resolveAcrossWindows(
+        service: android.accessibilityservice.AccessibilityService,
+        locator: Locator,
+    ): AccessibilityNodeInfo? {
+        val roots = service.windows.orEmpty().filter { it.id == locator.windowId }.mapNotNull { it.root } +
+            service.windows.orEmpty().mapNotNull { it.root }.filter {
+                locator.packageName == null || it.packageName?.toString() == locator.packageName
+            } + listOfNotNull(service.rootInActiveWindow)
+        return roots.asSequence().mapNotNull { resolve(it, locator) }.firstOrNull()
+    }
+
     private fun buildDelta(
         requestedRevision: Long?,
         previous: SnapshotIndex?,
@@ -484,4 +548,10 @@ internal object SemanticUiRegistry {
 
     private val EMPTY_CONTAINERS = setOf("FRAMELAYOUT", "LINEARLAYOUT", "VIEWGROUP", "RELATIVELAYOUT")
     private val STRUCTURAL_ROLES = setOf("LIST", "SCROLL_AREA", "WEB_VIEW")
+    private val CONSEQUENTIAL_LABELS = setOf(
+        "pay", "purchase", "buy", "checkout", "order", "submit", "send", "publish",
+        "post", "delete", "remove", "erase", "confirm", "transfer", "withdraw",
+        "付款", "購買", "結帳", "下單", "提交", "送出", "傳送", "發布", "刪除",
+        "移除", "確認", "轉帳", "提款", "支付", "购买", "结账", "删除", "发布",
+    )
 }

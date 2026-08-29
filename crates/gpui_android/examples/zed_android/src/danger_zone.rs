@@ -1,13 +1,54 @@
 use gpui::{App, Context, Window, actions};
+use project::Project;
+use std::path::PathBuf;
 use workspace::Workspace;
 
 actions!(zdroid_danger_zone, [OpenDangerZone]);
 
 pub fn register(cx: &mut App) {
-    cx.observe_new(|workspace: &mut Workspace, _window, _cx| {
+    cx.observe_new(|workspace: &mut Workspace, _window, cx| {
         workspace.register_action(open_danger_zone);
+        let project = workspace.project().clone();
+        write_active_project_roots(&project, cx);
+        let observed_project = project.clone();
+        cx.observe(&project, move |_workspace, _event, cx| {
+            write_active_project_roots(&observed_project, cx);
+        })
+        .detach();
     })
     .detach();
+}
+
+fn write_active_project_roots(project: &gpui::Entity<Project>, cx: &App) {
+    let roots = project
+        .read(cx)
+        .worktrees(cx)
+        .map(|worktree| worktree.read(cx).abs_path().to_path_buf())
+        .collect::<Vec<_>>();
+    let Some(prefix) = std::env::var_os("PREFIX").map(PathBuf::from) else {
+        return;
+    };
+    let Some(files_dir) = prefix.parent() else {
+        return;
+    };
+    let policy_dir = files_dir.join("policies");
+    if let Err(error) = std::fs::create_dir_all(&policy_dir) {
+        log::error!("could not create project policy directory: {error}");
+        return;
+    }
+    let target = policy_dir.join("active-project-roots.txt");
+    let temporary = policy_dir.join("active-project-roots.tmp");
+    let body = roots
+        .iter()
+        .map(|root| root.to_string_lossy())
+        .collect::<Vec<_>>()
+        .join("\n");
+    if let Err(error) =
+        std::fs::write(&temporary, body).and_then(|_| std::fs::rename(&temporary, &target))
+    {
+        let _ = std::fs::remove_file(&temporary);
+        log::error!("could not update active project policy: {error}");
+    }
 }
 
 fn open_danger_zone(

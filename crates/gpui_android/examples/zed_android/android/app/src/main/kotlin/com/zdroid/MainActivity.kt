@@ -34,6 +34,7 @@ import android.widget.EditText
 import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.ProgressBar
+import android.widget.ScrollView
 import android.widget.Space
 import android.widget.TextView
 import android.widget.Toast
@@ -124,8 +125,87 @@ class MainActivity : GameActivity(), ImeHost {
     @Suppress("unused")
     fun openPhoneUseSettings() {
         runOnUiThread {
-            startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
+            showMobileUseSettingsDialog()
         }
+    }
+
+    private fun showMobileUseSettingsDialog() {
+        var state = DangerZonePolicy.load(this)
+        val container = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            val pad = (20 * resources.displayMetrics.density).toInt()
+            setPadding(pad, pad / 2, pad, 0)
+        }
+        container.addView(TextView(this).apply {
+            text = "Mobile Use Danger Zone\nAll advanced permissions are off by default. Password text is never exposed to the Agent, logs, or conversation history."
+            textSize = 14f
+        })
+        val rawUi = CheckBox(this).apply { text = "Allow controlled raw UI fallback" }
+        val rawText = CheckBox(this).apply { text = "Allow raw text input (password fields remain blocked)" }
+        val passwords = CheckBox(this).apply { text = "Allow secure password-field assistance" }
+        val intents = CheckBox(this).apply { text = "Allow arbitrary Android intents" }
+        val consequential = CheckBox(this).apply { text = "Allow payment, submit, delete, and publish actions" }
+        val skipConfirmation = CheckBox(this).apply { text = "Skip final confirmation notifications for allowed actions" }
+        val checks = listOf(rawUi, rawText, passwords, intents, consequential, skipConfirmation)
+        checks.forEach(container::addView)
+        container.addView(TextView(this).apply {
+            text = "Secure password assistance asks you to provide or autofill the secret in a protected user surface. The Agent receives only success or cancellation."
+            textSize = 13f
+        })
+
+        fun render() {
+            rawUi.isChecked = state.allowRawUiFallback
+            rawText.isChecked = state.allowRawTextInput
+            passwords.isChecked = state.allowPasswordAssistance
+            intents.isChecked = state.allowArbitraryIntents
+            consequential.isChecked = state.allowConsequentialActions
+            skipConfirmation.isChecked = state.skipFinalConfirmations
+            skipConfirmation.isEnabled = state.allowConsequentialActions
+        }
+        fun persist(candidate: DangerZonePolicy.State) {
+            if (DangerZonePolicy.save(this, candidate)) {
+                state = candidate
+                render()
+                PhoneUseRuntime.reload(this)
+            } else {
+                Toast.makeText(this, "Could not update Mobile Use permissions", Toast.LENGTH_LONG).show()
+                render()
+            }
+        }
+        fun bindDangerous(check: CheckBox, enabled: () -> Boolean, update: (Boolean) -> DangerZonePolicy.State) {
+            check.setOnClickListener {
+                val requested = check.isChecked
+                check.isChecked = enabled()
+                if (!requested) {
+                    persist(update(false))
+                } else {
+                    AlertDialog.Builder(this)
+                        .setTitle("Enable advanced Mobile Use permission?")
+                        .setMessage("This increases what an AI Agent can do on your phone. UI and webpage text remain untrusted, and password contents remain hidden from the Agent.")
+                        .setNegativeButton("Cancel") { _, _ -> render() }
+                        .setPositiveButton("Enable") { _, _ -> persist(update(true)) }
+                        .show()
+                }
+            }
+        }
+        bindDangerous(rawUi, { state.allowRawUiFallback }) { state.copy(allowRawUiFallback = it) }
+        bindDangerous(rawText, { state.allowRawTextInput }) { state.copy(allowRawTextInput = it) }
+        bindDangerous(passwords, { state.allowPasswordAssistance }) { state.copy(allowPasswordAssistance = it) }
+        bindDangerous(intents, { state.allowArbitraryIntents }) { state.copy(allowArbitraryIntents = it) }
+        bindDangerous(consequential, { state.allowConsequentialActions }) {
+            state.copy(allowConsequentialActions = it, skipFinalConfirmations = if (it) state.skipFinalConfirmations else false)
+        }
+        bindDangerous(skipConfirmation, { state.skipFinalConfirmations }) { state.copy(skipFinalConfirmations = it) }
+        render()
+
+        AlertDialog.Builder(this)
+            .setTitle("Mobile Use settings")
+            .setView(ScrollView(this).apply { addView(container) })
+            .setNeutralButton("Accessibility Settings") { _, _ ->
+                startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
+            }
+            .setPositiveButton("Close", null)
+            .show()
     }
 
     @Suppress("unused")
@@ -431,6 +511,7 @@ class MainActivity : GameActivity(), ImeHost {
     /// with a hide.
     private var lastImeInsetBottom: Int = 0
     private var lastStatusBarInsetTop: Int = 0
+    private var lastNavigationBarInsetBottom: Int = 0
 
     /// Setter that wraps the `imeShown` mutation and ALSO pushes
     /// the value into Rust's `SOFT_KEYBOARD_VISIBLE` mirror. Every
@@ -473,11 +554,17 @@ class MainActivity : GameActivity(), ImeHost {
             }
             extraKeysView?.visibility = View.VISIBLE
             extraKeysView?.post {
-                applyViewportInsets(lastStatusBarInsetTop, viewportBottomInset(lastImeInsetBottom))
+                applyViewportInsets(
+                    lastStatusBarInsetTop,
+                    maxOf(lastNavigationBarInsetBottom, viewportBottomInset(lastImeInsetBottom)),
+                )
             }
         } else {
             extraKeysView?.visibility = View.GONE
-            applyViewportInsets(lastStatusBarInsetTop, lastImeInsetBottom)
+            applyViewportInsets(
+                lastStatusBarInsetTop,
+                maxOf(lastNavigationBarInsetBottom, lastImeInsetBottom),
+            )
         }
     }
 
@@ -765,6 +852,13 @@ class MainActivity : GameActivity(), ImeHost {
         // Keep the phone status bar visible so battery, connectivity, time,
         // and notification state remain available while coding. The bottom
         // navigation bar stays transient to preserve editor space.
+        window.attributes = window.attributes.apply {
+            layoutInDisplayCutoutMode = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) {
+                android.view.WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS
+            } else {
+                android.view.WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
+            }
+        }
         WindowCompat.setDecorFitsSystemWindows(window, false)
         WindowInsetsControllerCompat(window, window.decorView).apply {
             show(WindowInsetsCompat.Type.statusBars())
@@ -801,9 +895,8 @@ class MainActivity : GameActivity(), ImeHost {
             val imeBottom = insets.getInsets(
                 androidx.core.view.WindowInsetsCompat.Type.ime()
             ).bottom
-            val statusBarTop = insets.getInsets(
-                androidx.core.view.WindowInsetsCompat.Type.statusBars()
-            ).top
+            val statusBarTop = insets.getInsets(WindowInsetsCompat.Type.statusBars()).top
+            val navigationBarBottom = insets.getInsets(WindowInsetsCompat.Type.navigationBars()).bottom
             val wasVisible = lastImeInsetBottom > 0
             val nowVisible = imeBottom > 0
 
@@ -847,7 +940,11 @@ class MainActivity : GameActivity(), ImeHost {
             // IME show/hide animation smoothly.
             extraKeysView?.translationY = -imeBottom.toFloat()
             lastStatusBarInsetTop = statusBarTop
-            applyViewportInsets(statusBarTop, viewportBottomInset(imeBottom))
+            lastNavigationBarInsetBottom = navigationBarBottom
+            applyViewportInsets(
+                statusBarTop,
+                maxOf(navigationBarBottom, viewportBottomInset(imeBottom)),
+            )
 
             lastImeInsetBottom = imeBottom
             insets
@@ -1062,17 +1159,27 @@ class MainActivity : GameActivity(), ImeHost {
         return imeBottom + extrasHeight
     }
 
-    /** Keep GPUI below the status bar and above the soft keyboard/extras row. */
+    /** Keep GPUI below the status bar and above the soft keyboard/navigation bar. */
     private fun applyViewportInsets(topInset: Int, bottomInset: Int) {
         val surface = findSurfaceView(window.decorView) ?: return
         val params = surface.layoutParams
         if (params is ViewGroup.MarginLayoutParams) {
-            if (params.topMargin == topInset && params.bottomMargin == bottomInset) return
+            if (
+                params.topMargin == topInset &&
+                params.leftMargin == 0 &&
+                params.rightMargin == 0 &&
+                params.bottomMargin == bottomInset
+            ) return
+            params.leftMargin = 0
             params.topMargin = topInset
+            params.rightMargin = 0
             params.bottomMargin = bottomInset
             surface.layoutParams = params
             surface.requestLayout()
-            Log.i("zdroid_ime", "GPUI viewport insets top=$topInset bottom=$bottomInset")
+            Log.i(
+                "zdroid_ime",
+                "GPUI viewport vertical insets top=$topInset bottom=$bottomInset",
+            )
         } else {
             Log.w("zdroid_ime", "SurfaceView has no margin layout params; viewport resize skipped")
         }

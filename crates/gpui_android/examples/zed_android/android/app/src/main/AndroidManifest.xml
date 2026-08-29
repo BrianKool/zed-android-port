@@ -110,6 +110,17 @@
             android:name="com.zdroid.OpenUrlReceiver"
             android:exported="false"/>
 
+        <receiver
+            android:name="com.zdroid.MobileActionConfirmationReceiver"
+            android:exported="false"/>
+
+        <activity
+            android:name="com.zdroid.SecureCredentialActivity"
+            android:exported="false"
+            android:excludeFromRecents="true"
+            android:theme="@style/Theme.Zdroid.Secondary"
+            android:windowSoftInputMode="adjustResize" />
+
         <!-- Secondary GPUI surfaces stay in MainActivity's task. On phones
              they behave like in-app pages; under DeX they remain inside the
              existing Zdroid-B window instead of creating separate freeform

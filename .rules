@@ -202,3 +202,12 @@ Rules emerge from validated patterns, not one-off observations. The workflow is:
 1. Agent notes a pattern during a session.
 2. Team validates the pattern in code review.
 3. A dedicated commit adds the rule with context on *why* it exists.
+
+# Zdroid-B runtime and agent safety invariants
+
+* Treat Android Bootstrap and Ubuntu as different runtimes. Bootstrap owns app integration and Android-compatible launchers; Agent-installed packages and project tools belong in Ubuntu. Never solve a runtime mismatch by passing a path owned by one runtime into the other.
+* Keep direct Agent file access project-scoped by default. Other projects, shared downloads, credentials, and Bootstrap are not ordinary project roots. Any exception must use an explicit, narrowly scoped user grant.
+* Mobile Use is semantic-first. Raw Accessibility, raw text, arbitrary intents, password assistance, consequential actions, and bypassing final confirmations are separate Danger Zone permissions and default off.
+* Password text must never be returned to an Agent, tool result, log, or conversation. Raw password-field writes remain blocked even when raw text is enabled; use the secure user-owned credential broker.
+* Payment, submit, delete, publish, transfer, and similarly consequential phone actions require a final host-side confirmation unless the user explicitly disables that safeguard.
+* Do not replace system-bar insets with fixed offsets. Keep the Android window edge-to-edge with `layoutInDisplayCutoutMode=always`; apply status-bar top and navigation/IME bottom insets to GPUI, but never shrink the whole surface by a landscape cutout's left/right safe inset.

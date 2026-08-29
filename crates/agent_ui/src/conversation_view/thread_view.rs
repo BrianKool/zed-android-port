@@ -4600,7 +4600,7 @@ impl ThreadView {
                                                     ))
                                                     .on_click(cx.listener(|this, _, window, cx| {
                                                         this.set_editor_is_collapsed(true, cx);
-                                                        this.focus_handle.focus(window, cx);
+                                                        window.blur();
                                                         cx.stop_propagation();
                                                     })),
                                                 ),

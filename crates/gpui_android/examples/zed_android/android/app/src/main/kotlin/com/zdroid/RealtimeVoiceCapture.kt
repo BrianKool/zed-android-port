@@ -9,6 +9,7 @@ import android.media.MediaRecorder
 import android.media.audiofx.AcousticEchoCanceler
 import android.media.audiofx.NoiseSuppressor
 import android.os.ParcelFileDescriptor
+import android.util.Log
 import androidx.core.content.ContextCompat
 import java.io.IOException
 import java.util.concurrent.atomic.AtomicBoolean
@@ -74,13 +75,19 @@ class RealtimeVoiceCapture(
                 while (running.get()) {
                     val count = audioRecord.read(buffer, 0, buffer.size, AudioRecord.READ_BLOCKING)
                     if (count > 0) {
-                        onAudioFrame?.invoke(buffer, count)
+                        runCatching { onAudioFrame?.invoke(buffer, count) }
+                            .onFailure { Log.w(TAG, "Voice-frame observer failed", it) }
                         output.write(buffer, 0, count)
+                    } else if (count < 0 && running.get()) {
+                        throw IllegalStateException("AudioRecord read failed with code $count")
                     }
                 }
             } catch (_: IOException) {
                 // Closing the pipe is the normal way to end a segmented recognition session.
+            } catch (error: Throwable) {
+                Log.e(TAG, "Realtime voice capture stopped unexpectedly", error)
             } finally {
+                running.set(false)
                 runCatching { output.close() }
             }
         }
@@ -88,7 +95,7 @@ class RealtimeVoiceCapture(
     }
 
     fun stop() {
-        if (!running.getAndSet(false)) return
+        running.set(false)
         runCatching { recorder?.stop() }
         runCatching { writePipe?.close() }
         captureThread?.interrupt()
@@ -106,6 +113,7 @@ class RealtimeVoiceCapture(
     }
 
     companion object {
+        private const val TAG = "RealtimeVoiceCapture"
         const val SAMPLE_RATE = 16_000
         const val CHANNEL_COUNT = 1
         const val CHANNEL_CONFIG = AudioFormat.CHANNEL_IN_MONO

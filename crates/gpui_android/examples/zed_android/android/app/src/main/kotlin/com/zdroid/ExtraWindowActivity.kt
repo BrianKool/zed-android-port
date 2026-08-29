@@ -159,6 +159,13 @@ class ExtraWindowActivity : AppCompatActivity(), ImeHost {
         // bar) renders on its own decoration layer above this Activity, so
         // keeping the phone status bar visible here does not affect DeX's
         // OS-managed freeform chrome.
+        window.attributes = window.attributes.apply {
+            layoutInDisplayCutoutMode = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) {
+                android.view.WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS
+            } else {
+                android.view.WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
+            }
+        }
         WindowCompat.setDecorFitsSystemWindows(window, false)
         WindowInsetsControllerCompat(window, window.decorView).apply {
             show(WindowInsetsCompat.Type.statusBars())
@@ -315,9 +322,8 @@ class ExtraWindowActivity : AppCompatActivity(), ImeHost {
             val imeBottom = insets.getInsets(
                 androidx.core.view.WindowInsetsCompat.Type.ime()
             ).bottom
-            val statusBarTop = insets.getInsets(
-                androidx.core.view.WindowInsetsCompat.Type.statusBars()
-            ).top
+            val statusBarTop = insets.getInsets(WindowInsetsCompat.Type.statusBars()).top
+            val navigationBarBottom = insets.getInsets(WindowInsetsCompat.Type.navigationBars()).bottom
             val wasVisible = lastImeInsetBottom > 0
             val nowVisible = imeBottom > 0
             if (!wasVisible && nowVisible) {
@@ -339,7 +345,10 @@ class ExtraWindowActivity : AppCompatActivity(), ImeHost {
                 }
                 setImeShown(false)
             }
-            applyViewportInsets(statusBarTop, imeBottom)
+            applyViewportInsets(
+                statusBarTop,
+                maxOf(navigationBarBottom, imeBottom),
+            )
             lastImeInsetBottom = imeBottom
             insets
         }
@@ -843,18 +852,23 @@ class ExtraWindowActivity : AppCompatActivity(), ImeHost {
         }
     }
 
-    /** Keep this GPUI surface between the status bar and soft keyboard. */
-    private fun applyViewportInsets(statusBarTop: Int, imeBottom: Int) {
+    /** Keep this GPUI surface below the status bar and above the IME/navigation bar. */
+    private fun applyViewportInsets(top: Int, bottom: Int) {
         val params = surfaceView.layoutParams
         if (params is android.view.ViewGroup.MarginLayoutParams) {
-            if (params.topMargin == statusBarTop && params.bottomMargin == imeBottom) return
-            params.topMargin = statusBarTop
-            params.bottomMargin = imeBottom
+            if (
+                params.leftMargin == 0 && params.topMargin == top &&
+                params.rightMargin == 0 && params.bottomMargin == bottom
+            ) return
+            params.leftMargin = 0
+            params.topMargin = top
+            params.rightMargin = 0
+            params.bottomMargin = bottom
             surfaceView.layoutParams = params
             surfaceView.requestLayout()
             Log.i(
                 TAG_IME,
-                "GPUI viewport[w=$extraWindowId] top=$statusBarTop bottom=$imeBottom"
+                "GPUI viewport[w=$extraWindowId] vertical top=$top bottom=$bottom"
             )
         } else {
             Log.w(TAG_IME, "SurfaceView has no margin layout params; viewport resize skipped")

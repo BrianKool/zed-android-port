@@ -58,7 +58,7 @@ class ZdroidInputConnection(private val hostView: View) : BaseInputConnection(ho
                 val combinedMeta = modifier or firstDown.metaState
                 Log.i(
                     TAG,
-                    "IC.commitText w=$windowId intercepted ${quote(s)} as " +
+                    "IC.commitText w=$windowId intercepted len=${s.length} as " +
                         "key=${firstDown.keyCode} meta=0x${Integer.toHexString(combinedMeta)}"
                 )
                 NativeBridge.nativeImeSendKeyEvent(
@@ -96,7 +96,7 @@ class ZdroidInputConnection(private val hostView: View) : BaseInputConnection(ho
                 .load(android.view.KeyCharacterMap.VIRTUAL_KEYBOARD)
             val events = keyMap.getEvents(s.toCharArray())
             if (events != null && events.isNotEmpty()) {
-                Log.i(TAG, "IC.commitText w=$windowId vim-route ${quote(s)} as ${events.size} key events")
+                Log.i(TAG, "IC.commitText w=$windowId vim-route len=${s.length} as ${events.size} key events")
                 for (ev in events) {
                     NativeBridge.nativeImeSendKeyEvent(
                         windowId,
@@ -108,16 +108,16 @@ class ZdroidInputConnection(private val hostView: View) : BaseInputConnection(ho
                 }
                 return true
             }
-            Log.i(TAG, "IC.commitText w=$windowId vim-route fallthrough (no keymap) ${quote(s)}")
+            Log.i(TAG, "IC.commitText w=$windowId vim-route fallthrough (no keymap) len=${s.length}")
         }
-        Log.i(TAG, "IC.commitText w=$windowId text=${quote(s)} cursor=$newCursorPosition")
+        Log.d(TAG, "IC.commitText w=$windowId length=${s.length} cursor=$newCursorPosition")
         NativeBridge.nativeImeCommitText(windowId, s, newCursorPosition)
         return true
     }
 
     override fun setComposingText(text: CharSequence?, newCursorPosition: Int): Boolean {
         val s = text?.toString() ?: ""
-        Log.i(TAG, "IC.setComposingText w=$windowId text=${quote(s)} cursor=$newCursorPosition")
+        Log.d(TAG, "IC.setComposingText w=$windowId length=${s.length} cursor=$newCursorPosition")
         NativeBridge.nativeImeSetComposingText(windowId, s, newCursorPosition)
         return true
     }
@@ -155,7 +155,7 @@ class ZdroidInputConnection(private val hostView: View) : BaseInputConnection(ho
             TAG,
             "IC.sendKeyEvent w=$windowId action=${event.action} keyCode=${event.keyCode} " +
                 "meta=0x${Integer.toHexString(meta)} (extras=0x${Integer.toHexString(modifier)}) " +
-                "repeat=${event.repeatCount} unicode=${event.unicodeChar} chars=${quote(event.characters ?: "")}"
+                "repeat=${event.repeatCount} unicode=${event.unicodeChar} charsLength=${event.characters?.length ?: 0}"
         )
         NativeBridge.nativeImeSendKeyEvent(
             windowId,
@@ -234,9 +234,6 @@ class ZdroidInputConnection(private val hostView: View) : BaseInputConnection(ho
         )
         return state.extractedText()
     }
-
-    private fun quote(s: String): String =
-        "\"" + s.replace("\\", "\\\\").replace("\"", "\\\"") + "\""
 
     companion object {
         private const val COMMAND_CUT = 1

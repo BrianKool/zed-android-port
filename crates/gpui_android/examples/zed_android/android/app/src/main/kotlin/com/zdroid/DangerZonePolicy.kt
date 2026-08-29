@@ -13,6 +13,12 @@ object DangerZonePolicy {
     data class State(
         val allowOutsideProject: Boolean = false,
         val protectBootstrapRuntime: Boolean = true,
+        val allowRawUiFallback: Boolean = false,
+        val allowRawTextInput: Boolean = false,
+        val allowPasswordAssistance: Boolean = false,
+        val allowArbitraryIntents: Boolean = false,
+        val allowConsequentialActions: Boolean = false,
+        val skipFinalConfirmations: Boolean = false,
     )
 
     private const val DIRECTORY = "policies"
@@ -26,6 +32,12 @@ object DangerZonePolicy {
             State(
                 allowOutsideProject = properties.getProperty("allow_agent_outside_project") == "true",
                 protectBootstrapRuntime = properties.getProperty("protect_bootstrap_runtime") != "false",
+                allowRawUiFallback = properties.getProperty("allow_raw_ui_fallback") == "true",
+                allowRawTextInput = properties.getProperty("allow_raw_text_input") == "true",
+                allowPasswordAssistance = properties.getProperty("allow_password_assistance") == "true",
+                allowArbitraryIntents = properties.getProperty("allow_arbitrary_intents") == "true",
+                allowConsequentialActions = properties.getProperty("allow_consequential_actions") == "true",
+                skipFinalConfirmations = properties.getProperty("skip_mobile_final_confirmations") == "true",
             )
         }.getOrDefault(State())
     }
@@ -38,6 +50,12 @@ object DangerZonePolicy {
         val properties = Properties().apply {
             setProperty("allow_agent_outside_project", state.allowOutsideProject.toString())
             setProperty("protect_bootstrap_runtime", state.protectBootstrapRuntime.toString())
+            setProperty("allow_raw_ui_fallback", state.allowRawUiFallback.toString())
+            setProperty("allow_raw_text_input", state.allowRawTextInput.toString())
+            setProperty("allow_password_assistance", state.allowPasswordAssistance.toString())
+            setProperty("allow_arbitrary_intents", state.allowArbitraryIntents.toString())
+            setProperty("allow_consequential_actions", state.allowConsequentialActions.toString())
+            setProperty("skip_mobile_final_confirmations", state.skipFinalConfirmations.toString())
         }
         val atomicFile = AtomicFile(file)
         val output = atomicFile.startWrite()
@@ -53,6 +71,15 @@ object DangerZonePolicy {
         file.setReadable(true, true)
         file.setWritable(true, true)
     }.isSuccess
+
+    fun activeProjectRoots(context: Context): List<File> =
+        File(context.filesDir, "$DIRECTORY/active-project-roots.txt")
+            .takeIf(File::isFile)
+            ?.readLines()
+            ?.mapNotNull { raw ->
+                raw.trim().takeIf(String::isNotEmpty)?.let { runCatching { File(it).canonicalFile }.getOrNull() }
+            }
+            .orEmpty()
 
     private fun policyFile(context: Context) = File(context.filesDir, "$DIRECTORY/$FILE_NAME")
 }

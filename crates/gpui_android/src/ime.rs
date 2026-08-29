@@ -403,7 +403,6 @@ fn set_composition(window_ptr: &AndroidWindowStatePtr, new_text: &str) {
         log::debug!("ime: set_composition dropped (no input handler)");
         return;
     }
-    state.ime_recently_finished_composition = None;
     let new_len = new_text.encode_utf16().count();
 
     // Snapshot composition anchor & current selection BEFORE the
@@ -413,9 +412,23 @@ fn set_composition(window_ptr: &AndroidWindowStatePtr, new_text: &str) {
     // terminals don't implement it, so we fall back to the cursor
     // position when no prior composition exists.
     let prev_start = state.ime_composition_start;
-    let start = match prev_start {
-        Some(start) => start,
-        None => {
+    let recently_finished = state.ime_recently_finished_composition.take();
+    let replacement_range = if prev_start.is_none() {
+        let handler = state.input_handler.as_mut().expect("checked is_some above");
+        recently_finished_replacement_range(
+            recently_finished.as_ref(),
+            new_text,
+            handler
+                .selected_text_range(false)
+                .map(|selection| selection.range),
+        )
+    } else {
+        None
+    };
+    let start = match (prev_start, replacement_range.as_ref()) {
+        (Some(start), _) => start,
+        (None, Some(range)) => range.start,
+        (None, None) => {
             let handler = state.input_handler.as_mut().expect("checked is_some above");
             handler
                 .selected_text_range(false)
@@ -424,7 +437,7 @@ fn set_composition(window_ptr: &AndroidWindowStatePtr, new_text: &str) {
         }
     };
 
-    // Pass `range_utf16 = None`. Editor's
+    // Normally pass `range_utf16 = None`. Editor's
     // `replace_and_mark_text_in_range` interprets a Some(range) as
     // RELATIVE to the existing marked range (macOS NSTextInputClient
     // convention: setMarkedText's replacement_range is offset within
@@ -433,10 +446,14 @@ fn set_composition(window_ptr: &AndroidWindowStatePtr, new_text: &str) {
     // past the cursor (the +67 char editor-buffer bug). None means
     // "replace the entire active marked region with new_text" for
     // editor, and "set composition overlay to new_text" for terminal.
+    // Samsung IMEs can, however, finish a composition and immediately
+    // restart it with cumulative text (`droid-` -> `droid-m`). In that
+    // case there is no marked range left, so replace the just-finished
+    // absolute range rather than appending the cumulative value.
     let selected_range = Some(new_len..new_len);
     {
         let handler = state.input_handler.as_mut().expect("checked is_some above");
-        handler.replace_and_mark_text_in_range(None, new_text, selected_range);
+        handler.replace_and_mark_text_in_range(replacement_range, new_text, selected_range);
     }
 
     state.ime_composition_start = Some(start);
@@ -750,7 +767,7 @@ fn call_activity_update_selection_ui(
 }
 
 fn apply_event(window_ptr: &AndroidWindowStatePtr, event: ImeEvent) {
-    log::info!("ime::apply_event {:?}", debug_event(&event));
+    log::debug!("ime::apply_event {:?}", debug_event(&event));
     let needs_mirror_push = match event {
         ImeEvent::CommitText { text, .. } => {
             commit_composition(window_ptr, Some(&text));
@@ -1196,6 +1213,24 @@ mod tests {
         assert_eq!(
             recently_finished_replacement_range(finished.as_ref(), "A_B", Some(2..2)),
             None
+        );
+    }
+
+    #[test]
+    fn cumulative_restarted_composition_replaces_just_finished_text() {
+        let finished = Some((0, "droid-".to_string()));
+        assert_eq!(
+            recently_finished_replacement_range(finished.as_ref(), "droid-m", Some(6..6),),
+            Some(0..6),
+        );
+    }
+
+    #[test]
+    fn intentional_repeated_text_is_not_treated_as_cumulative_composition() {
+        let finished = Some((0, "go".to_string()));
+        assert_eq!(
+            recently_finished_replacement_range(finished.as_ref(), "go", Some(4..4)),
+            None,
         );
     }
 }

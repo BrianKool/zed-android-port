@@ -8,6 +8,11 @@ import tempfile
 from pathlib import Path
 
 
+MAX_OUTPUT_BYTES = 250_000_000
+MAX_RECONCILE_ROWS = 250_000
+MAX_RECONCILE_CELLS = 2_000_000
+
+
 def fail(code, message):
     print(json.dumps({"ok": False, "code": code, "message": message}))
     raise SystemExit(1)
@@ -22,6 +27,8 @@ def atomic_output(path, writer, validator):
     os.close(fd)
     try:
         writer(temporary)
+        if os.path.getsize(temporary) > MAX_OUTPUT_BYTES:
+            fail("output_too_large", "Generated document exceeds the 250 MB safety limit")
         validator(temporary)
         os.replace(temporary, target)
     finally:
@@ -63,6 +70,10 @@ def excel_frame(path, sheet_selector):
             sheet = book[book.sheetnames[sheet_selector]]
         else:
             sheet = book[sheet_selector or book.sheetnames[0]]
+        if sheet.max_row > MAX_RECONCILE_ROWS:
+            fail("worksheet_too_large", f"Worksheet exceeds {MAX_RECONCILE_ROWS} rows")
+        if sheet.max_row * max(sheet.max_column, 1) > MAX_RECONCILE_CELLS:
+            fail("worksheet_too_large", f"Worksheet exceeds {MAX_RECONCILE_CELLS} cells")
         rows = sheet.iter_rows(values_only=True)
         raw_headers = next(rows, None)
         if not raw_headers:
