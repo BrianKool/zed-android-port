@@ -32,6 +32,7 @@ object PhoneUseRuntime {
         initialize(context)
     }
 
+    @Synchronized
     fun initialize(context: Context) {
         val appContext = context.applicationContext
         desiredRunning = true

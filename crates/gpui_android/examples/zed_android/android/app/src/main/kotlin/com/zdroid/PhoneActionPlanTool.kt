@@ -17,7 +17,7 @@ import org.json.JSONArray
 
 /** Executes short deterministic Android action batches without repeated model round-trips. */
 class PhoneActionPlanTool(context: Context) : McpTool {
-    override val name = "execute_action_plan"
+    override val name = TOOL_NAME
     override val description = "Execute a bounded sequence of deterministic Android actions locally. Use this for launch/wait/scroll/navigation chains; stop before any step that requires understanding screen content."
     override val parameters = listOf(
         ToolParameter(
@@ -166,6 +166,7 @@ class PhoneActionPlanTool(context: Context) : McpTool {
         optString(name).trim().takeIf(String::isNotEmpty)
 
     companion object {
+        const val TOOL_NAME = "execute_action_plan"
         private const val TAG = "PhoneActionPlan"
         private const val MAX_ACTIONS = 12
         private const val DEFAULT_WAIT_MS = 3_000L

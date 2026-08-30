@@ -1,7 +1,6 @@
 package com.zdroid
 
 import android.app.Activity
-import android.app.AlertDialog
 import android.app.Dialog
 import android.content.Context
 import android.content.res.Configuration
@@ -14,14 +13,20 @@ import android.util.Log
 import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
+import android.view.Window
+import android.view.WindowManager
 import android.view.inputmethod.InputMethodManager
+import android.widget.CheckBox
 import android.widget.EditText
 import android.widget.FrameLayout
 import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.PopupMenu
+import android.widget.RadioButton
+import android.widget.RadioGroup
 import android.widget.Space
 import android.widget.ScrollView
+import android.widget.Switch
 import android.widget.TextView
 import android.widget.Toast
 import androidx.core.view.ViewCompat
@@ -68,10 +73,10 @@ class VoiceCallActivity : Activity() {
             val navigationBarBottom = insets.getInsets(WindowInsetsCompat.Type.navigationBars()).bottom
             val ime = insets.getInsets(WindowInsetsCompat.Type.ime())
             content.setPadding(
-                dp(22),
-                dp(24) + statusBarTop,
-                dp(22),
-                dp(22) + maxOf(navigationBarBottom, ime.bottom),
+                0,
+                statusBarTop,
+                0,
+                maxOf(navigationBarBottom, ime.bottom),
             )
             setTypingLayout(insets.isVisible(WindowInsetsCompat.Type.ime()))
             insets
@@ -145,12 +150,12 @@ class VoiceCallActivity : Activity() {
         val content = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             gravity = Gravity.CENTER_HORIZONTAL
-            setPadding(dp(22), dp(24), dp(22), dp(22))
             setBackgroundColor(Color.BLACK)
         }
         val topBar = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(18), dp(12), dp(18), dp(4))
         }
         topBar.addView(Space(this), LinearLayout.LayoutParams(0, 1, 1f))
         topBar.addView(
@@ -185,7 +190,7 @@ class VoiceCallActivity : Activity() {
         content.addView(stateLabel, fullWidth(top = 10))
         val conversation = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(0, dp(8), 0, dp(8))
+            setPadding(dp(18), dp(8), dp(18), dp(8))
         }
         conversationContainer = conversation
         conversationScroll = ScrollView(this).apply { addView(conversation) }
@@ -234,7 +239,10 @@ class VoiceCallActivity : Activity() {
                 VoiceConversationService.submitTyped(this, text)
             }
         }, LinearLayout.LayoutParams(dp(48), dp(48)))
-        content.addView(composer, LinearLayout.LayoutParams(-1, -2))
+        content.addView(composer, LinearLayout.LayoutParams(-1, -2).apply {
+            marginStart = dp(18)
+            marginEnd = dp(18)
+        })
 
         val actions = LinearLayout(this).apply { gravity = Gravity.CENTER }
         pauseButton = iconAction(R.drawable.ic_voice_pause, "Pause voice conversation", Color.rgb(42, 44, 49)) {
@@ -255,7 +263,9 @@ class VoiceCallActivity : Activity() {
             Log.i(TAG, "end-call clicked")
             VoiceConversationService.stop(this)
         }, LinearLayout.LayoutParams(dp(58), dp(58)))
-        content.addView(actions, fullWidth(top = 10))
+        content.addView(actions, fullWidth(top = 10).apply {
+            bottomMargin = dp(12)
+        })
         return FrameLayout(this).apply { addView(content, FrameLayout.LayoutParams(-1, -1)) }
     }
 
@@ -296,42 +306,155 @@ class VoiceCallActivity : Activity() {
         val preferences = getSharedPreferences("zdroid_voice", Context.MODE_PRIVATE)
         val selected = (preferences.getStringSet("languages", setOf("zh-TW", "en-US"))
             ?: setOf("zh-TW", "en-US")).toMutableSet()
-        val codes = arrayOf("zh-TW", "en-US")
         val speechEnabled = preferences.getBoolean("speech_output", true)
         val chatVisible = preferences.getBoolean("show_chat", false)
-        var showChatChoice = chatVisible
-        val optionLabels = arrayOf("繁體中文", "English", "Show Chat")
-        val checked = booleanArrayOf("zh-TW" in selected, "en-US" in selected, chatVisible)
-        AlertDialog.Builder(this)
-            .setTitle("Voice settings")
-            .setMultiChoiceItems(optionLabels, checked) { _, which, enabled ->
-                if (which < codes.size) {
-                    if (enabled) selected.add(codes[which]) else if (selected.size > 1) selected.remove(codes[which])
-                } else {
-                    showChatChoice = enabled
-                }
+        val speakerEnabled = preferences.getBoolean("speaker", true)
+        val dialog = Dialog(this).apply { requestWindowFeature(Window.FEATURE_NO_TITLE) }
+        val panel = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            background = GradientDrawable().apply {
+                shape = GradientDrawable.RECTANGLE
+                setColor(Color.rgb(37, 38, 37))
+                setStroke(dp(1), Color.rgb(88, 87, 79))
+                cornerRadius = dp(8).toFloat()
             }
-            .setPositiveButton("Apply") { _, _ ->
-                preferences.edit()
-                    .putStringSet("languages", selected)
-                    .putBoolean("show_chat", showChatChoice)
-                    .apply()
-                VoiceConversationService.setLanguages(this, selected)
-                recreate()
+        }
+        val header = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(20), dp(14), dp(10), dp(10))
+        }
+        header.addView(label("Voice settings", 20f, SETTINGS_TEXT, Gravity.START), LinearLayout.LayoutParams(0, -2, 1f))
+        header.addView(iconAction(android.R.drawable.ic_menu_close_clear_cancel, "Close settings", Color.TRANSPARENT) {
+            dialog.dismiss()
+        }, LinearLayout.LayoutParams(dp(48), dp(48)))
+        panel.addView(header, LinearLayout.LayoutParams(-1, -2))
+        panel.addView(settingsDivider(), LinearLayout.LayoutParams(-1, dp(1)))
+
+        val body = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(20), dp(8), dp(20), dp(18))
+        }
+        body.addView(settingsSectionTitle("Language"), fullWidth(top = 8))
+        val traditionalChinese = settingsCheckBox("Traditional Chinese", "zh-TW" in selected)
+        val english = settingsCheckBox("English", "en-US" in selected)
+        body.addView(traditionalChinese, fullWidth(top = 4))
+        body.addView(english, fullWidth())
+
+        body.addView(settingsSectionTitle("AI voice output"), fullWidth(top = 18))
+        val spokenResponses = settingsSwitch("Spoken responses", speechEnabled)
+        val showConversation = settingsSwitch("Show conversation", chatVisible)
+        body.addView(spokenResponses, fullWidth(top = 4))
+        body.addView(showConversation, fullWidth())
+
+        body.addView(settingsSectionTitle("Audio output"), fullWidth(top = 18))
+        val audioGroup = RadioGroup(this).apply { orientation = RadioGroup.VERTICAL }
+        val speaker = settingsRadioButton("Speaker", speakerEnabled)
+        val earpiece = settingsRadioButton("Earpiece", !speakerEnabled)
+        audioGroup.addView(speaker, LinearLayout.LayoutParams(-1, dp(48)))
+        audioGroup.addView(earpiece, LinearLayout.LayoutParams(-1, dp(48)))
+        body.addView(audioGroup, fullWidth(top = 4))
+
+        val scroll = ScrollView(this).apply {
+            isFillViewport = true
+            addView(body, ViewGroup.LayoutParams(-1, -2))
+        }
+        panel.addView(scroll, LinearLayout.LayoutParams(-1, 0, 1f))
+        panel.addView(settingsDivider(), LinearLayout.LayoutParams(-1, dp(1)))
+
+        val footer = LinearLayout(this).apply {
+            gravity = Gravity.END or Gravity.CENTER_VERTICAL
+            setPadding(dp(14), dp(10), dp(14), dp(12))
+        }
+        footer.addView(settingsCommand("Cancel", false) { dialog.dismiss() }, LinearLayout.LayoutParams(-2, dp(46)))
+        footer.addView(settingsCommand("Apply", true) {
+            if (!traditionalChinese.isChecked && !english.isChecked) {
+                Toast.makeText(this, "Select at least one language", Toast.LENGTH_SHORT).show()
+                return@settingsCommand
             }
-            .setNeutralButton("Audio output") { _, _ ->
-                val speaker = !preferences.getBoolean("speaker", true)
-                preferences.edit().putBoolean("speaker", speaker).apply()
-                VoiceConversationService.setAudioOutput(this, speaker)
-                Toast.makeText(this, if (speaker) "Speaker" else "Earpiece", Toast.LENGTH_SHORT).show()
+            selected.clear()
+            if (traditionalChinese.isChecked) selected.add("zh-TW")
+            if (english.isChecked) selected.add("en-US")
+            val useSpeaker = speaker.isChecked
+            preferences.edit()
+                .putStringSet("languages", selected)
+                .putBoolean("speech_output", spokenResponses.isChecked)
+                .putBoolean("show_chat", showConversation.isChecked)
+                .putBoolean("speaker", useSpeaker)
+                .apply()
+            VoiceConversationService.setLanguages(this, selected)
+            VoiceConversationService.setSpeechOutput(this, spokenResponses.isChecked)
+            VoiceConversationService.setAudioOutput(this, useSpeaker)
+            dialog.dismiss()
+            recreate()
+        }, LinearLayout.LayoutParams(-2, dp(46)).apply { marginStart = dp(8) })
+        panel.addView(footer, LinearLayout.LayoutParams(-1, -2))
+
+        dialog.setContentView(panel)
+        dialog.setCanceledOnTouchOutside(true)
+        dialog.show()
+        dialog.window?.apply {
+            setBackgroundDrawableResource(android.R.color.transparent)
+            addFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND)
+            attributes = attributes.apply {
+                width = ViewGroup.LayoutParams.MATCH_PARENT
+                height = (resources.displayMetrics.heightPixels * 0.82f).toInt()
+                dimAmount = 0.72f
+                gravity = Gravity.CENTER
             }
-            .setNegativeButton(if (speechEnabled) "Turn voice output off" else "Turn voice output on") { _, _ ->
-                val enabled = !speechEnabled
-                preferences.edit().putBoolean("speech_output", enabled).apply()
-                VoiceConversationService.setSpeechOutput(this, enabled)
-                recreate()
+            decorView.setPadding(dp(18), 0, dp(18), 0)
+            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.S) {
+                addFlags(WindowManager.LayoutParams.FLAG_BLUR_BEHIND)
+                attributes = attributes.apply { blurBehindRadius = dp(18) }
             }
-            .show()
+        }
+    }
+
+    private fun settingsSectionTitle(text: String) = label(text, 13f, SETTINGS_ACCENT, Gravity.START).apply {
+        setTypeface(Typeface.DEFAULT, Typeface.BOLD)
+    }
+
+    private fun settingsCheckBox(text: String, checked: Boolean) = CheckBox(this).apply {
+        this.text = text
+        isChecked = checked
+        setTextColor(SETTINGS_TEXT)
+        textSize = 16f
+        buttonTintList = ColorStateList.valueOf(SETTINGS_ACCENT)
+        gravity = Gravity.CENTER_VERTICAL
+    }
+
+    @Suppress("UseSwitchCompatOrMaterialCode")
+    private fun settingsSwitch(text: String, checked: Boolean) = Switch(this).apply {
+        this.text = text
+        isChecked = checked
+        setTextColor(SETTINGS_TEXT)
+        textSize = 16f
+        gravity = Gravity.CENTER_VERTICAL
+        showText = false
+        buttonTintList = ColorStateList.valueOf(SETTINGS_ACCENT)
+    }
+
+    private fun settingsRadioButton(text: String, checked: Boolean) = RadioButton(this).apply {
+        this.text = text
+        isChecked = checked
+        setTextColor(SETTINGS_TEXT)
+        textSize = 16f
+        buttonTintList = ColorStateList.valueOf(SETTINGS_ACCENT)
+        gravity = Gravity.CENTER_VERTICAL
+    }
+
+    private fun settingsDivider() = View(this).apply { setBackgroundColor(Color.rgb(78, 78, 72)) }
+
+    private fun settingsCommand(text: String, primary: Boolean, click: () -> Unit) = TextView(this).apply {
+        this.text = text
+        textSize = 15f
+        setTextColor(if (primary) Color.rgb(35, 35, 32) else SETTINGS_TEXT)
+        gravity = Gravity.CENTER
+        setPadding(dp(18), 0, dp(18), 0)
+        background = rounded(if (primary) SETTINGS_ACCENT else Color.rgb(54, 55, 53), 6)
+        isClickable = true
+        isFocusable = true
+        setOnClickListener { click() }
     }
 
     private fun iconAction(icon: Int, description: String, color: Int, click: () -> Unit) = ImageView(this).apply {
@@ -382,6 +505,8 @@ class VoiceCallActivity : Activity() {
 
     companion object {
         private const val TAG = "ZdroidVoiceUI"
+        private val SETTINGS_TEXT = Color.rgb(239, 232, 202)
+        private val SETTINGS_ACCENT = Color.rgb(218, 198, 120)
         const val EXTRA_AGENT_NAME = "agent_name"
         const val EXTRA_MODEL_NAME = "model_name"
         const val EXTRA_THREAD_ID = "thread_id"

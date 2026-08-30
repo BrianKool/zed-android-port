@@ -66,7 +66,7 @@ class BrowserUseRouterTool(private val context: Context) : McpTool {
     internal enum class Route(val steps: List<String>) {
         REFLEX_OR_SEMANTIC(
             listOf(
-                "Use execute_phone_action_plan for deterministic launch, wait, navigation, and scroll actions.",
+                "Use ${PhoneActionPlanTool.TOOL_NAME} for deterministic launch, wait, navigation, and scroll actions.",
                 "Stop the plan before semantic interpretation is required.",
                 "Then observe_semantic_ui in ACTIONABLE mode and act by revision-scoped element ID.",
             ),

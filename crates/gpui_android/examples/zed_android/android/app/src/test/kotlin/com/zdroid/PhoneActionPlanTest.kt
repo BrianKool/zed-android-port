@@ -96,4 +96,13 @@ class PhoneActionPlanTest {
             browserUseRoute("READ", true, signedIn = false, consequential = false, crawl4aiReady = true),
         )
     }
+
+    @Test
+    fun browser_router_names_the_registered_action_plan_tool() {
+        assertTrue(
+            BrowserUseRouterTool.Route.REFLEX_OR_SEMANTIC.steps.any {
+                PhoneActionPlanTool.TOOL_NAME in it
+            },
+        )
+    }
 }

@@ -15,6 +15,8 @@ const INVALID_TERMINAL_COMMAND_MESSAGE: &str = "The terminal command could not b
      allow shell substitutions or interpolations in permission-protected commands. Forbidden examples include $VAR, \
      ${VAR}, $(...), backticks, $((...)), <(...), and >(...). Resolve those values before calling terminal, or ask \
      the user for the literal value to use.";
+const ANDROID_INPUT_INJECTION_DENIAL_MESSAGE: &str = "Android shell input injection is unavailable to ordinary app \
+     processes. Use Zdroid-B Phone Use MCP execute_action_plan or semantic Accessibility actions instead.";
 
 /// Security rules that are always enforced and cannot be overridden by any setting.
 /// These protect against catastrophic operations like wiping filesystems.
@@ -81,6 +83,12 @@ fn check_hardcoded_security_rules(
     let terminal_patterns = &rules.terminal_deny;
 
     for input in inputs {
+        if is_android_input_injection(input) {
+            return Some(ToolPermissionDecision::Deny(
+                ANDROID_INPUT_INJECTION_DENIAL_MESSAGE.into(),
+            ));
+        }
+
         // First: check the original input as-is (and its path-normalized form)
         if matches_hardcoded_patterns(input, terminal_patterns) {
             return Some(ToolPermissionDecision::Deny(
@@ -92,6 +100,11 @@ fn check_hardcoded_security_rules(
         if shell_kind.supports_posix_chaining() {
             if let Some(commands) = extract_commands(input) {
                 for command in &commands {
+                    if is_android_input_injection(command) {
+                        return Some(ToolPermissionDecision::Deny(
+                            ANDROID_INPUT_INJECTION_DENIAL_MESSAGE.into(),
+                        ));
+                    }
                     if matches_hardcoded_patterns(command, terminal_patterns) {
                         return Some(ToolPermissionDecision::Deny(
                             HARDCODED_SECURITY_DENIAL_MESSAGE.into(),
@@ -103,6 +116,25 @@ fn check_hardcoded_security_rules(
     }
 
     None
+}
+
+fn is_android_input_injection(_command: &str) -> bool {
+    #[cfg(target_os = "android")]
+    {
+        let mut tokens = _command.split_whitespace();
+        let executable = tokens.next().unwrap_or_default();
+        let executable = executable.rsplit('/').next().unwrap_or(executable);
+        if executable == "input" {
+            return tokens.next().is_some();
+        }
+        if executable == "adb" {
+            return tokens.next() == Some("shell")
+                && tokens
+                    .next()
+                    .is_some_and(|token| token.rsplit('/').next() == Some("input"));
+        }
+    }
+    false
 }
 
 /// Checks a single command against hardcoded patterns, both as-is and with
