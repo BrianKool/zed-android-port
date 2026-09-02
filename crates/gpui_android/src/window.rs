@@ -22,6 +22,10 @@ use gpui_wgpu::{GpuContext, WgpuRenderer, WgpuSurfaceConfig, wgpu};
 use crate::display::AndroidDisplay;
 use crate::platform::set_native_window_frame_rate;
 
+fn content_height(drawable_height: u32, bottom_inset: u32) -> u32 {
+    drawable_height.saturating_sub(bottom_inset).max(1)
+}
+
 /// Raw window handle wrapper for Android. Holds a `*mut ANativeWindow` pointer
 /// (obtained from `android_activity::AndroidApp::native_window()`), or null when
 /// the surface is not currently attached (between `TerminateWindow` and the next
@@ -71,6 +75,8 @@ pub(crate) struct Callbacks {
 pub(crate) struct AndroidWindowState {
     pub(crate) bounds: Bounds<Pixels>,
     pub(crate) scale_factor: f32,
+    pub(crate) drawable_size: Size<DevicePixels>,
+    pub(crate) content_bottom_inset: u32,
     pub(crate) renderer: Option<WgpuRenderer>,
     pub(crate) raw_window: AndroidRawWindow,
     pub(crate) display: Rc<dyn PlatformDisplay>,
@@ -89,6 +95,8 @@ pub(crate) struct AndroidWindowState {
     /// but gpui's invalidator doesn't know that. The next paint must be
     /// forced; consumed by `refresh()` via `std::mem::take`.
     pub(crate) force_render_after_recovery: bool,
+    /// Number of completed gpui frame callbacks for this window.
+    pub(crate) paint_generation: u64,
     /// Set true by the platform's `OsClosed` drain handler when the
     /// underlying `ExtraWindowActivity` has already destroyed (user clicked
     /// the OS chrome X). `AndroidWindow::Drop` reads this to skip its
@@ -162,12 +170,14 @@ pub(crate) struct AndroidWindowState {
     /// adequate for editor ASCII typing.
     pub(crate) ime_composition_start: Option<usize>,
     pub(crate) ime_composition_text: Option<String>,
-    /// An editor composition that was finalized by `finishComposingText`.
-    /// Some Samsung/Gboard paths immediately follow that callback with a
-    /// cumulative `commitText` containing the finalized prefix plus the new
-    /// text. Keeping exactly one event of history lets that commit replace the
-    /// just-finished span instead of duplicating it.
-    pub(crate) ime_recently_finished_composition: Option<(usize, String)>,
+    /// Latest Android-side text edit applied to the GPUI handler. Mirrored
+    /// back to InputConnection so stale asynchronous snapshots cannot replace
+    /// a newer composing state.
+    pub(crate) ime_revision: u64,
+    /// Generation of the currently active Android InputConnection. Every
+    /// connection announces itself before sending edits, allowing callbacks
+    /// from a connection invalidated by restartInput to be rejected.
+    pub(crate) ime_connection_id: u64,
     /// Per-window mirror of whether the input handler was present at
     /// the last frame-boundary IME reconcile. Compared against the
     /// current `input_handler.is_some()` to detect show/hide
@@ -181,6 +191,11 @@ pub(crate) struct AndroidWindowState {
     /// focus-edge mirror above, this lets a second tap re-open an IME that
     /// Android dismissed while the gpui input handler remained installed.
     pub(crate) ime_reassert_requested: bool,
+    /// The most recent pointer-down waiting to be checked against the input
+    /// handler installed by the following paint. Focus changes are applied by
+    /// gpui during input dispatch, so checking the old handler immediately can
+    /// miss taps that move between two editors.
+    pub(crate) pending_ime_pointer_down: Option<(Point<Pixels>, u64)>,
     /// Per-window cache of the last classified IME target kind
     /// (terminal vs editor). On change we issue restartInput on this
     /// window's Activity so the IME's EditorInfo reflects the new
@@ -273,11 +288,16 @@ impl AndroidWindowStatePtr {
         let mut state = self.state.borrow_mut();
         state.raw_window = raw_window;
         state.scale_factor = scale_factor;
+        state.drawable_size = size(
+            DevicePixels(width.max(1) as i32),
+            DevicePixels(height.max(1) as i32),
+        );
+        let content_height = content_height(height, state.content_bottom_inset);
         state.bounds = Bounds {
             origin: point(px(0.0), px(0.0)),
             size: size(
                 px(width as f32 / scale_factor),
-                px(height as f32 / scale_factor),
+                px(content_height as f32 / scale_factor),
             ),
         };
 
@@ -368,9 +388,8 @@ impl AndroidWindowStatePtr {
     }
 
     /// Called on `MainEvent::WindowResized` and `MainEvent::ConfigChanged`.
-    /// Both can change the visible size or DPI (rotation, dock/scaling), so
-    /// the platform layer is expected to recompute scale_factor each call
-    /// rather than reuse the stored one.
+    /// A drawable resize reuses the stored density; only ConfigChanged should
+    /// supply a newly computed scale factor.
     ///
     /// Fires the `on_resize` callback that gpui registered so it relays out
     /// the element tree at the new size + DPI.
@@ -378,11 +397,16 @@ impl AndroidWindowStatePtr {
         let content_size = {
             let mut state = self.state.borrow_mut();
             state.scale_factor = scale_factor;
+            state.drawable_size = size(
+                DevicePixels(width.max(1) as i32),
+                DevicePixels(height.max(1) as i32),
+            );
+            let content_height = content_height(height, state.content_bottom_inset);
             state.bounds = Bounds {
                 origin: point(px(0.0), px(0.0)),
                 size: size(
                     px(width as f32 / scale_factor),
-                    px(height as f32 / scale_factor),
+                    px(content_height as f32 / scale_factor),
                 ),
             };
             if let Some(renderer) = state.renderer.as_mut() {
@@ -396,6 +420,35 @@ impl AndroidWindowStatePtr {
 
         if let Some(callback) = self.callbacks.borrow_mut().resize.as_mut() {
             callback(content_size, scale_factor);
+        }
+    }
+
+    /// Updates only GPUI's logical content height. The wgpu drawable remains
+    /// attached to the full-height SurfaceView, avoiding an asynchronous
+    /// SurfaceView/buffer resize on every IME animation frame.
+    pub(crate) fn set_content_bottom_inset(&self, bottom_inset: u32) {
+        let content_size = {
+            let mut state = self.state.borrow_mut();
+            if state.native_window.is_none() {
+                state.content_bottom_inset = bottom_inset;
+                return;
+            }
+            let drawable_width = state.drawable_size.width.0.max(1) as u32;
+            let drawable_height = state.drawable_size.height.0.max(1) as u32;
+            if state.content_bottom_inset == bottom_inset {
+                return;
+            }
+
+            state.content_bottom_inset = bottom_inset;
+            state.bounds.size = size(
+                px(drawable_width as f32 / state.scale_factor),
+                px(content_height(drawable_height, bottom_inset) as f32 / state.scale_factor),
+            );
+            state.bounds.size
+        };
+
+        if let Some(callback) = self.callbacks.borrow_mut().resize.as_mut() {
+            callback(content_size, self.state.borrow().scale_factor);
         }
     }
 
@@ -414,6 +467,9 @@ impl AndroidWindowStatePtr {
                 require_presentation: false,
                 force_render,
             });
+            let mut state = self.state.borrow_mut();
+            state.paint_generation = state.paint_generation.wrapping_add(1);
+            drop(state);
             self.callbacks.borrow_mut().request_frame = Some(callback);
         }
     }
@@ -461,15 +517,12 @@ impl AndroidWindowStatePtr {
             let result = callback(input.clone());
             self.callbacks.borrow_mut().input = Some(callback);
             if let Some(position) = pointer_down_position {
+                // The callback may have moved focus to another editor. Its
+                // PlatformInputHandler is installed on the next paint, so let
+                // the frame-boundary reconciler test this point against that
+                // new handler instead of the stale one currently in state.
                 let mut state = self.state.borrow_mut();
-                let tapped_text_input = state
-                    .input_handler
-                    .as_mut()
-                    .and_then(|handler| handler.character_index_for_point(position))
-                    .is_some();
-                if tapped_text_input {
-                    state.ime_reassert_requested = true;
-                }
+                state.pending_ime_pointer_down = Some((position, state.paint_generation));
             }
             if !result.propagate {
                 return;
@@ -520,6 +573,8 @@ impl AndroidWindow {
         let state = AndroidWindowState {
             bounds,
             scale_factor: 1.0,
+            drawable_size: size(DevicePixels(1), DevicePixels(1)),
+            content_bottom_inset: 0,
             renderer: None,
             raw_window: AndroidRawWindow {
                 native_window: std::ptr::null_mut(),
@@ -532,6 +587,7 @@ impl AndroidWindow {
             gpu_context,
             native_window: None,
             force_render_after_recovery: false,
+            paint_generation: 0,
             os_closed: AtomicBool::new(false),
             android_app,
             clicks: crate::events::click_track::ClickTrackState::default(),
@@ -543,9 +599,11 @@ impl AndroidWindow {
             extra_window_id: None,
             ime_composition_start: None,
             ime_composition_text: None,
-            ime_recently_finished_composition: None,
+            ime_revision: 0,
+            ime_connection_id: 0,
             ime_currently_visible: false,
             ime_reassert_requested: false,
+            pending_ime_pointer_down: None,
             last_ime_target_kind: None,
             last_pushed_selection: None,
             last_selection_overlay: None,
@@ -851,4 +909,17 @@ impl PlatformWindow for AndroidWindow {
     }
 
     fn update_ime_position(&self, _bounds: Bounds<Pixels>) {}
+}
+
+#[cfg(test)]
+mod tests {
+    use super::content_height;
+
+    #[test]
+    fn content_height_preserves_drawable_and_clamps_large_insets() {
+        assert_eq!(content_height(2340, 0), 2340);
+        assert_eq!(content_height(2340, 900), 1440);
+        assert_eq!(content_height(100, 100), 1);
+        assert_eq!(content_height(100, 500), 1);
+    }
 }

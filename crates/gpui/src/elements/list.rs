@@ -349,6 +349,37 @@ impl ListState {
         self
     }
 
+    /// Supply individual height estimates for unmeasured items. This keeps a
+    /// heterogeneous virtual list's scrollbar and logical scroll position
+    /// stable before off-screen items have been rendered.
+    pub fn set_item_height_hints(&self, heights: impl IntoIterator<Item = Pixels>) {
+        let mut heights = heights.into_iter();
+        let mut state = self.0.borrow_mut();
+        let new_items = state
+            .items
+            .iter()
+            .map(|item| match item {
+                ListItem::Unmeasured { focus_handle, .. } => ListItem::Unmeasured {
+                    size_hint: heights.next().map(|height| Size {
+                        width: px(0.),
+                        height,
+                    }),
+                    focus_handle: focus_handle.clone(),
+                },
+                ListItem::Measured { size, focus_handle } => {
+                    let _ = heights.next();
+                    ListItem::Measured {
+                        size: *size,
+                        focus_handle: focus_handle.clone(),
+                    }
+                }
+            })
+            .collect::<Vec<_>>();
+        let mut tree = SumTree::default();
+        tree.extend(new_items, ());
+        state.items = tree;
+    }
+
     /// Reset this instantiation of the list state.
     ///
     /// Note that this will cause scroll events to be dropped until the next paint.
@@ -1728,6 +1759,19 @@ mod test {
         IntoElement, ListState, Render, Styled, TestAppContext, Window, canvas, div, list, point,
         px, size,
     };
+
+    #[test]
+    fn item_height_hints_establish_a_stable_unmeasured_height() {
+        let state = ListState::new(3, crate::ListAlignment::Top, px(0.));
+
+        state.set_item_height_hints([px(40.), px(80.), px(120.)]);
+
+        let state = state.0.borrow();
+        let summary = state.items.summary();
+        assert_eq!(summary.height, px(240.));
+        assert!(!summary.has_unknown_height);
+        assert_eq!(summary.unrendered_count, 3);
+    }
 
     #[gpui::test]
     fn test_autoscroll_above_item_top_renders_items_above(cx: &mut TestAppContext) {

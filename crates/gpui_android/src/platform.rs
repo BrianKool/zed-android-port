@@ -4,7 +4,7 @@ use std::{
     path::{Path, PathBuf},
     rc::Rc,
     sync::Arc,
-    sync::atomic::{AtomicBool, Ordering},
+    sync::atomic::{AtomicBool, AtomicI32, Ordering},
 };
 
 use android_activity::AndroidApp;
@@ -41,6 +41,16 @@ unsafe extern "C" {
 
 type ChoreographerFrameCallback = unsafe extern "C" fn(frame_time_nanos: i64, data: *mut c_void);
 static VOICE_CONVERSATION_ENABLED: AtomicBool = AtomicBool::new(false);
+static VIEWPORT_BOTTOM_INSET_PX: AtomicI32 = AtomicI32::new(0);
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_com_zdroid_NativeBridge_nativeSetViewportBottomInset<'local>(
+    _env: jni::JNIEnv<'local>,
+    _bridge: jni::objects::JObject<'local>,
+    bottom_inset_px: jni::sys::jint,
+) {
+    VIEWPORT_BOTTOM_INSET_PX.store(bottom_inset_px.max(0), Ordering::Release);
+}
 
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_com_zdroid_NativeBridge_nativeSetVoiceConversationEnabled<'local>(
@@ -266,6 +276,10 @@ pub(crate) struct AndroidCommon {
     /// therefore stops auto-showing Gboard on focus) when the user
     /// has the setting off.
     pub(crate) last_soft_keyboard_setting: Option<bool>,
+    /// Last IME/extras-row inset applied to GPUI's logical viewport. The
+    /// SurfaceView drawable remains full-height so Android never stretches a
+    /// transiently resized graphics buffer during IME animation.
+    pub(crate) last_viewport_bottom_inset_px: i32,
     pub(crate) running: bool,
 }
 
@@ -309,6 +323,7 @@ impl AndroidCommon {
             last_trackpad_mode_enabled: false,
             last_extras_row_enabled: None,
             last_soft_keyboard_setting: None,
+            last_viewport_bottom_inset_px: -1,
             running: true,
         }
     }
@@ -949,11 +964,25 @@ impl AndroidPlatform {
             reassert_requested,
         ) = {
             let mut state = window_ptr.state.borrow_mut();
-            let reassert_requested = std::mem::take(&mut state.ime_reassert_requested);
+            let paint_generation = state.paint_generation;
+            let pending_pointer_down = state
+                .pending_ime_pointer_down
+                .filter(|(_, generation)| paint_generation > *generation)
+                .map(|(position, _)| position);
+            if pending_pointer_down.is_some() {
+                state.pending_ime_pointer_down = None;
+            }
+            let mut reassert_requested = std::mem::take(&mut state.ime_reassert_requested);
             let (target_kind, should_auto_show) = state
                 .input_handler
                 .as_mut()
                 .map(|handler| {
+                    if pending_pointer_down
+                        .and_then(|position| handler.character_index_for_point(position))
+                        .is_some()
+                    {
+                        reassert_requested = true;
+                    }
                     (
                         Some(crate::ime::probe_target_kind(handler)),
                         handler.query_should_auto_show_ime(),
@@ -1134,7 +1163,6 @@ impl AndroidPlatform {
                 let mut state = window_ptr.state.borrow_mut();
                 state.ime_composition_start = None;
                 state.ime_composition_text = None;
-                state.ime_recently_finished_composition = None;
             }
             crate::ime::restart_input_for_kind(android_app, extra_window_id, kind);
             window_ptr.state.borrow_mut().last_ime_target_kind = Some(kind);
@@ -1160,7 +1188,6 @@ impl AndroidPlatform {
                 let mut state = window_ptr.state.borrow_mut();
                 state.ime_composition_start = None;
                 state.ime_composition_text = None;
-                state.ime_recently_finished_composition = None;
             }
         }
 
@@ -1342,10 +1369,16 @@ impl AndroidPlatform {
                 let Some(native_window) = self.android_app.native_window() else {
                     return;
                 };
+                // A drawable resize does not imply a density change. Re-reading
+                // AConfiguration while SurfaceView is moving between IME
+                // animation frames can observe a transient configuration and
+                // lay out one frame at the wrong scale. Density is refreshed by
+                // ConfigChanged below, which is Android's authoritative signal.
+                let scale_factor = window_ptr.state.borrow().scale_factor;
                 window_ptr.resize_surface(
                     native_window.width() as u32,
                     native_window.height() as u32,
-                    self.compute_scale_factor(),
+                    scale_factor,
                 );
             }
             MainEvent::ConfigChanged { .. } => {
@@ -1374,6 +1407,22 @@ impl AndroidPlatform {
                 self.common.borrow_mut().running = false;
             }
             _ => {}
+        }
+    }
+
+    fn tick_viewport_bottom_inset(&self) {
+        let bottom_inset_px = VIEWPORT_BOTTOM_INSET_PX.load(Ordering::Acquire);
+        let window = {
+            let mut common = self.common.borrow_mut();
+            if common.last_viewport_bottom_inset_px == bottom_inset_px {
+                return;
+            }
+            common.last_viewport_bottom_inset_px = bottom_inset_px;
+            common.window.clone()
+        };
+
+        if let Some(window) = window {
+            window.set_content_bottom_inset(bottom_inset_px as u32);
         }
     }
 }
@@ -1458,16 +1507,10 @@ impl Platform for AndroidPlatform {
             self.drain_ime_events();
             self.drain_voice_prompts();
 
-            // Reconcile IME visibility against the primary window's
-            // `input_handler` presence. Edge-triggered at frame
-            // boundaries — gpui's take/set oscillation within each
-            // paint can't leak through because we're sampling between
-            // ticks, not inside set/take callbacks.
-            self.reconcile_ime_visibility();
-            self.tick_soft_keyboard_visibility();
             self.tick_trackpad_mode_active();
             self.tick_extras_row_enabled();
             self.tick_soft_keyboard_setting();
+            self.tick_viewport_bottom_inset();
 
             // Refresh on vsync (FRAME_PENDING set by Choreographer
             // callback) or after main-thread events that may have
@@ -1496,6 +1539,14 @@ impl Platform for AndroidPlatform {
                 // the inside; safe to call every frame.
                 crate::splash::mark_zed_ready();
             }
+
+            // Focus changes install their PlatformInputHandler during paint.
+            // Reconcile afterwards so a tap that moves between two editors is
+            // tested against the new target, never the previous frame's one.
+            // Sampling here also keeps gpui's take/set oscillation internal to
+            // paint from leaking into Android keyboard visibility.
+            self.reconcile_ime_visibility();
+            self.tick_soft_keyboard_visibility();
         }
 
         log::info!("AndroidPlatform::run: exiting event loop");
@@ -1643,6 +1694,10 @@ impl Platform for AndroidPlatform {
             .prompt
             .as_ref()
             .is_some_and(|prompt| prompt.as_ref() == "Import Folder");
+        let images_only = options
+            .prompt
+            .as_ref()
+            .is_some_and(|prompt| prompt.as_ref() == "Select Images");
         log::info!(
             "AndroidPlatform::prompt_for_paths invoked prompt={:?} import_foreign_trees={} force_import_tree={}",
             options.prompt,
@@ -1651,7 +1706,7 @@ impl Platform for AndroidPlatform {
         );
         let (tx, rx) = oneshot::channel();
         if options.files && !options.directories {
-            crate::saf::pick_file(&self.android_app, tx);
+            crate::saf::pick_file(&self.android_app, tx, images_only, options.multiple);
         } else {
             crate::saf::pick_folder(
                 &self.android_app,
@@ -1660,6 +1715,12 @@ impl Platform for AndroidPlatform {
                 force_import_tree,
             );
         }
+        rx
+    }
+
+    fn prompt_for_camera_image(&self) -> oneshot::Receiver<Result<Option<PathBuf>>> {
+        let (tx, rx) = oneshot::channel();
+        crate::saf::capture_image(&self.android_app, tx);
         rx
     }
 

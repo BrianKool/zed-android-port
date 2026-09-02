@@ -19,6 +19,8 @@ import android.view.inputmethod.InputConnection
 /// without affecting touch dispatch (the two are independent in
 /// Android's input model).
 class ImeHostView(context: Context) : View(context) {
+    private var inputConnection: ZdroidInputConnection? = null
+
     init {
         isFocusable = true
         isFocusableInTouchMode = true
@@ -111,7 +113,10 @@ class ImeHostView(context: Context) : View(context) {
             EditorInfo.IME_FLAG_NO_FULLSCREEN or
                 EditorInfo.IME_FLAG_NO_EXTRACT_UI or
                 EditorInfo.IME_FLAG_NO_PERSONALIZED_LEARNING
-        return ZdroidInputConnection(this)
+        return ZdroidInputConnection(this).also { inputConnection = it }
     }
+
+    fun reconcileTextState(state: ImeTextState): Boolean =
+        inputConnection?.reconcileTextState(state) ?: false
 
 }

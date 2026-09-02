@@ -118,6 +118,43 @@ class VoicePipelineTest {
     }
 
     @Test
+    fun speechPolicyWaitsWhenPrivateReasoningOrCodeIsStillStreaming() {
+        val token = VoiceTurnManager.Token(1, 1)
+        assertEquals(
+            "",
+            VoiceSpeechPolicy.prepare(
+                VoiceOrchestrator.AgentEvent.Message(token, "<analysis>still deciding"),
+            ),
+        )
+        assertEquals(
+            "I found the issue.",
+            VoiceSpeechPolicy.prepare(
+                VoiceOrchestrator.AgentEvent.Message(
+                    token,
+                    "<reasoning>private</reasoning>I found the issue. ```kotlin\nval pending = true",
+                ),
+            ),
+        )
+    }
+
+    @Test
+    fun speechPolicyKeepsPublicStatusButDropsToolEvents() {
+        val token = VoiceTurnManager.Token(1, 1)
+        assertEquals(
+            "I am checking the project.",
+            VoiceSpeechPolicy.prepare(
+                VoiceOrchestrator.AgentEvent.Status(token, "I am checking the project."),
+            ),
+        )
+        assertEquals(
+            "",
+            VoiceSpeechPolicy.prepare(
+                VoiceOrchestrator.AgentEvent.ToolStarted(token, "Read settings.json"),
+            ),
+        )
+    }
+
+    @Test
     fun endpointingLearnsSessionPauseCadenceWithinBounds() {
         val endpointing = DynamicEndpointing()
         endpointing.speechEnded(1_000)

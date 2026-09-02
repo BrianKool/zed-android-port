@@ -773,11 +773,19 @@ impl Dock {
                         }
                     }
                     PanelEvent::Close => {
-                        if this
+                        let was_visible = this
                             .visible_panel()
-                            .is_some_and(|p| p.panel_id() == Entity::entity_id(panel))
-                        {
+                            .is_some_and(|p| p.panel_id() == Entity::entity_id(panel));
+                        if was_visible {
                             this.set_open(false, window, cx);
+                            let workspace = workspace.clone();
+                            cx.defer_in(window, move |_dock, window, cx| {
+                                workspace
+                                    .update(cx, |workspace, cx| {
+                                        workspace.restore_suspended_zoomed_dock(window, cx);
+                                    })
+                                    .ok();
+                            });
                         }
                     }
                 },

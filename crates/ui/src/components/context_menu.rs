@@ -307,8 +307,13 @@ impl ContextMenu {
         // pattern, opening a menu places focus on a menu item; for select-style
         // menus we prefer the currently-checked item. We only do this when
         // nothing is selected yet so we don't override an existing selection.
+        // Touch users select an item directly; preselecting the first item
+        // consumes the first tap intended to open a submenu.
         cx.on_focus_in(&focus_handle, window, |this, window, cx| {
-            if this.selected_index.is_none() && !this.suppress_focus_selection {
+            if this.selected_index.is_none()
+                && !this.suppress_focus_selection
+                && !window.last_input_was_touch()
+            {
                 this.select_toggled_or_first(window, cx);
             }
             this.suppress_focus_selection = false;
@@ -396,7 +401,7 @@ impl ContextMenu {
             // See the note in `ContextMenu::new`: select an item when the menu
             // opens so screen readers announce it instead of just "menu".
             cx.on_focus_in(&focus_handle, window, |this, window, cx| {
-                if this.selected_index.is_none() {
+                if this.selected_index.is_none() && !window.last_input_was_touch() {
                     this.select_toggled_or_first(window, cx);
                 }
             })

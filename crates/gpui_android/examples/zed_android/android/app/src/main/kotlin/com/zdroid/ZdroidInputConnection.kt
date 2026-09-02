@@ -6,6 +6,8 @@ import android.view.View
 import android.view.inputmethod.BaseInputConnection
 import android.view.inputmethod.ExtractedText
 import android.view.inputmethod.ExtractedTextRequest
+import android.view.inputmethod.InputMethodManager
+import java.util.concurrent.atomic.AtomicLong
 
 private const val TAG = "zdroid_ime"
 
@@ -27,7 +29,60 @@ private const val TAG = "zdroid_ime"
 /// event. Returning `false` would cause the IME to fall back to
 /// posting the text as KeyEvents, which we explicitly don't want
 /// (loses composition info).
-class ZdroidInputConnection(private val hostView: View) : BaseInputConnection(hostView, /* fullEditor = */ true) {
+class ZdroidInputConnection(private val hostView: View) :
+    BaseInputConnection(hostView, /* fullEditor = */ true) {
+    private val connectionId = nextConnectionId.getAndIncrement()
+    private val windowId: Long = (hostView.context as? ImeHost)?.imeWindowId ?: 0L
+    private var shadowState: ImeTextState =
+        (hostView.context as? ImeHost)?.getImeTextState() ?: ImeTextState.EMPTY
+    private var localRevision: Long = shadowState.revision
+    private var batchDepth = 0
+    private var deferredState: ImeTextState? = null
+
+    init {
+        NativeBridge.nativeImeConnectionOpened(windowId, connectionId, localRevision)
+    }
+
+    private fun nextRevision(): Long = ++localRevision
+
+    fun reconcileTextState(state: ImeTextState): Boolean {
+        if (state.revision < localRevision) return false
+        if (batchDepth > 0) {
+            if (deferredState == null || state.revision >= deferredState!!.revision) {
+                deferredState = state
+            }
+            return false
+        }
+        shadowState = state
+        localRevision = state.revision
+        return true
+    }
+
+    override fun beginBatchEdit(): Boolean {
+        batchDepth += 1
+        return true
+    }
+
+    override fun endBatchEdit(): Boolean {
+        if (batchDepth == 0) return false
+        batchDepth -= 1
+        if (batchDepth == 0) {
+            deferredState?.let { state ->
+                deferredState = null
+                if (reconcileTextState(state)) {
+                    val imm = hostView.context.getSystemService(InputMethodManager::class.java)
+                    imm?.updateSelection(
+                        hostView,
+                        state.selectionStart,
+                        state.selectionEnd,
+                        state.composingStart,
+                        state.composingEnd,
+                    )
+                }
+            }
+        }
+        return true
+    }
 
     override fun commitText(text: CharSequence?, newCursorPosition: Int): Boolean {
         val s = text?.toString() ?: ""
@@ -111,26 +166,54 @@ class ZdroidInputConnection(private val hostView: View) : BaseInputConnection(ho
             Log.i(TAG, "IC.commitText w=$windowId vim-route fallthrough (no keymap) len=${s.length}")
         }
         Log.d(TAG, "IC.commitText w=$windowId length=${s.length} cursor=$newCursorPosition")
-        NativeBridge.nativeImeCommitText(windowId, s, newCursorPosition)
+        val revision = nextRevision()
+        shadowState = shadowState.withCommittedText(s, newCursorPosition, revision)
+        NativeBridge.nativeImeCommitText(windowId, connectionId, s, newCursorPosition, revision)
         return true
     }
 
     override fun setComposingText(text: CharSequence?, newCursorPosition: Int): Boolean {
         val s = text?.toString() ?: ""
         Log.d(TAG, "IC.setComposingText w=$windowId length=${s.length} cursor=$newCursorPosition")
-        NativeBridge.nativeImeSetComposingText(windowId, s, newCursorPosition)
+        val revision = nextRevision()
+        shadowState = shadowState.withComposingText(s, newCursorPosition, revision)
+        NativeBridge.nativeImeSetComposingText(windowId, connectionId, s, newCursorPosition, revision)
+        return true
+    }
+
+    override fun setComposingRegion(start: Int, end: Int): Boolean {
+        val revision = nextRevision()
+        shadowState = shadowState.withComposingRegion(start, end, revision)
+        NativeBridge.nativeImeSetComposingRegion(windowId, connectionId, start, end, revision)
+        return true
+    }
+
+    override fun setSelection(start: Int, end: Int): Boolean {
+        val revision = nextRevision()
+        shadowState = shadowState.withSelection(start, end, revision)
+        NativeBridge.nativeImeSetSelection(windowId, connectionId, start, end, revision)
         return true
     }
 
     override fun finishComposingText(): Boolean {
         Log.i(TAG, "IC.finishComposingText w=$windowId")
-        NativeBridge.nativeImeFinishComposingText(windowId)
+        val revision = nextRevision()
+        shadowState = shadowState.withoutComposition(revision)
+        NativeBridge.nativeImeFinishComposingText(windowId, connectionId, revision)
         return true
     }
 
     override fun deleteSurroundingText(beforeLength: Int, afterLength: Int): Boolean {
         Log.i(TAG, "IC.deleteSurroundingText w=$windowId before=$beforeLength after=$afterLength")
-        NativeBridge.nativeImeDeleteSurroundingText(windowId, beforeLength, afterLength)
+        val revision = nextRevision()
+        shadowState = shadowState.deletingSurroundingText(beforeLength, afterLength, revision)
+        NativeBridge.nativeImeDeleteSurroundingText(
+            windowId,
+            connectionId,
+            beforeLength,
+            afterLength,
+            revision,
+        )
         return true
     }
 
@@ -181,6 +264,7 @@ class ZdroidInputConnection(private val hostView: View) : BaseInputConnection(ho
             android.R.id.cut -> COMMAND_CUT
             android.R.id.copy -> COMMAND_COPY
             android.R.id.paste, android.R.id.pasteAsPlainText -> COMMAND_PASTE
+            android.R.id.selectAll -> COMMAND_SELECT_ALL
             else -> return super.performContextMenuAction(id)
         }
         Log.i(TAG, "IC.performContextMenuAction w=$windowId id=$id command=$command")
@@ -198,15 +282,12 @@ class ZdroidInputConnection(private val hostView: View) : BaseInputConnection(ho
     // `ImeTextState` mirror, which Rust pushes via JNI on every text
     // change.
 
-    private fun mirror(): ImeTextState =
-        (hostView.context as? ImeHost)?.getImeTextState() ?: ImeTextState.EMPTY
+    private fun mirror(): ImeTextState = shadowState
 
     /// Identifier of the gpui window this host's input flows
     /// into. Passed through to every `nativeIme*` JNI call so Rust
     /// can route the event to the right window's
     /// `PlatformInputHandler`. `0` = primary (MainActivity).
-    private val windowId: Long = (hostView.context as? ImeHost)?.imeWindowId ?: 0L
-
     override fun getTextBeforeCursor(n: Int, flags: Int): CharSequence? {
         val text = mirror().textBeforeCursor(n)
         Log.i(TAG, "IC.getTextBeforeCursor n=$n -> len=${text.length}")
@@ -236,8 +317,10 @@ class ZdroidInputConnection(private val hostView: View) : BaseInputConnection(ho
     }
 
     companion object {
+        private val nextConnectionId = AtomicLong(1L)
         private const val COMMAND_CUT = 1
         private const val COMMAND_COPY = 2
         private const val COMMAND_PASTE = 3
+        private const val COMMAND_SELECT_ALL = 5
     }
 }

@@ -1583,6 +1583,13 @@ impl App {
         self.platform.prompt_for_paths(options)
     }
 
+    /// Opens the platform camera and returns the captured image path.
+    ///
+    /// Platforms without a camera return `None`.
+    pub fn prompt_for_camera_image(&self) -> oneshot::Receiver<Result<Option<PathBuf>>> {
+        self.platform.prompt_for_camera_image()
+    }
+
     /// Displays a platform modal for selecting a new path where a file can be saved.
     ///
     /// The provided directory will be used to set the initial location.

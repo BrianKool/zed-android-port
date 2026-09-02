@@ -1,6 +1,8 @@
 use std::{ops::Range, sync::Arc};
 
-use acp_thread::{AcpThread, AgentThreadEntry, AssistantMessageChunk};
+use acp_thread::{
+    AcpThread, AgentThreadEntry, AssistantMessageChunk, sanitize_user_visible_contents,
+};
 use agent::ThreadStore;
 use agent_client_protocol::schema::v1 as acp;
 use agent_settings::AgentSettings;
@@ -152,6 +154,7 @@ impl EntryViewState {
 
     pub(crate) fn toggle_thinking_block_expansion(&mut self, key: (usize, usize), cx: &App) {
         match AgentSettings::get_global(cx).thinking_display {
+            ThinkingBlockDisplay::Hidden => {}
             ThinkingBlockDisplay::Auto => {
                 let is_open = self.expanded_thinking_blocks.contains(&key)
                     || self.user_toggled_thinking_blocks.contains(&key);
@@ -202,6 +205,7 @@ impl EntryViewState {
         let is_in_expanded_set = self.expanded_thinking_blocks.contains(&key);
 
         match AgentSettings::get_global(cx).thinking_display {
+            ThinkingBlockDisplay::Hidden => (false, false),
             ThinkingBlockDisplay::Auto => {
                 let is_open = is_user_toggled || is_in_expanded_set;
                 (is_open, false)
@@ -236,7 +240,7 @@ impl EntryViewState {
                 let can_rewind = thread.read(cx).supports_truncate(cx);
                 let has_client_id = message.client_id.is_some();
                 let is_subagent = thread.read(cx).parent_session_id().is_some();
-                let chunks = message.chunks.clone();
+                let chunks = sanitize_user_visible_contents(&message.chunks);
                 if let Some(Entry::UserMessage(editor)) = self.entries.get_mut(index) {
                     if !editor.focus_handle(cx).is_focused(window) {
                         // Only update if we are not editing.

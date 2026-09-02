@@ -4354,7 +4354,7 @@ impl Thread {
         let use_mobile_local_prompt = self
             .model()
             .is_some_and(|model| model.provider_id().0.as_ref() == ZDROID_LOCAL_PROVIDER_ID);
-        let mut system_prompt = if use_mobile_local_prompt {
+        let system_prompt = if use_mobile_local_prompt {
             MobileLocalSystemPromptTemplate {
                 project,
                 available_tools,
@@ -4383,6 +4383,8 @@ impl Thread {
         .context("failed to build system prompt")
         .expect("Invalid template");
         #[cfg(target_os = "android")]
+        let mut system_prompt = system_prompt;
+        #[cfg(target_os = "android")]
         system_prompt.push_str(
             "\n\n## Zdroid-B Runtime\n\
              - This is Android with a Termux-flavored Bionic bootstrap, not Ubuntu.\n\
@@ -4393,6 +4395,17 @@ impl Thread {
              - If software is incompatible, explain whether it needs Android/Bionic, Linux glibc, Linux musl, a static ARM64 binary, or a Managed Linux container. Do not silently substitute another environment.\n\
              - Use `zd-service` only for user-requested background services. List tracked sessions before stopping one.\n",
         );
+        #[cfg(target_os = "android")]
+        system_prompt.push_str(match AgentSettings::get_global(cx).output_language {
+            settings::AgentOutputLanguage::Auto =>
+                "\n\n## Response Language\nRespond in the same language and writing system as the user's latest message unless the user explicitly requests another language.\n",
+            settings::AgentOutputLanguage::English =>
+                "\n\n## Response Language\nRespond in English unless the user explicitly requests another language.\n",
+            settings::AgentOutputLanguage::TraditionalChinese =>
+                "\n\n## Response Language\nRespond in Traditional Chinese (Taiwan), never Simplified Chinese, unless the user explicitly requests another language.\n",
+            settings::AgentOutputLanguage::SimplifiedChinese =>
+                "\n\n## Response Language\nRespond in Simplified Chinese unless the user explicitly requests another language.\n",
+        });
         let mut messages = vec![LanguageModelRequestMessage {
             role: Role::System,
             content: vec![system_prompt.into()],

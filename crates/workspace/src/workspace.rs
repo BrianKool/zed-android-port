@@ -1384,6 +1384,8 @@ pub struct Workspace {
     zoomed: Option<AnyWeakView>,
     previous_dock_drag_coordinates: Option<Point<Pixels>>,
     zoomed_position: Option<DockPosition>,
+    #[cfg(target_os = "android")]
+    suspended_zoomed_docks: Vec<DockPosition>,
     maximized_pane: Option<WeakEntity<Pane>>,
     center: PaneGroup,
     left_dock: Entity<Dock>,
@@ -1839,6 +1841,8 @@ impl Workspace {
             weak_self: weak_handle.clone(),
             zoomed: None,
             zoomed_position: None,
+            #[cfg(target_os = "android")]
+            suspended_zoomed_docks: Vec::new(),
             maximized_pane: None,
             previous_dock_drag_coordinates: None,
             center,
@@ -4230,6 +4234,10 @@ impl Workspace {
                 .update(cx, |pane, cx| window.focus(&pane.focus_handle(cx), cx))
         }
 
+        if was_visible {
+            self.restore_suspended_zoomed_dock(window, cx);
+        }
+
         cx.notify();
         self.serialize_workspace(window, cx);
     }
@@ -4246,6 +4254,7 @@ impl Workspace {
             dock.update(cx, |dock, cx| {
                 dock.set_open(false, window, cx);
             });
+            self.restore_suspended_zoomed_dock(window, cx);
             return true;
         }
         false
@@ -4473,7 +4482,7 @@ impl Workspace {
         self.open_panel::<T>(window, cx);
     }
 
-    pub fn close_panel<T: Panel>(&self, window: &mut Window, cx: &mut Context<Self>) {
+    pub fn close_panel<T: Panel>(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         for dock in self.all_docks().iter() {
             dock.update(cx, |dock, cx| {
                 if dock.panel::<T>().is_some() {
@@ -4481,6 +4490,37 @@ impl Workspace {
                 }
             })
         }
+        self.restore_suspended_zoomed_dock(window, cx);
+    }
+
+    #[cfg(target_os = "android")]
+    pub(crate) fn restore_suspended_zoomed_dock(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        while let Some(position) = self.suspended_zoomed_docks.pop() {
+            let dock = self.dock_at_position(position).clone();
+            let panel = dock.read(cx).active_panel().cloned();
+            let Some(panel) = panel.filter(|panel| panel.is_zoomed(window, cx)) else {
+                continue;
+            };
+            dock.update(cx, |dock, cx| dock.set_open(true, window, cx));
+            self.zoomed = Some(panel.to_any().downgrade());
+            self.zoomed_position = Some(position);
+            panel.activation_focus_handle(cx).focus(window, cx);
+            cx.emit(Event::ZoomChanged);
+            cx.notify();
+            break;
+        }
+    }
+
+    #[cfg(not(target_os = "android"))]
+    pub(crate) fn restore_suspended_zoomed_dock(
+        &mut self,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) {
     }
 
     pub fn panel<T: Panel>(&self, cx: &App) -> Option<Entity<T>> {
@@ -4504,16 +4544,31 @@ impl Workspace {
 
         // If another dock is zoomed, hide it.
         let mut focus_center = false;
-        for dock in self.all_docks() {
-            dock.update(cx, |dock, cx| {
+        let docks = self.all_docks().map(Clone::clone);
+        for dock in docks {
+            let hidden_zoomed_dock = dock.update(cx, |dock, cx| {
                 if Some(dock.position()) != dock_to_reveal
                     && let Some(panel) = dock.active_panel()
                     && panel.is_zoomed(window, cx)
                 {
-                    focus_center |= panel.panel_focus_handle(cx).contains_focused(window, cx);
+                    let had_focus = panel.panel_focus_handle(cx).contains_focused(window, cx);
+                    let position = dock.position();
                     dock.set_open(false, window, cx);
+                    return Some((position, had_focus));
                 }
+                None
             });
+            if let Some((hidden_position, had_focus)) = hidden_zoomed_dock {
+                focus_center |= had_focus;
+                #[cfg(target_os = "android")]
+                if dock_to_reveal.is_some()
+                    && !self.suspended_zoomed_docks.contains(&hidden_position)
+                {
+                    self.suspended_zoomed_docks.push(hidden_position);
+                }
+                #[cfg(not(target_os = "android"))]
+                let _ = hidden_position;
+            }
         }
 
         if focus_center {

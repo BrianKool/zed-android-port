@@ -635,6 +635,8 @@ mod tests {
             cancel_generation_on_terminal_stop: true,
             use_modifier_to_send: true,
             message_editor_min_lines: 1,
+            collapse_message_editor_on_send: false,
+            output_language: Default::default(),
             tool_permissions,
             sandbox_permissions: Default::default(),
             show_turn_stats: false,

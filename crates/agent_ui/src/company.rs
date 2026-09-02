@@ -612,6 +612,7 @@ impl CompanyModal {
         cx.new(|cx| {
             let mut editor = Editor::auto_height(3, 10, window, cx);
             editor.set_placeholder_text(placeholder, window, cx);
+            editor.set_auto_show_ime(true);
             editor
         })
     }
@@ -764,9 +765,6 @@ impl CompanyModal {
             editor.set_text(text, window, cx);
             editor.focus_handle(cx).focus(window, cx);
         });
-        if cfg!(target_os = "android") && !window.soft_keyboard_visible() {
-            window.toggle_soft_keyboard();
-        }
         cx.notify();
     }
 
@@ -1102,9 +1100,6 @@ impl CompanyModal {
                         this.capture_any_mouse_down(move |event: &MouseDownEvent, window, cx| {
                             if event.button == MouseButton::Left {
                                 focus_editor.read(cx).focus_handle(cx).focus(window, cx);
-                                if !window.soft_keyboard_visible() {
-                                    window.toggle_soft_keyboard();
-                                }
                                 focus_scroll_anchor.scroll_to_center_after_frames(48, window, cx);
                             }
                         })
@@ -1160,9 +1155,6 @@ impl CompanyModal {
                         this.capture_any_mouse_down(move |event: &MouseDownEvent, window, cx| {
                             if event.button == MouseButton::Left {
                                 focus_editor.read(cx).focus_handle(cx).focus(window, cx);
-                                if !window.soft_keyboard_visible() {
-                                    window.toggle_soft_keyboard();
-                                }
                                 focus_scroll_anchor.scroll_to_center_after_frames(48, window, cx);
                             }
                         })

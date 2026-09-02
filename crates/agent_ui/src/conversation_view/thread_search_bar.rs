@@ -630,6 +630,7 @@ impl ThreadSearchBar {
     }
 
     fn dismiss(&mut self, _: &DismissThreadSearch, _window: &mut Window, cx: &mut Context<Self>) {
+        cx.stop_propagation();
         self.clear_highlights(cx);
         cx.emit(ThreadSearchBarEvent::Dismissed);
     }
@@ -870,6 +871,7 @@ fn nav_button(
         .on_click({
             let focus_handle = focus_handle.clone();
             move |_, window, cx| {
+                cx.stop_propagation();
                 if !focus_handle.is_focused(window) {
                     window.focus(&focus_handle, cx);
                 }

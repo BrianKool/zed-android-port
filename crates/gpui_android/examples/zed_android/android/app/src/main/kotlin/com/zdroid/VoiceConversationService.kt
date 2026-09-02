@@ -11,6 +11,9 @@ import android.icu.text.Transliterator
 import android.media.AudioManager
 import android.media.AudioAttributes
 import android.media.AudioFocusRequest
+import android.media.AudioDeviceCallback
+import android.media.AudioDeviceInfo
+import android.media.MediaPlayer
 import android.os.Build
 import android.os.Bundle
 import android.os.Handler
@@ -68,12 +71,14 @@ class VoiceConversationService : Service(), RecognitionListener, TextToSpeech.On
     private var muted = false
     private var voiceMode = VoiceMode.ACTIVE
     private var isListening = false
-    private var speakerEnabled = true
+    private var speakerEnabled = VoicePreferences.DEFAULT_SPEAKER_ENABLED
     private var speechOutputEnabled = true
+    private var readyCuePlayer: MediaPlayer? = null
+    private var readyCuePlaying = false
     private var threadId = ""
     private var stage = Stage.LISTENING
     private var stageRevision = 0L
-    private var languages = linkedSetOf("zh-TW", "en-US")
+    private var inputLanguage = VoicePreferences.INPUT_LANGUAGE_AUTO
     private var lastStreamingResponse = ""
     private val streamingBuffer = StringBuilder()
     private var latestPartialTranscript = ""
@@ -106,18 +111,26 @@ class VoiceConversationService : Service(), RecognitionListener, TextToSpeech.On
     }
     private val flushStreamingSpeech = Runnable {
         streamingFlushScheduled = false
-        drainStreamingBuffer(force = true)
+        drainStreamingBuffer(force = false)
     }
     private val finalizePartialTurn = Runnable {
         val transcript = latestPartialTranscript.trim()
         val stableFor = (SystemClock.elapsedRealtime() - partialFirstSeenAt).coerceAtLeast(0L)
         if (transcript.isNotEmpty() &&
             transcript != lastSubmittedTranscript &&
-            partialStabilityCount >= MIN_PARTIAL_STABILITY_COUNT &&
-            stableFor >= MIN_PARTIAL_STABLE_MS &&
+            isStablePartialTranscript(
+                repeatedObservations = partialStabilityCount,
+                requiredRepeatedObservations = MIN_PARTIAL_STABILITY_COUNT,
+                unchangedForMs = stableFor,
+                stableWindowMs = MIN_PARTIAL_STABLE_MS,
+            ) &&
             shouldListen()
         ) {
-            Log.i(TAG, "finalizing partial transcript after silence (${transcript.length} chars)")
+            Log.i(
+                TAG,
+                "finalizing stable partial transcript count=$partialStabilityCount " +
+                    "age=${stableFor}ms (${transcript.length} chars)",
+            )
             submitRecognizedTranscript(transcript, confidence = null)
         } else if (transcript.isNotEmpty()) {
             Log.i(TAG, "discarding unstable partial transcript count=$partialStabilityCount age=${stableFor}ms")
@@ -153,16 +166,24 @@ class VoiceConversationService : Service(), RecognitionListener, TextToSpeech.On
     private var foregroundStarted = false
     private var callStartedAt = 0L
     private var audioFocusRequest: AudioFocusRequest? = null
+    private val audioDeviceCallback = object : AudioDeviceCallback() {
+        override fun onAudioDevicesAdded(addedDevices: Array<out AudioDeviceInfo>?) {
+            updateAudioRoute()
+        }
+
+        override fun onAudioDevicesRemoved(removedDevices: Array<out AudioDeviceInfo>?) {
+            updateAudioRoute()
+        }
+    }
 
     override fun onCreate() {
         super.onCreate()
         Log.i(TAG, "voice service created sdk=${Build.VERSION.SDK_INT}")
         ensureChannel(this)
         val preferences = getSharedPreferences("zdroid_voice", Context.MODE_PRIVATE)
-        speakerEnabled = preferences.getBoolean("speaker", true)
+        speakerEnabled = VoicePreferences.speakerEnabled(preferences)
         speechOutputEnabled = preferences.getBoolean("speech_output", true)
-        languages = (preferences.getStringSet("languages", setOf("zh-TW", "en-US"))
-            ?: setOf("zh-TW", "en-US")).toCollection(linkedSetOf())
+        inputLanguage = VoicePreferences.inputLanguage(preferences)
         callStartedAt = preferences.getLong("call_started_at", 0L).takeIf { it > 0L }
             ?: System.currentTimeMillis().also {
                 preferences.edit().putLong("call_started_at", it).apply()
@@ -170,6 +191,8 @@ class VoiceConversationService : Service(), RecognitionListener, TextToSpeech.On
         tts = TextToSpeech(this, this)
         createRecognizer(preferOnDevice = false)
         realtimeCapture = RealtimeVoiceCapture(this, vadBenchmark::processPcm16)
+        (getSystemService(AUDIO_SERVICE) as AudioManager)
+            .registerAudioDeviceCallback(audioDeviceCallback, streamingHandler)
         updateAudioRoute()
     }
 
@@ -214,18 +237,17 @@ class VoiceConversationService : Service(), RecognitionListener, TextToSpeech.On
                     .edit().putBoolean("speaker", speakerEnabled).apply()
                 updateAudioRoute()
             }
-            ACTION_SET_LANGUAGES -> {
-                languages = intent?.getStringArrayListExtra(EXTRA_LANGUAGES)
-                    ?.filterTo(linkedSetOf()) { it == "zh-TW" || it == "en-US" }
-                    ?.takeIf { it.isNotEmpty() }
-                    ?: linkedSetOf("zh-TW", "en-US")
+            ACTION_SET_INPUT_LANGUAGE -> {
+                inputLanguage = intent?.getStringExtra(EXTRA_INPUT_LANGUAGE)
+                    ?.takeIf { it in SUPPORTED_INPUT_LANGUAGES }
+                    ?: VoicePreferences.INPUT_LANGUAGE_AUTO
                 getSharedPreferences("zdroid_voice", Context.MODE_PRIVATE)
-                    .edit().putStringSet("languages", languages).apply()
+                    .edit().putString("input_language", inputLanguage).apply()
                 stopListening()
                 scheduleListening(200)
             }
             ACTION_SET_AUDIO_OUTPUT -> {
-                speakerEnabled = intent?.getBooleanExtra(EXTRA_SPEAKER, true) ?: true
+                speakerEnabled = intent?.getBooleanExtra(EXTRA_SPEAKER, false) ?: false
                 getSharedPreferences("zdroid_voice", Context.MODE_PRIVATE)
                     .edit().putBoolean("speaker", speakerEnabled).apply()
                 updateAudioRoute()
@@ -278,12 +300,13 @@ class VoiceConversationService : Service(), RecognitionListener, TextToSpeech.On
             acquireCallResources()
         }
         ensureForeground()
-        if (intent?.action in setOf(
+        if (intent?.action == ACTION_START) {
+            playReadyCue()
+        } else if (intent?.action in setOf(
                 null,
-                ACTION_START,
                 ACTION_TOGGLE_MUTE,
                 ACTION_TOGGLE_SPEAKER,
-                ACTION_SET_LANGUAGES,
+                ACTION_SET_INPUT_LANGUAGE,
                 ACTION_SET_AUDIO_OUTPUT,
                 ACTION_SET_SPEECH_OUTPUT,
                 ACTION_PAUSE,
@@ -302,16 +325,27 @@ class VoiceConversationService : Service(), RecognitionListener, TextToSpeech.On
         Log.i(TAG, "voice service destroyed")
         active = false
         recognizer?.destroy()
+        (getSystemService(AUDIO_SERVICE) as AudioManager)
+            .unregisterAudioDeviceCallback(audioDeviceCallback)
         stopRealtimeCapture()
         streamingHandler.removeCallbacksAndMessages(null)
         inputWorker.shutdownNow()
         outputWorker.shutdownNow()
         tts?.shutdown()
+        releaseReadyCue()
         ttsRequestTimes.clear()
         ttsPcmTimes.clear()
         releaseCallResources()
         sessionActive.set(false)
-        (getSystemService(AUDIO_SERVICE) as AudioManager).mode = AudioManager.MODE_NORMAL
+        (getSystemService(AUDIO_SERVICE) as AudioManager).apply {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                clearCommunicationDevice()
+            } else {
+                @Suppress("DEPRECATION")
+                run { isSpeakerphoneOn = false }
+            }
+            mode = AudioManager.MODE_NORMAL
+        }
         super.onDestroy()
     }
 
@@ -321,7 +355,13 @@ class VoiceConversationService : Service(), RecognitionListener, TextToSpeech.On
         ttsReady = status == TextToSpeech.SUCCESS
         Log.i(TAG, "TTS initialized status=$status ready=$ttsReady engine=${tts?.defaultEngine}")
         if (ttsReady) {
-            tts?.language = Locale.getDefault()
+            tts?.language = Locale.US
+            tts?.setAudioAttributes(
+                AudioAttributes.Builder()
+                    .setUsage(AudioAttributes.USAGE_VOICE_COMMUNICATION)
+                    .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+                    .build(),
+            )
             tts?.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
                 override fun onStart(utteranceId: String?) {
                     latency.mark("audio_start")
@@ -358,6 +398,13 @@ class VoiceConversationService : Service(), RecognitionListener, TextToSpeech.On
                     utteranceId?.let { speechScheduler.markRange(it, end) }
                 }
                 override fun onError(utteranceId: String?) {
+                    handleTtsError(utteranceId, null)
+                }
+                override fun onError(utteranceId: String?, errorCode: Int) {
+                    handleTtsError(utteranceId, errorCode)
+                }
+                private fun handleTtsError(utteranceId: String?, errorCode: Int?) {
+                    Log.e(TAG, "TTS playback failed utterance=$utteranceId error=${errorCode ?: "unknown"}")
                     utteranceId?.let {
                         ttsRequestTimes.remove(it)
                         ttsPcmTimes.remove(it)
@@ -369,6 +416,7 @@ class VoiceConversationService : Service(), RecognitionListener, TextToSpeech.On
                             pumpSpeech()
                         }
                     }
+                    publishStage(Stage.ERROR, "Voice output failed${errorCode?.let { " (TTS $it)" }.orEmpty()}")
                 }
                 override fun onDone(utteranceId: String?) {
                     utteranceId?.let {
@@ -398,7 +446,7 @@ class VoiceConversationService : Service(), RecognitionListener, TextToSpeech.On
         }
         val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
             putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
-            val selected = languages.toList()
+            val selected = VoicePreferences.recognitionLanguages(inputLanguage)
             val primaryLanguage = if ("zh-TW" in selected) "zh-TW" else selected.firstOrNull() ?: "en-US"
             putExtra(RecognizerIntent.EXTRA_LANGUAGE, primaryLanguage)
             putExtra(RecognizerIntent.EXTRA_LANGUAGE_PREFERENCE, primaryLanguage)
@@ -439,7 +487,7 @@ class VoiceConversationService : Service(), RecognitionListener, TextToSpeech.On
                 }
             }
         }
-        Log.i(TAG, "starting recognizer realtime=$usesRealtimeCapture languages=$languages")
+        Log.i(TAG, "starting recognizer realtime=$usesRealtimeCapture inputLanguage=$inputLanguage")
         publishState(if (wakeOnly) "Voice paused - say 開始通話" else "Listening...")
         isListening = true
         runCatching { recognizer?.startListening(intent) }
@@ -492,7 +540,8 @@ class VoiceConversationService : Service(), RecognitionListener, TextToSpeech.On
         streamingHandler.postDelayed(restartListening, delayMs)
     }
 
-    private fun shouldListen(): Boolean = active && !muted && voiceMode != VoiceMode.ENDED
+    private fun shouldListen(): Boolean =
+        active && !muted && !readyCuePlaying && voiceMode != VoiceMode.ENDED
 
     private fun currentIdleState(): String = when {
         voiceMode == VoiceMode.WAKE_ONLY -> "Voice paused - say 開始通話"
@@ -553,7 +602,8 @@ class VoiceConversationService : Service(), RecognitionListener, TextToSpeech.On
 
     private fun traditionalChinese(text: String, transliterator: Transliterator?): String =
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q &&
-            "zh-TW" in languages && text.any { it.code in 0x3400..0x9FFF }
+            inputLanguage != VoicePreferences.INPUT_LANGUAGE_ENGLISH &&
+            text.any { it.code in 0x3400..0x9FFF }
         ) {
             transliterator?.transliterate(text) ?: text
         } else {
@@ -599,7 +649,9 @@ class VoiceConversationService : Service(), RecognitionListener, TextToSpeech.On
                 publishConversation()
             }
             when (event) {
-                is VoiceOrchestrator.AgentEvent.Thinking -> publishStage(Stage.THINKING)
+                is VoiceOrchestrator.AgentEvent.Thinking -> {
+                    if (lastStreamingResponse.isEmpty()) publishStage(Stage.THINKING)
+                }
                 is VoiceOrchestrator.AgentEvent.ToolStarted -> {
                     latency.replace("tool_start")
                     publishStage(Stage.TOOL, event.label)
@@ -611,7 +663,9 @@ class VoiceConversationService : Service(), RecognitionListener, TextToSpeech.On
                         "request-to-tool" to "agent_request->tool_start",
                         "tool-duration" to "tool_start->tool_done",
                     )
-                    publishStage(Stage.THINKING)
+                    publishStage(
+                        if (lastStreamingResponse.isEmpty()) Stage.THINKING else Stage.SPEAKING,
+                    )
                 }
                 is VoiceOrchestrator.AgentEvent.WaitingForUser -> publishStage(Stage.WAITING)
                 is VoiceOrchestrator.AgentEvent.Failed -> publishStage(Stage.ERROR, event.text)
@@ -654,7 +708,7 @@ class VoiceConversationService : Service(), RecognitionListener, TextToSpeech.On
         lastStreamingResponse = policyText
         if (speechOutputEnabled) {
             if (delta.isNotEmpty()) streamingBuffer.append(delta)
-            drainStreamingBuffer(force = delta.isEmpty())
+            drainStreamingBuffer(force = false)
             if (streamingBuffer.isNotEmpty()) scheduleStreamingFlush()
         }
     }
@@ -667,13 +721,7 @@ class VoiceConversationService : Service(), RecognitionListener, TextToSpeech.On
 
     private fun drainStreamingBuffer(force: Boolean) {
         while (streamingBuffer.isNotEmpty()) {
-            val boundary = streamingBuffer.indexOfFirst { it in charArrayOf('。', '！', '？', '.', '!', '?', '\n') }
-            val end = when {
-                boundary >= 0 -> boundary + 1
-                streamingBuffer.length >= 140 -> 140
-                force -> streamingBuffer.length
-                else -> return
-            }
+            val end = VoiceSpeechChunker.nextBoundary(streamingBuffer, force) ?: return
             val phrase = streamingBuffer.substring(0, end).trim()
             streamingBuffer.delete(0, end)
             if (phrase.isNotEmpty()) {
@@ -709,14 +757,34 @@ class VoiceConversationService : Service(), RecognitionListener, TextToSpeech.On
             return
         }
         if (!orchestrator.playbackStarted(speech.token)) return
-        val locale = if (speech.text.any { it.code in 0x3400..0x9FFF } && "zh-TW" in languages) {
+        val locale = if (speech.text.any { it.code in 0x3400..0x9FFF }) {
             Locale.TAIWAN
         } else {
             Locale.US
         }
-        tts?.language = locale
+        updateAudioRoute()
+        val engine = tts ?: return
+        val languageResult = engine.setLanguage(locale)
+        if (languageResult == TextToSpeech.LANG_MISSING_DATA ||
+            languageResult == TextToSpeech.LANG_NOT_SUPPORTED
+        ) {
+            Log.e(TAG, "TTS language unavailable locale=$locale result=$languageResult")
+            speechScheduler.fail(speech.id)
+            orchestrator.playbackFinished()
+            publishStage(Stage.ERROR, "Voice output does not support ${locale.displayName}")
+            pumpSpeech()
+            return
+        }
         ttsRequestTimes[speech.id] = SystemClock.elapsedRealtime()
-        tts?.speak(speech.text, TextToSpeech.QUEUE_FLUSH, null, speech.id)
+        val result = engine.speak(speech.text, TextToSpeech.QUEUE_FLUSH, null, speech.id)
+        if (result == TextToSpeech.ERROR) {
+            Log.e(TAG, "TTS rejected utterance=${speech.id} locale=$locale")
+            ttsRequestTimes.remove(speech.id)
+            speechScheduler.fail(speech.id)
+            orchestrator.playbackFinished()
+            publishStage(Stage.ERROR, "Voice output could not start")
+            pumpSpeech()
+        }
     }
 
     private fun resumeListeningAfterSpeech() {
@@ -1040,6 +1108,7 @@ class VoiceConversationService : Service(), RecognitionListener, TextToSpeech.On
     private fun stopConversation() {
         voiceMode = VoiceMode.ENDED
         stopListening()
+        releaseReadyCue()
         tts?.stop()
         ttsRequestTimes.clear()
         ttsPcmTimes.clear()
@@ -1062,8 +1131,88 @@ class VoiceConversationService : Service(), RecognitionListener, TextToSpeech.On
     private fun updateAudioRoute() {
         val audio = getSystemService(AUDIO_SERVICE) as AudioManager
         audio.mode = AudioManager.MODE_IN_COMMUNICATION
-        @Suppress("DEPRECATION")
-        audio.isSpeakerphoneOn = speakerEnabled
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            val devices = runCatching { audio.availableCommunicationDevices }.getOrElse {
+                Log.w(TAG, "could not inspect communication devices", it)
+                emptyList()
+            }
+            val external = devices.firstOrNull { it.type in EXTERNAL_AUDIO_DEVICE_TYPES }
+            val preferredType = if (speakerEnabled) {
+                AudioDeviceInfo.TYPE_BUILTIN_SPEAKER
+            } else {
+                AudioDeviceInfo.TYPE_BUILTIN_EARPIECE
+            }
+            val selected = external ?: devices.firstOrNull { it.type == preferredType }
+            if (selected != null) {
+                val routed = runCatching { audio.setCommunicationDevice(selected) }
+                    .onFailure { Log.w(TAG, "could not route communication audio", it) }
+                    .getOrDefault(false)
+                if (!routed) {
+                    Log.w(
+                        TAG,
+                        "communication device rejected type=${selected.type} preference=${if (speakerEnabled) "speaker" else "earpiece"}",
+                    )
+                }
+            } else {
+                audio.clearCommunicationDevice()
+            }
+            Log.i(TAG, "audio route preference=${if (speakerEnabled) "speaker" else "earpiece"} effective=${selected?.type}")
+        } else {
+            @Suppress("DEPRECATION")
+            audio.isSpeakerphoneOn = speakerEnabled
+        }
+    }
+
+    private fun playReadyCue() {
+        stopListening()
+        releaseReadyCue()
+        readyCuePlaying = true
+        updateAudioRoute()
+        publishState("Ready")
+        val attributes = AudioAttributes.Builder()
+            .setUsage(AudioAttributes.USAGE_VOICE_COMMUNICATION)
+            .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
+            .build()
+        val player = runCatching {
+            MediaPlayer.create(this, R.raw.voice_ready, attributes, 0)
+        }.onFailure {
+            Log.w(TAG, "could not create voice ready cue", it)
+        }.getOrNull()
+        if (player == null) {
+            finishReadyCue()
+            return
+        }
+        readyCuePlayer = player
+        player.setVolume(0.72f, 0.72f)
+        player.setOnCompletionListener { finishReadyCue() }
+        player.setOnErrorListener { _, what, extra ->
+            Log.w(TAG, "voice ready cue failed what=$what extra=$extra")
+            finishReadyCue()
+            true
+        }
+        runCatching { player.start() }
+            .onFailure {
+                Log.w(TAG, "could not play voice ready cue", it)
+                finishReadyCue()
+            }
+    }
+
+    private fun finishReadyCue() {
+        releaseReadyCue()
+        if (voiceMode != VoiceMode.ENDED) {
+            publishStage(Stage.LISTENING)
+            if (shouldListen() && !waitingForAgent) scheduleListening(0)
+        }
+    }
+
+    private fun releaseReadyCue() {
+        readyCuePlaying = false
+        readyCuePlayer?.let { player ->
+            player.setOnCompletionListener(null)
+            player.setOnErrorListener(null)
+            runCatching { player.release() }
+        }
+        readyCuePlayer = null
     }
 
     private fun buildNotification(): android.app.Notification {
@@ -1329,7 +1478,7 @@ class VoiceConversationService : Service(), RecognitionListener, TextToSpeech.On
         private const val ACTION_AGENT_EVENT = "com.zdroid.voice.AGENT_EVENT"
         private const val ACTION_TOGGLE_MUTE = "com.zdroid.voice.TOGGLE_MUTE"
         private const val ACTION_TOGGLE_SPEAKER = "com.zdroid.voice.TOGGLE_SPEAKER"
-        private const val ACTION_SET_LANGUAGES = "com.zdroid.voice.SET_LANGUAGES"
+        private const val ACTION_SET_INPUT_LANGUAGE = "com.zdroid.voice.SET_INPUT_LANGUAGE"
         private const val ACTION_SET_AUDIO_OUTPUT = "com.zdroid.voice.SET_AUDIO_OUTPUT"
         private const val ACTION_SET_SPEECH_OUTPUT = "com.zdroid.voice.SET_SPEECH_OUTPUT"
         private const val ACTION_SUBMIT_TEXT = "com.zdroid.voice.SUBMIT_TEXT"
@@ -1339,7 +1488,7 @@ class VoiceConversationService : Service(), RecognitionListener, TextToSpeech.On
         private const val EXTRA_TEXT = "text"
         private const val EXTRA_EVENT_KIND = "event_kind"
         private const val EXTRA_OUTPUT_EPOCH = "output_epoch"
-        private const val EXTRA_LANGUAGES = "languages"
+        private const val EXTRA_INPUT_LANGUAGE = "input_language"
         private const val EXTRA_SPEAKER = "speaker"
         private const val EXTRA_SPEECH_OUTPUT = "speech_output"
         private const val EXTRA_THREAD_ID = "thread_id"
@@ -1356,6 +1505,19 @@ class VoiceConversationService : Service(), RecognitionListener, TextToSpeech.On
         private const val NOTIFICATION_THROTTLE_MS = 1_000L
         private const val REALTIME_ERROR_LIMIT = 3
         private const val LOCK_OWNER = "voice-conversation"
+        private val SUPPORTED_INPUT_LANGUAGES = setOf(
+            VoicePreferences.INPUT_LANGUAGE_AUTO,
+            VoicePreferences.INPUT_LANGUAGE_TRADITIONAL_CHINESE,
+            VoicePreferences.INPUT_LANGUAGE_ENGLISH,
+        )
+        private val EXTERNAL_AUDIO_DEVICE_TYPES = setOf(
+            AudioDeviceInfo.TYPE_WIRED_HEADSET,
+            AudioDeviceInfo.TYPE_WIRED_HEADPHONES,
+            AudioDeviceInfo.TYPE_BLUETOOTH_SCO,
+            AudioDeviceInfo.TYPE_BLE_HEADSET,
+            AudioDeviceInfo.TYPE_USB_HEADSET,
+            AudioDeviceInfo.TYPE_HEARING_AID,
+        )
         private val FILLER_ONLY_REGEX = Regex(
             "(?:啊+|阿+|喔+|哦+|噢+|嗯+|呃+|欸+|誒+|唉+|哎+|哈+|呵+|诶+|额+|uh+|um+|h+m+|m+h+m+|ah+|oh+|er+|erm+)+",
             RegexOption.IGNORE_CASE,
@@ -1448,11 +1610,11 @@ class VoiceConversationService : Service(), RecognitionListener, TextToSpeech.On
         fun resume(context: Context) {
             context.startService(Intent(context, VoiceConversationService::class.java).setAction(ACTION_RESUME))
         }
-        fun setLanguages(context: Context, languages: Set<String>) {
+        fun setInputLanguage(context: Context, inputLanguage: String) {
             context.startService(
                 Intent(context, VoiceConversationService::class.java)
-                    .setAction(ACTION_SET_LANGUAGES)
-                    .putStringArrayListExtra(EXTRA_LANGUAGES, ArrayList(languages)),
+                    .setAction(ACTION_SET_INPUT_LANGUAGE)
+                    .putExtra(EXTRA_INPUT_LANGUAGE, inputLanguage),
             )
         }
         fun interruptSpeech(context: Context) {
@@ -1491,3 +1653,15 @@ class VoiceConversationService : Service(), RecognitionListener, TextToSpeech.On
         }
     }
 }
+
+/**
+ * Recognizers are allowed to emit a partial hypothesis only once. A hypothesis is stable when
+ * either the recognizer repeats it or it remains unchanged for the complete endpointing window.
+ */
+internal fun isStablePartialTranscript(
+    repeatedObservations: Int,
+    requiredRepeatedObservations: Int,
+    unchangedForMs: Long,
+    stableWindowMs: Long,
+): Boolean =
+    repeatedObservations >= requiredRepeatedObservations || unchangedForMs >= stableWindowMs

@@ -29,7 +29,7 @@ use futures::FutureExt as _;
 use gpui::{
     Action, Animation, AnimationExt, App, ClickEvent, ClipboardItem, CursorStyle, DismissEvent,
     ElementId, Empty, Entity, EventEmitter, FocusHandle, Focusable, Hsla, ListOffset, ListState,
-    ObjectFit, PlatformDisplay, ScrollHandle, SharedString, StyledText, Subscription, Task,
+    ObjectFit, Pixels, PlatformDisplay, ScrollHandle, SharedString, StyledText, Subscription, Task,
     TaskExt, TextRun, TextStyle, WeakEntity, Window, WindowHandle, div, ease_in_out, img,
     linear_color_stop, linear_gradient, list, pulsating_between,
 };
@@ -112,6 +112,14 @@ const STOPWATCH_THRESHOLD: Duration = Duration::from_secs(30);
 const TOKEN_THRESHOLD: u64 = 250;
 
 pub(crate) const DRAFT_PROMPT_PERSIST_DEBOUNCE: Duration = Duration::from_millis(250);
+
+fn estimated_thread_entry_height(entry: &AgentThreadEntry, cx: &App) -> Pixels {
+    let markdown = entry.to_markdown(cx);
+    let explicit_lines = markdown.lines().count().max(1);
+    let wrapped_lines = markdown.chars().count().div_ceil(48);
+    let visual_lines = explicit_lines.max(wrapped_lines);
+    px((56.0 + visual_lines as f32 * 22.0).clamp(96.0, 1600.0))
+}
 
 #[cfg(target_os = "android")]
 fn android_agent_account_note(agent_id: &AgentId) -> Option<&'static str> {
@@ -1573,6 +1581,12 @@ impl ConversationView {
         let count = thread.read(cx).entries().len();
         let list_state = ListState::new(0, gpui::ListAlignment::Top, px(2048.0));
         list_state.set_follow_mode(gpui::FollowMode::Tail);
+        let height_hints = thread
+            .read(cx)
+            .entries()
+            .iter()
+            .map(|entry| estimated_thread_entry_height(entry, cx))
+            .collect::<Vec<_>>();
 
         entry_view_state.update(cx, |view_state, cx| {
             for ix in 0..count {
@@ -1582,6 +1596,7 @@ impl ConversationView {
                 0..0,
                 (0..count).map(|ix| view_state.entry(ix)?.focus_handle(cx)),
             );
+            list_state.set_item_height_hints(height_hints);
         });
 
         if let Some(scroll_position) = thread.read(cx).ui_scroll_position() {
@@ -1931,6 +1946,46 @@ impl ConversationView {
         matches!(self.server_state, ServerState::Loading { .. })
     }
 
+    fn send_voice_stage_for_entry(
+        &self,
+        thread: &Entity<AcpThread>,
+        index: usize,
+        announce_started: bool,
+        cx: &mut App,
+    ) {
+        if !cx.voice_conversation_enabled() {
+            return;
+        }
+        let event = {
+            let thread = thread.read(cx);
+            if thread.parent_session_id().is_some() {
+                return;
+            }
+            let Some(AgentThreadEntry::ToolCall(tool_call)) = thread.entries().get(index) else {
+                return;
+            };
+            let label = tool_call.label.read(cx).source().to_string();
+            let kind = match tool_call.status {
+                acp_thread::ToolCallStatus::Pending | acp_thread::ToolCallStatus::InProgress
+                    if announce_started =>
+                {
+                    "tool_started"
+                }
+                acp_thread::ToolCallStatus::Pending | acp_thread::ToolCallStatus::InProgress => {
+                    return;
+                }
+                acp_thread::ToolCallStatus::Completed
+                | acp_thread::ToolCallStatus::Failed
+                | acp_thread::ToolCallStatus::Rejected
+                | acp_thread::ToolCallStatus::Canceled => "tool_finished",
+                acp_thread::ToolCallStatus::WaitingForConfirmation { .. } => return,
+            };
+            (kind, label)
+        };
+        let (kind, label) = event;
+        cx.send_voice_agent_event(&self.thread_id.to_key_string(), kind, &label);
+    }
+
     fn handle_thread_event(
         &mut self,
         thread: &Entity<AcpThread>,
@@ -1981,6 +2036,7 @@ impl ConversationView {
                         active.sync_generating_indicator(cx);
                     });
                 }
+                self.send_voice_stage_for_entry(thread, index, true, cx);
             }
             AcpThreadEvent::EntryUpdated(index) => {
                 if let Some(active) = self.thread_view(&session_id) {
@@ -1996,6 +2052,7 @@ impl ConversationView {
                         active.sync_generating_indicator(cx);
                     });
                 }
+                self.send_voice_stage_for_entry(thread, *index, false, cx);
                 if !is_subagent
                     && cx.voice_conversation_enabled()
                     && let Some(response) = thread.read(cx).latest_assistant_text(cx)
@@ -3814,19 +3871,8 @@ fn native_available_skills(
 }
 
 fn placeholder_text(agent_name: &str, has_commands: bool) -> String {
-    if agent_name == agent::ZED_AGENT_ID.as_ref() {
-        format!(
-            "Message the {}, @ to include context, / for commands",
-            agent_name
-        )
-    } else if has_commands {
-        format!(
-            "Message {} â€” @ to include context, / for commands",
-            agent_name
-        )
-    } else {
-        format!("Message {} â€” @ to include context", agent_name)
-    }
+    let _ = (agent_name, has_commands);
+    "Describe a task or ask a question".to_string()
 }
 
 impl Focusable for ConversationView {

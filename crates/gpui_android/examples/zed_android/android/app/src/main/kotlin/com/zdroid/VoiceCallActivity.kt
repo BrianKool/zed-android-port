@@ -16,7 +16,6 @@ import android.view.ViewGroup
 import android.view.Window
 import android.view.WindowManager
 import android.view.inputmethod.InputMethodManager
-import android.widget.CheckBox
 import android.widget.EditText
 import android.widget.FrameLayout
 import android.widget.ImageView
@@ -28,7 +27,6 @@ import android.widget.Space
 import android.widget.ScrollView
 import android.widget.Switch
 import android.widget.TextView
-import android.widget.Toast
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
@@ -217,7 +215,7 @@ class VoiceCallActivity : Activity() {
             setOnClickListener { showContextMenu(this) }
         }, LinearLayout.LayoutParams(dp(48), dp(48)))
         input = EditText(this).apply {
-            hint = "Message $agentName"
+            hint = "Describe a task or ask a question"
             setHintTextColor(Color.GRAY)
             setTextColor(Color.WHITE)
             textSize = 16f
@@ -304,11 +302,10 @@ class VoiceCallActivity : Activity() {
 
     private fun showSettings() {
         val preferences = getSharedPreferences("zdroid_voice", Context.MODE_PRIVATE)
-        val selected = (preferences.getStringSet("languages", setOf("zh-TW", "en-US"))
-            ?: setOf("zh-TW", "en-US")).toMutableSet()
+        val selectedLanguage = VoicePreferences.inputLanguage(preferences)
         val speechEnabled = preferences.getBoolean("speech_output", true)
         val chatVisible = preferences.getBoolean("show_chat", false)
-        val speakerEnabled = preferences.getBoolean("speaker", true)
+        val speakerEnabled = VoicePreferences.speakerEnabled(preferences)
         val dialog = Dialog(this).apply { requestWindowFeature(Window.FEATURE_NO_TITLE) }
         val panel = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -336,10 +333,30 @@ class VoiceCallActivity : Activity() {
             setPadding(dp(20), dp(8), dp(20), dp(18))
         }
         body.addView(settingsSectionTitle("Language"), fullWidth(top = 8))
-        val traditionalChinese = settingsCheckBox("Traditional Chinese", "zh-TW" in selected)
-        val english = settingsCheckBox("English", "en-US" in selected)
-        body.addView(traditionalChinese, fullWidth(top = 4))
-        body.addView(english, fullWidth())
+        val languageGroup = RadioGroup(this).apply { orientation = RadioGroup.VERTICAL }
+        val autoDetect = settingsRadioButton(
+            "Auto-detect",
+            selectedLanguage == VoicePreferences.INPUT_LANGUAGE_AUTO,
+        )
+        val traditionalChinese = settingsRadioButton(
+            "Traditional Chinese",
+            selectedLanguage == VoicePreferences.INPUT_LANGUAGE_TRADITIONAL_CHINESE,
+        )
+        val english = settingsRadioButton(
+            "English",
+            selectedLanguage == VoicePreferences.INPUT_LANGUAGE_ENGLISH,
+        )
+        languageGroup.addView(autoDetect, LinearLayout.LayoutParams(-1, dp(48)))
+        languageGroup.addView(traditionalChinese, LinearLayout.LayoutParams(-1, dp(48)))
+        languageGroup.addView(english, LinearLayout.LayoutParams(-1, dp(48)))
+        languageGroup.check(
+            when (selectedLanguage) {
+                VoicePreferences.INPUT_LANGUAGE_TRADITIONAL_CHINESE -> traditionalChinese.id
+                VoicePreferences.INPUT_LANGUAGE_ENGLISH -> english.id
+                else -> autoDetect.id
+            },
+        )
+        body.addView(languageGroup, fullWidth(top = 4))
 
         body.addView(settingsSectionTitle("AI voice output"), fullWidth(top = 18))
         val spokenResponses = settingsSwitch("Spoken responses", speechEnabled)
@@ -353,7 +370,17 @@ class VoiceCallActivity : Activity() {
         val earpiece = settingsRadioButton("Earpiece", !speakerEnabled)
         audioGroup.addView(speaker, LinearLayout.LayoutParams(-1, dp(48)))
         audioGroup.addView(earpiece, LinearLayout.LayoutParams(-1, dp(48)))
+        audioGroup.check(if (speakerEnabled) speaker.id else earpiece.id)
         body.addView(audioGroup, fullWidth(top = 4))
+        body.addView(
+            label(
+                "Wired, Bluetooth, USB, and hearing devices take priority while connected. Your saved choice resumes after disconnection.",
+                13f,
+                SETTINGS_MUTED,
+                Gravity.START,
+            ),
+            fullWidth(top = 4),
+        )
 
         val scroll = ScrollView(this).apply {
             isFillViewport = true
@@ -368,25 +395,26 @@ class VoiceCallActivity : Activity() {
         }
         footer.addView(settingsCommand("Cancel", false) { dialog.dismiss() }, LinearLayout.LayoutParams(-2, dp(46)))
         footer.addView(settingsCommand("Apply", true) {
-            if (!traditionalChinese.isChecked && !english.isChecked) {
-                Toast.makeText(this, "Select at least one language", Toast.LENGTH_SHORT).show()
-                return@settingsCommand
+            val inputLanguage = when (languageGroup.checkedRadioButtonId) {
+                traditionalChinese.id -> VoicePreferences.INPUT_LANGUAGE_TRADITIONAL_CHINESE
+                english.id -> VoicePreferences.INPUT_LANGUAGE_ENGLISH
+                else -> VoicePreferences.INPUT_LANGUAGE_AUTO
             }
-            selected.clear()
-            if (traditionalChinese.isChecked) selected.add("zh-TW")
-            if (english.isChecked) selected.add("en-US")
-            val useSpeaker = speaker.isChecked
+            val useSpeaker = audioGroup.checkedRadioButtonId == speaker.id
             preferences.edit()
-                .putStringSet("languages", selected)
+                .putString("input_language", inputLanguage)
+                .remove("languages")
                 .putBoolean("speech_output", spokenResponses.isChecked)
                 .putBoolean("show_chat", showConversation.isChecked)
                 .putBoolean("speaker", useSpeaker)
                 .apply()
-            VoiceConversationService.setLanguages(this, selected)
+            VoiceConversationService.setInputLanguage(this, inputLanguage)
             VoiceConversationService.setSpeechOutput(this, spokenResponses.isChecked)
             VoiceConversationService.setAudioOutput(this, useSpeaker)
+            speechOutputEnabled = spokenResponses.isChecked
+            showChat = showConversation.isChecked
             dialog.dismiss()
-            recreate()
+            refreshVoiceLayout()
         }, LinearLayout.LayoutParams(-2, dp(46)).apply { marginStart = dp(8) })
         panel.addView(footer, LinearLayout.LayoutParams(-1, -2))
 
@@ -414,15 +442,6 @@ class VoiceCallActivity : Activity() {
         setTypeface(Typeface.DEFAULT, Typeface.BOLD)
     }
 
-    private fun settingsCheckBox(text: String, checked: Boolean) = CheckBox(this).apply {
-        this.text = text
-        isChecked = checked
-        setTextColor(SETTINGS_TEXT)
-        textSize = 16f
-        buttonTintList = ColorStateList.valueOf(SETTINGS_ACCENT)
-        gravity = Gravity.CENTER_VERTICAL
-    }
-
     @Suppress("UseSwitchCompatOrMaterialCode")
     private fun settingsSwitch(text: String, checked: Boolean) = Switch(this).apply {
         this.text = text
@@ -435,12 +454,21 @@ class VoiceCallActivity : Activity() {
     }
 
     private fun settingsRadioButton(text: String, checked: Boolean) = RadioButton(this).apply {
+        id = View.generateViewId()
         this.text = text
         isChecked = checked
         setTextColor(SETTINGS_TEXT)
         textSize = 16f
         buttonTintList = ColorStateList.valueOf(SETTINGS_ACCENT)
         gravity = Gravity.CENTER_VERTICAL
+    }
+
+    private fun refreshVoiceLayout() {
+        typingLayout = !typingLayout
+        setTypingLayout(
+            ViewCompat.getRootWindowInsets(window.decorView)
+                ?.isVisible(WindowInsetsCompat.Type.ime()) == true,
+        )
     }
 
     private fun settingsDivider() = View(this).apply { setBackgroundColor(Color.rgb(78, 78, 72)) }
@@ -507,6 +535,7 @@ class VoiceCallActivity : Activity() {
         private const val TAG = "ZdroidVoiceUI"
         private val SETTINGS_TEXT = Color.rgb(239, 232, 202)
         private val SETTINGS_ACCENT = Color.rgb(218, 198, 120)
+        private val SETTINGS_MUTED = Color.rgb(177, 172, 155)
         const val EXTRA_AGENT_NAME = "agent_name"
         const val EXTRA_MODEL_NAME = "model_name"
         const val EXTRA_THREAD_ID = "thread_id"

@@ -39,7 +39,7 @@ use settings::Settings;
 use std::{cmp::min, fmt::Write, ops::Range, rc::Rc, sync::Arc};
 use text::LineEnding;
 use theme_settings::ThemeSettings;
-use ui::{ContextMenu, prelude::*};
+use ui::{ContextMenu, Tooltip, prelude::*};
 use util::paths::PathStyle;
 use util::{ResultExt, debug_panic};
 use workspace::{CollaboratorId, Workspace};
@@ -500,6 +500,7 @@ impl MessageEditor {
                         )
                         .action("Paste", Box::new(editor::actions::Paste))
                         .action("Paste as Plain Text", Box::new(PasteRaw))
+                        .action("Select All", Box::new(editor::actions::SelectAll))
                 }))
             });
 
@@ -1628,6 +1629,10 @@ impl MessageEditor {
     }
 
     pub fn add_images_from_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.add_images_from_album(window, cx);
+    }
+
+    pub fn add_images_from_album(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if !self.session_capabilities.read().supports_images() {
             return;
         }
@@ -1667,6 +1672,47 @@ impl MessageEditor {
 
                 crate::mention_set::insert_images_as_context(
                     images,
+                    editor,
+                    mention_set,
+                    workspace,
+                    cx,
+                )
+                .await;
+                Ok(())
+            })
+            .detach_and_log_err(cx);
+    }
+
+    pub fn add_image_from_camera(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.session_capabilities.read().supports_images() {
+            return;
+        }
+
+        let editor = self.editor.clone();
+        let mention_set = self.mention_set.clone();
+        let workspace = self.workspace.clone();
+        let image_receiver = cx.prompt_for_camera_image();
+
+        window
+            .spawn(cx, async move |cx| {
+                let path = match image_receiver.await {
+                    Ok(Ok(Some(path))) => path,
+                    _ => return Ok::<(), anyhow::Error>(()),
+                };
+                let image_path = path.clone();
+                let image = cx
+                    .background_spawn(async move {
+                        let image = crate::mention_set::load_external_image_from_path(
+                            &image_path,
+                            &SharedString::from("Camera image"),
+                        );
+                        let _ = std::fs::remove_file(image_path);
+                        image
+                    })
+                    .await;
+
+                crate::mention_set::insert_images_as_context(
+                    image.into_iter().collect(),
                     editor,
                     mention_set,
                     workspace,
@@ -2014,7 +2060,11 @@ impl Focusable for MessageEditor {
 
 impl Render for MessageEditor {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        div()
+        let buffer_snapshot = self.editor.read(cx).buffer().read(cx).snapshot(cx);
+        let mut image_contexts = self.mention_set.read(cx).image_contexts(cx);
+        image_contexts.sort_by_key(|(_, range, _)| range.start.to_offset(&buffer_snapshot));
+
+        v_flex()
             .key_context("MessageEditor")
             .on_action(cx.listener(Self::chat))
             .on_action(cx.listener(Self::send_immediately))
@@ -2025,7 +2075,59 @@ impl Render for MessageEditor {
             .on_action(cx.listener(Self::paste_raw))
             .capture_action(cx.listener(Self::paste))
             .flex_1()
-            .child({
+            .min_h_0()
+            .when(!image_contexts.is_empty(), |this| {
+                this.child(
+                    h_flex().w_full().flex_wrap().gap_2().p_2().children(
+                        image_contexts
+                            .into_iter()
+                            .map(|(crease_id, _range, image)| {
+                                let image_id = image.entity_id().as_u64();
+                                div().relative().child(image).child(
+                                    div()
+                                        .id(("remove-image-context", image_id))
+                                        .absolute()
+                                        .top_0()
+                                        .right_0()
+                                        .w_7()
+                                        .h_7()
+                                        .flex()
+                                        .items_center()
+                                        .justify_center()
+                                        .rounded_full()
+                                        .border_1()
+                                        .border_color(gpui::white().opacity(0.72))
+                                        .bg(gpui::black().opacity(0.86))
+                                        .cursor_pointer()
+                                        .tooltip(Tooltip::text("Remove image"))
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            cx.stop_propagation();
+                                            this.editor.update(cx, |editor, cx| {
+                                                let ranges = editor.remove_creases([crease_id], cx);
+                                                editor.edit(
+                                                    ranges
+                                                        .into_iter()
+                                                        .map(|(_, range)| (range, "")),
+                                                    cx,
+                                                );
+                                            });
+                                            this.mention_set.update(cx, |mention_set, cx| {
+                                                mention_set.remove_mention(&crease_id, cx)
+                                            });
+                                            cx.emit(MessageEditorEvent::Edited);
+                                            cx.notify();
+                                        }))
+                                        .child(
+                                            Icon::new(IconName::Close)
+                                                .size(IconSize::XSmall)
+                                                .color(Color::Custom(gpui::white())),
+                                        ),
+                                )
+                            }),
+                    ),
+                )
+            })
+            .child(div().flex_1().min_h_0().child({
                 let settings = ThemeSettings::get_global(cx);
 
                 let text_style = TextStyle {
@@ -2050,7 +2152,7 @@ impl Render for MessageEditor {
                         ..Default::default()
                     },
                 )
-            })
+            }))
     }
 }
 

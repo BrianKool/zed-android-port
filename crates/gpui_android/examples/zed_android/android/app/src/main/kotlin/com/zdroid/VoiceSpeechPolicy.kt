@@ -23,9 +23,10 @@ object VoiceSpeechPolicy {
             else -> ""
         }
         return text
-            .replace(THINKING_BLOCK, " ")
+            .replace(PRIVATE_REASONING_BLOCK, " ")
             .replace(CODE_BLOCK, " ")
             .replace(TOOL_MARKUP, " ")
+            .replace(MARKDOWN_LINK, "$1")
             .replace(INLINE_CODE, "$1")
             .replace(Regex("[\\t ]+"), " ")
             .replace(Regex("\\n{3,}"), "\n\n")
@@ -39,10 +40,16 @@ object VoiceSpeechPolicy {
         else -> VoiceSpeechScheduler.Priority.NORMAL
     }
 
-    private val THINKING_BLOCK = Regex("(?is)<thinking>.*?(?:</thinking>|$)")
+    // Some ACP adapters expose private model output using legacy inline tags.
+    // Treat an unclosed tag as private through the end of the current snapshot;
+    // a later streaming update can safely reveal public text after its close tag.
+    private val PRIVATE_REASONING_BLOCK = Regex(
+        "(?is)<(thinking|think|analysis|reasoning)[^>]*>.*?(?:</\\1>|$)",
+    )
     private val CODE_BLOCK = Regex("(?s)```.*?(?:```|$)")
     private val TOOL_MARKUP = Regex(
         "(?is)<(tool_call|tool_result)[^>]*>.*?(?:</\\1>|$)",
     )
+    private val MARKDOWN_LINK = Regex("\\[([^]]+)]\\((?:[^()]|\\([^)]*\\))*\\)")
     private val INLINE_CODE = Regex("`([^`]+)`")
 }

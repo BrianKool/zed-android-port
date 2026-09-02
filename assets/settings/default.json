@@ -1279,8 +1279,12 @@
     "terminal_init_command": "",
     // How thinking blocks should be displayed by default in the agent panel.
     //
-    // Default: auto
-    "thinking_display": "auto",
+    // "hidden" keeps thinking in the thread data without rendering it. Users
+    // who want to inspect thinking can select auto, preview, always_expanded,
+    // or always_collapsed in Agent settings.
+    //
+    // Default: hidden
+    "thinking_display": "hidden",
     // Whether clicking the stop button on a running terminal tool should also cancel the agent's generation.
     // Note that this only applies to the stop button, not to ctrl+c inside the terminal.
     //
@@ -1294,6 +1298,14 @@
     //
     // Default: 4
     "message_editor_min_lines": 4,
+    // Collapse the agent message editor after a prompt is sent.
+    //
+    // Default: false
+      "collapse_message_editor_on_send": false,
+      // Preferred language for Agent answers.
+      //
+      // Default: english
+      "output_language": "auto",
     // Whether to show turn statistics (elapsed time during generation, final turn duration).
     //
     // Default: false

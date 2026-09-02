@@ -3,8 +3,8 @@ use fs::Fs;
 
 use gpui::{
     Action, AnyView, App, Context, DragMoveEvent, Entity, EntityId, EventEmitter, FocusHandle,
-    Focusable, ManagedView, MouseButton, Pixels, Render, Subscription, Task, TaskExt,
-    WeakEntity, Window, WindowId, actions, deferred, hsla, px, relative,
+    Focusable, ManagedView, MouseButton, Pixels, Render, Subscription, Task, TaskExt, WeakEntity,
+    Window, WindowId, actions, deferred, hsla, px, relative,
 };
 pub use project::ProjectGroupKey;
 use project::{DisableAiSettings, Project};
@@ -2036,8 +2036,8 @@ impl Render for MultiWorkspace {
         let multi_workspace_enabled = self.multi_workspace_enabled(cx);
         let sidebar_side = self.sidebar_side(cx);
         let sidebar_on_right = sidebar_side == SidebarSide::Right;
-        let compact_mobile_sidebar = cfg!(target_os = "android")
-            && window.viewport_size().width.as_f32() < 600.0;
+        let compact_mobile_sidebar =
+            cfg!(target_os = "android") && window.viewport_size().width.as_f32() < 600.0;
 
         let sidebar: Option<AnyElement> = if multi_workspace_enabled && self.sidebar_open() {
             self.sidebar.as_ref().map(|sidebar_handle| {

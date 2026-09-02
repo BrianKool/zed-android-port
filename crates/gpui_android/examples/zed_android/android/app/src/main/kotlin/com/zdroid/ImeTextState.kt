@@ -23,6 +23,7 @@ data class ImeTextState(
     val selectionEnd: Int,
     val composingStart: Int, // -1 = no active composition
     val composingEnd: Int,   // -1 = no active composition
+    val revision: Long = 0L,
 ) {
     /// Convert an absolute UTF-16 offset to an index within `text`.
     /// Returns null if the offset falls outside the mirrored window
@@ -89,6 +90,91 @@ data class ImeTextState(
         out.partialEndOffset = -1
         out.flags = 0
         return out
+    }
+
+    fun withComposingText(value: String, newCursorPosition: Int, revision: Long): ImeTextState =
+        replaceImeRange(value, newCursorPosition, composing = true, revision = revision)
+
+    fun withCommittedText(value: String, newCursorPosition: Int, revision: Long): ImeTextState =
+        replaceImeRange(value, newCursorPosition, composing = false, revision = revision)
+
+    fun withoutComposition(revision: Long): ImeTextState = copy(
+        composingStart = -1,
+        composingEnd = -1,
+        revision = revision,
+    )
+
+    fun withSelection(start: Int, end: Int, revision: Long): ImeTextState {
+        val documentEnd = windowStart + text.length
+        val clippedStart = start.coerceIn(windowStart, documentEnd)
+        val clippedEnd = end.coerceIn(windowStart, documentEnd)
+        return copy(
+            selectionStart = minOf(clippedStart, clippedEnd),
+            selectionEnd = maxOf(clippedStart, clippedEnd),
+            revision = revision,
+        )
+    }
+
+    fun withComposingRegion(start: Int, end: Int, revision: Long): ImeTextState {
+        val documentEnd = windowStart + text.length
+        val clippedStart = start.coerceIn(windowStart, documentEnd)
+        val clippedEnd = end.coerceIn(windowStart, documentEnd)
+        return copy(
+            composingStart = minOf(clippedStart, clippedEnd),
+            composingEnd = maxOf(clippedStart, clippedEnd),
+            revision = revision,
+        )
+    }
+
+    fun deletingSurroundingText(beforeLength: Int, afterLength: Int, revision: Long): ImeTextState {
+        val startAbsolute = (selectionStart - beforeLength.coerceAtLeast(0)).coerceAtLeast(windowStart)
+        val endAbsolute = (selectionEnd + afterLength.coerceAtLeast(0))
+            .coerceAtMost(windowStart + text.length)
+        return replaceAbsoluteRange(startAbsolute, endAbsolute, "", 1, false, revision)
+    }
+
+    private fun replaceImeRange(
+        value: String,
+        newCursorPosition: Int,
+        composing: Boolean,
+        revision: Long,
+    ): ImeTextState {
+        val hasComposition = composingStart >= windowStart && composingEnd >= composingStart
+        val start = if (hasComposition) composingStart else selectionStart
+        val end = if (hasComposition) composingEnd else selectionEnd
+        return replaceAbsoluteRange(start, end, value, newCursorPosition, composing, revision)
+    }
+
+    private fun replaceAbsoluteRange(
+        startAbsolute: Int,
+        endAbsolute: Int,
+        value: String,
+        newCursorPosition: Int,
+        composing: Boolean,
+        revision: Long,
+    ): ImeTextState {
+        val start = relInWindow(startAbsolute) ?: return copy(revision = revision)
+        val end = relInWindow(endAbsolute) ?: return copy(revision = revision)
+        val updated = buildString(text.length - (end - start) + value.length) {
+            append(text, 0, start)
+            append(value)
+            append(text, end, text.length)
+        }
+        val insertedEnd = startAbsolute + value.length
+        val cursor = if (newCursorPosition > 0) {
+            insertedEnd + newCursorPosition - 1
+        } else {
+            startAbsolute + newCursorPosition
+        }.coerceIn(windowStart, windowStart + updated.length)
+        return ImeTextState(
+            text = updated,
+            windowStart = windowStart,
+            selectionStart = cursor,
+            selectionEnd = cursor,
+            composingStart = if (composing) startAbsolute else -1,
+            composingEnd = if (composing) insertedEnd else -1,
+            revision = revision,
+        )
     }
 
     companion object {

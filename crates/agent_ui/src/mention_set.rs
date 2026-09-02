@@ -12,8 +12,8 @@ use editor::{
 };
 use futures::{AsyncReadExt as _, FutureExt as _, future::Shared};
 use gpui::{
-    AppContext, ClipboardEntry, Context, Empty, Entity, EntityId, Image, ImageFormat, Img,
-    SharedString, Task, WeakEntity,
+    AppContext, ClipboardEntry, Context, DismissEvent, Empty, Entity, EntityId, EventEmitter,
+    FocusHandle, Focusable, Image, ImageFormat, Img, SharedString, Task, WeakEntity,
 };
 use http_client::{AsyncBody, HttpClientWithUrl};
 use itertools::Either;
@@ -33,9 +33,9 @@ use std::{
     sync::Arc,
 };
 use text::OffsetRangeExt;
-use ui::{Disclosure, Toggleable, prelude::*};
+use ui::{Disclosure, IconButtonShape, Toggleable, Tooltip, prelude::*};
 use util::{ResultExt, debug_panic, rel_path::RelPath};
-use workspace::{Workspace, notifications::NotifyResultExt as _};
+use workspace::{ModalView, Workspace, notifications::NotifyResultExt as _};
 
 use crate::ui::MentionCrease;
 
@@ -189,6 +189,23 @@ impl MentionSet {
 
     pub fn mentions(&self) -> HashSet<MentionUri> {
         self.mentions.values().map(|(uri, _)| uri.clone()).collect()
+    }
+
+    pub(crate) fn image_contexts(
+        &self,
+        cx: &App,
+    ) -> Vec<(CreaseId, Range<Anchor>, Entity<LoadingContext>)> {
+        self.crease_entities
+            .iter()
+            .filter_map(|(crease_id, entity)| {
+                let context = entity.read_with(cx, |context, _| {
+                    context
+                        .is_image_context
+                        .then(|| (*crease_id, context.range.clone(), entity.clone()))
+                });
+                context
+            })
+            .collect()
     }
 
     pub fn mention_uri_for_crease(&self, crease_id: &CreaseId) -> Option<MentionUri> {
@@ -747,6 +764,25 @@ fn disambiguated_labels_for_uris(uris: &[&MentionUri]) -> Vec<SharedString> {
         .collect()
 }
 
+fn attachment_preview_size(source_width: i32, source_height: i32) -> (f32, f32) {
+    let source_width = source_width.max(1) as f32;
+    let source_height = source_height.max(1) as f32;
+    let max_edge = 104.0;
+    let min_edge = 64.0;
+
+    if source_width >= source_height {
+        (
+            max_edge,
+            (max_edge * source_height / source_width).clamp(min_edge, max_edge),
+        )
+    } else {
+        (
+            (max_edge * source_width / source_height).clamp(min_edge, max_edge),
+            max_edge,
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -856,6 +892,13 @@ mod tests {
     }
 
     #[test]
+    fn test_attachment_preview_preserves_orientation() {
+        assert_eq!(attachment_preview_size(1600, 900), (104.0, 64.0));
+        assert_eq!(attachment_preview_size(900, 1600), (64.0, 104.0));
+        assert_eq!(attachment_preview_size(1000, 1000), (104.0, 104.0));
+    }
+
+    #[test]
     fn test_disambiguated_labels_dedupe_identical_uris() {
         // Mentioning the same file twice must not escalate the duplicates to
         // their full path. Distinct files sharing a base name still disambiguate.
@@ -929,7 +972,7 @@ pub(crate) async fn insert_images_as_context(
                 IconName::Image.path().into(),
                 None,
                 None,
-                None,
+                Some(workspace.clone()),
                 Some(Task::ready(Ok(image.clone())).shared()),
                 editor.clone(),
                 window,
@@ -1341,6 +1384,7 @@ fn render_mention_fold_button(
     Arc<dyn Send + Sync + Fn(FoldId, Range<Anchor>, &mut App) -> AnyElement>,
     Entity<LoadingContext>,
 ) {
+    let is_image_context = image_task.is_some();
     let loading = cx.new(|cx| {
         let loading = cx.spawn(async move |this, cx| {
             loading_finished.recv().await;
@@ -1349,6 +1393,23 @@ fn render_mention_fold_button(
                 cx.notify();
             })
             .ok();
+        });
+        let image = image_task
+            .as_ref()
+            .and_then(|task| task.peek())
+            .and_then(|result| result.as_ref().ok())
+            .cloned();
+        let image_loading = image_task.map(|image_task| {
+            cx.spawn(async move |this, cx| {
+                if let Ok(image) = image_task.await {
+                    this.update(cx, |this: &mut LoadingContext, cx| {
+                        if this.image.replace(image).is_none() {
+                            cx.notify();
+                        }
+                    })
+                    .ok();
+                }
+            })
         });
         LoadingContext {
             id: cx.entity_id(),
@@ -1360,12 +1421,20 @@ fn render_mention_fold_button(
             range,
             editor,
             loading: Some(loading),
-            image: image_task.clone(),
+            image,
+            _image_loading: image_loading,
+            is_image_context,
         }
     });
     let loading_clone = loading.clone();
     let render: Arc<dyn Send + Sync + Fn(FoldId, Range<Anchor>, &mut App) -> AnyElement> =
-        Arc::new(move |_fold_id, _fold_range, _cx| loading_clone.clone().into_any_element());
+        Arc::new(move |_fold_id, _fold_range, _cx| {
+            if is_image_context {
+                Empty.into_any_element()
+            } else {
+                loading_clone.clone().into_any_element()
+            }
+        });
     (render, loading)
 }
 
@@ -1379,17 +1448,126 @@ pub struct LoadingContext {
     range: Range<Anchor>,
     editor: WeakEntity<Editor>,
     loading: Option<Task<()>>,
-    image: Option<Shared<Task<Result<Arc<Image>, String>>>>,
+    image: Option<Arc<Image>>,
+    _image_loading: Option<Task<()>>,
+    is_image_context: bool,
+}
+
+struct ImageAttachmentPreview {
+    image: Arc<Image>,
+    focus_handle: FocusHandle,
+}
+
+impl ImageAttachmentPreview {
+    fn new(image: Arc<Image>, cx: &mut Context<Self>) -> Self {
+        Self {
+            image,
+            focus_handle: cx.focus_handle(),
+        }
+    }
+}
+
+impl Render for ImageAttachmentPreview {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .id("image-attachment-preview")
+            .relative()
+            .w(vw(0.92, window))
+            .h(vh(0.86, window))
+            .max_w(rems_from_px(960.0))
+            .max_h(rems_from_px(960.0))
+            .min_w_0()
+            .min_h_0()
+            .rounded_md()
+            .border_1()
+            .border_color(cx.theme().colors().border)
+            .bg(cx.theme().colors().elevated_surface_background)
+            .overflow_hidden()
+            .track_focus(&self.focus_handle)
+            .child(
+                gpui::img(self.image.clone())
+                    .size_full()
+                    .object_fit(gpui::ObjectFit::Contain),
+            )
+            .child(
+                div().absolute().top_2().right_2().child(
+                    IconButton::new("close-image-attachment-preview", IconName::Close)
+                        .shape(IconButtonShape::Square)
+                        .style(ButtonStyle::Filled)
+                        .tooltip(Tooltip::text("Close"))
+                        .on_click(cx.listener(|_, _, _, cx| cx.emit(DismissEvent))),
+                ),
+            )
+    }
+}
+
+impl Focusable for ImageAttachmentPreview {
+    fn focus_handle(&self, _: &App) -> FocusHandle {
+        self.focus_handle.clone()
+    }
+}
+
+impl EventEmitter<DismissEvent> for ImageAttachmentPreview {}
+impl ModalView for ImageAttachmentPreview {
+    fn show_close_button(&self) -> bool {
+        false
+    }
 }
 
 impl Render for LoadingContext {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let is_in_text_selection = self
             .editor
             .update(cx, |editor, cx| editor.is_range_selected(&self.range, cx))
             .unwrap_or_default();
 
         let id = ElementId::from(("loading_context", self.id));
+
+        if let Some(image) = self.image.clone() {
+            let workspace = self.workspace.clone();
+            let preview_image = image.clone();
+            let image_size = image
+                .clone()
+                .use_render_image(window, cx)
+                .map(|image| image.size(0))
+                .unwrap_or_default();
+            let (preview_width, preview_height) =
+                attachment_preview_size(image_size.width.0, image_size.height.0);
+
+            return div()
+                .id(id)
+                .relative()
+                .w(px(preview_width))
+                .h(px(preview_height))
+                .cursor_pointer()
+                .on_click(move |_, window, cx| {
+                    cx.stop_propagation();
+                    let Some(workspace) = workspace.as_ref().and_then(WeakEntity::upgrade) else {
+                        return;
+                    };
+                    let image = preview_image.clone();
+                    workspace.update(cx, |workspace, cx| {
+                        workspace.toggle_modal(window, cx, move |_window, cx| {
+                            ImageAttachmentPreview::new(image, cx)
+                        });
+                    });
+                })
+                .child(
+                    div()
+                        .absolute()
+                        .inset_0()
+                        .rounded_sm()
+                        .border_1()
+                        .border_color(cx.theme().colors().border)
+                        .overflow_hidden()
+                        .child(
+                            gpui::img(image)
+                                .size_full()
+                                .object_fit(gpui::ObjectFit::Contain),
+                        ),
+                )
+                .into_any_element();
+        }
 
         MentionCrease::new(id, self.icon.clone(), self.label.clone())
             .mention_uri(self.mention_uri.clone())
@@ -1399,45 +1577,7 @@ impl Render for LoadingContext {
             .when_some(self.tooltip.clone(), |this, tooltip_text| {
                 this.tooltip(tooltip_text)
             })
-            .when_some(self.image.clone(), |this, image_task| {
-                this.image_preview(move |_, cx| {
-                    let image = image_task.peek().cloned().transpose().ok().flatten();
-                    let image_task = image_task.clone();
-                    cx.new::<ImageHover>(|cx| ImageHover {
-                        image,
-                        _task: cx.spawn(async move |this, cx| {
-                            if let Ok(image) = image_task.clone().await {
-                                this.update(cx, |this, cx| {
-                                    if this.image.replace(image).is_none() {
-                                        cx.notify();
-                                    }
-                                })
-                                .ok();
-                            }
-                        }),
-                    })
-                    .into()
-                })
-            })
-    }
-}
-
-struct ImageHover {
-    image: Option<Arc<Image>>,
-    _task: Task<()>,
-}
-
-impl Render for ImageHover {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        if let Some(image) = self.image.clone() {
-            div()
-                .p_1p5()
-                .elevation_2(cx)
-                .child(gpui::img(image).h_auto().max_w_96().rounded_sm())
-                .into_any_element()
-        } else {
-            gpui::Empty.into_any_element()
-        }
+            .into_any_element()
     }
 }
 

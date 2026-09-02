@@ -174,23 +174,55 @@ object NativeBridge {
     /// window's `PlatformInputHandler` receives the edit — `0` for
     /// the primary `MainActivity` surface, the value gpui assigned
     /// to spawned `ExtraWindowActivity` instances for those.
-    external fun nativeImeCommitText(windowId: Long, text: String, newCursorPosition: Int)
+    external fun nativeImeConnectionOpened(windowId: Long, connectionId: Long, revision: Long)
+
+    external fun nativeImeCommitText(
+        windowId: Long,
+        connectionId: Long,
+        text: String,
+        newCursorPosition: Int,
+        revision: Long,
+    )
 
     /// IME `setComposingText`. In-progress composition (CJK, gesture
     /// typing, prediction). Routes to `replace_and_mark_text_in_range`
     /// on the window identified by `windowId`.
-    external fun nativeImeSetComposingText(windowId: Long, text: String, newCursorPosition: Int)
+    external fun nativeImeSetComposingText(
+        windowId: Long,
+        connectionId: Long,
+        text: String,
+        newCursorPosition: Int,
+        revision: Long,
+    )
+
+    external fun nativeImeSetComposingRegion(
+        windowId: Long,
+        connectionId: Long,
+        start: Int,
+        end: Int,
+        revision: Long,
+    )
+
+    external fun nativeImeSetSelection(
+        windowId: Long,
+        connectionId: Long,
+        start: Int,
+        end: Int,
+        revision: Long,
+    )
 
     /// IME `finishComposingText`. End of composition without further
     /// edits. Routes to `unmark_text` on the target window.
-    external fun nativeImeFinishComposingText(windowId: Long)
+    external fun nativeImeFinishComposingText(windowId: Long, connectionId: Long, revision: Long)
 
     /// IME `deleteSurroundingText(before, after)`. Backspace / delete
     /// spans a range around the cursor of the target window.
     external fun nativeImeDeleteSurroundingText(
         windowId: Long,
+        connectionId: Long,
         beforeLength: Int,
         afterLength: Int,
+        revision: Long,
     )
 
     /// IME `sendKeyEvent` fallback for hardware-style key events the
@@ -232,4 +264,11 @@ object NativeBridge {
     /// `Window::soft_keyboard_visible()` to render its lit-up
     /// `toggle_state`.
     external fun nativeSetSoftKeyboardVisible(visible: Boolean)
+
+    /**
+     * Reports the part of the primary GPUI viewport covered by the IME and
+     * optional programming-keys row. The native renderer keeps its SurfaceView
+     * at a stable size and applies this only to GPUI's logical content bounds.
+     */
+    external fun nativeSetViewportBottomInset(bottomInsetPx: Int)
 }

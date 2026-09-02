@@ -60,9 +60,12 @@ pub enum SidebarSide {
 )]
 #[serde(rename_all = "snake_case")]
 pub enum ThinkingBlockDisplay {
+    /// Keep private thinking in the conversation data but do not render it in
+    /// the Agent Panel. Users can switch to another mode to inspect it later.
+    #[default]
+    Hidden,
     /// Thinking blocks fully expand during streaming, then auto-collapse
     /// when the model finishes thinking. Users can re-expand after collapse.
-    #[default]
     Auto,
     /// Thinking blocks auto-expand with a height constraint during streaming,
     /// then remain in their constrained state when complete. Users can click
@@ -72,6 +75,30 @@ pub enum ThinkingBlockDisplay {
     AlwaysExpanded,
     /// Thinking blocks are always collapsed by default.
     AlwaysCollapsed,
+}
+
+/// Language used for Agent answers unless the user explicitly requests another language.
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    Default,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    JsonSchema,
+    MergeFrom,
+    strum::VariantArray,
+    strum::VariantNames,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentOutputLanguage {
+    #[default]
+    Auto,
+    English,
+    TraditionalChinese,
+    SimplifiedChinese,
 }
 
 /// Threshold at which agent auto-compaction runs. See
@@ -335,6 +362,14 @@ pub struct AgentSettingsContent {
     ///
     /// Default: 4
     pub message_editor_min_lines: Option<usize>,
+    /// Whether sending a prompt collapses the agent message editor.
+    ///
+    /// Default: false
+    pub collapse_message_editor_on_send: Option<bool>,
+    /// Preferred language for Agent answers.
+    ///
+    /// Default: auto
+    pub output_language: Option<AgentOutputLanguage>,
     /// Whether to show turn statistics (elapsed time during generation, final turn duration).
     ///
     /// Default: false

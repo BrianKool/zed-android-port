@@ -59,6 +59,7 @@ pub enum IconName {
     Building2,
     Box,
     BoxOpen,
+    Camera,
     CaseSensitive,
     Chat,
     Check,

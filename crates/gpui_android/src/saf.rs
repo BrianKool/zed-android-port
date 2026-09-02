@@ -22,7 +22,7 @@ use anyhow::{Context as _, Result};
 use futures::channel::oneshot;
 use jni::{
     JavaVM,
-    objects::{JObject, JString, JValue},
+    objects::{JObject, JObjectArray, JString, JValue},
     sys::jboolean,
 };
 
@@ -33,6 +33,7 @@ enum Pending {
     TreePaths(PendingPathsSender),
     FilePaths(PendingPathsSender),
     NewPath(PendingPathSender),
+    CameraImage(PendingPathSender),
 }
 
 static PENDING: Mutex<Option<Pending>> = Mutex::new(None);
@@ -61,12 +62,30 @@ pub(crate) fn pick_folder(
 
 /// Launch `ACTION_OPEN_DOCUMENT` and resolve the sender with the picked
 /// file path, or `Ok(None)` if the user cancelled.
-pub(crate) fn pick_file(android_app: &AndroidApp, sender: PendingPathsSender) {
-    log::info!("saf: pick_file requested");
+pub(crate) fn pick_file(
+    android_app: &AndroidApp,
+    sender: PendingPathsSender,
+    images_only: bool,
+    multiple: bool,
+) {
+    log::info!("saf: pick_file requested images_only={images_only} multiple={multiple}");
     set_pending(Pending::FilePaths(sender));
-    if let Err(err) = launch_open_document(android_app) {
+    if let Err(err) = launch_open_document(android_app, images_only, multiple) {
         log::warn!("saf: launchOpenDocument failed: {err:#}");
         if let Some(Pending::FilePaths(sender)) = PENDING.lock().unwrap().take() {
+            let _ = sender.send(Err(err));
+        }
+    }
+}
+
+/// Launch the system camera and resolve with the app-private cache path of
+/// the captured image. MainActivity grants the camera app access only to the
+/// single output URI for the duration of the capture.
+pub(crate) fn capture_image(android_app: &AndroidApp, sender: PendingPathSender) {
+    set_pending(Pending::CameraImage(sender));
+    if let Err(err) = launch_camera_capture(android_app) {
+        log::warn!("saf: launchCameraCapture failed: {err:#}");
+        if let Some(Pending::CameraImage(sender)) = PENDING.lock().unwrap().take() {
             let _ = sender.send(Err(err));
         }
     }
@@ -105,7 +124,7 @@ fn send_cancel(p: Option<Pending>) {
         Some(Pending::TreePaths(s) | Pending::FilePaths(s)) => {
             let _ = s.send(Ok(None));
         }
-        Some(Pending::NewPath(s)) => {
+        Some(Pending::NewPath(s) | Pending::CameraImage(s)) => {
             let _ = s.send(Ok(None));
         }
         None => {}
@@ -141,15 +160,74 @@ fn launch_open_tree(
     Ok(())
 }
 
-fn launch_open_document(android_app: &AndroidApp) -> Result<()> {
-    log::info!("saf: calling MainActivity.launchOpenDocument()");
+fn launch_open_document(android_app: &AndroidApp, images_only: bool, multiple: bool) -> Result<()> {
+    log::info!(
+        "saf: calling MainActivity.launchOpenDocument(images_only={images_only}, multiple={multiple})"
+    );
     let vm = unsafe { JavaVM::from_raw(android_app.vm_as_ptr().cast())? };
     let mut env = vm.attach_current_thread()?;
     let activity = unsafe { JObject::from_raw(android_app.activity_as_ptr() as _) };
-    let result = env.call_method(&activity, "launchOpenDocument", "()V", &[]);
+    let result = env.call_method(
+        &activity,
+        "launchOpenDocument",
+        "(ZZ)V",
+        &[
+            JValue::Bool(if images_only { 1 } else { 0 }),
+            JValue::Bool(if multiple { 1 } else { 0 }),
+        ],
+    );
     clear_java_exception(&mut env, "MainActivity.launchOpenDocument", result)?;
     log::info!("saf: MainActivity.launchOpenDocument() returned");
     Ok(())
+}
+
+fn launch_camera_capture(android_app: &AndroidApp) -> Result<()> {
+    log::info!("saf: calling MainActivity.launchCameraCapture()");
+    let vm = unsafe { JavaVM::from_raw(android_app.vm_as_ptr().cast())? };
+    let mut env = vm.attach_current_thread()?;
+    let activity = unsafe { JObject::from_raw(android_app.activity_as_ptr() as _) };
+    let result = env.call_method(&activity, "launchCameraCapture", "()V", &[]);
+    clear_java_exception(&mut env, "MainActivity.launchCameraCapture", result)?;
+    Ok(())
+}
+
+/// Receives a multi-selection result from Android's photo/document picker.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_com_zdroid_MainActivity_onPickerResults<'local>(
+    mut env: jni::JNIEnv<'local>,
+    _activity: JObject<'local>,
+    uri_strings: JObjectArray<'local>,
+) {
+    let length = match env.get_array_length(&uri_strings) {
+        Ok(length) => length,
+        Err(err) => {
+            log::warn!("saf: couldn't read picker result array: {err:#}");
+            return;
+        }
+    };
+    let mut uris = Vec::with_capacity(length as usize);
+    for index in 0..length {
+        let Ok(value) = env.get_object_array_element(&uri_strings, index) else {
+            continue;
+        };
+        let value = JString::from(value);
+        if let Ok(value) = env.get_string(&value) {
+            uris.push(String::from(value));
+        }
+    }
+
+    log::info!("saf: onPickerResults count={}", uris.len());
+    let pending = PENDING.lock().unwrap().take();
+    match pending {
+        Some(Pending::FilePaths(sender)) => {
+            let _ = sender.send(handle_document_results(&uris));
+        }
+        Some(other) => {
+            log::warn!("saf: received multiple files for a non-file picker");
+            send_cancel(Some(other));
+        }
+        None => log::warn!("saf: onPickerResults fired with no pending sender"),
+    }
 }
 
 fn launch_create_document(android_app: &AndroidApp, suggested_name: Option<&str>) -> Result<()> {
@@ -211,6 +289,10 @@ pub extern "system" fn Java_com_zdroid_MainActivity_onPickerResult<'local>(
         Some(Pending::NewPath(sender)) => {
             let _ = sender.send(handle_document_result(&uri));
         }
+        Some(Pending::CameraImage(sender)) => {
+            log::warn!("saf: received a picker result while camera capture was pending");
+            let _ = sender.send(Ok(None));
+        }
         None => log::warn!("saf: onPickerResult fired with no pending sender"),
     }
 }
@@ -247,6 +329,50 @@ fn handle_document_result(uri: &str) -> Result<Option<PathBuf>> {
         return Ok(Some(decode_zed_segment(rest)?));
     }
     Err(anyhow::anyhow!("unsupported document URI authority: {uri}"))
+}
+
+/// Receives the app-private path created for a system camera capture.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_com_zdroid_MainActivity_onCameraResult<'local>(
+    mut env: jni::JNIEnv<'local>,
+    _activity: JObject<'local>,
+    path: JString<'local>,
+) {
+    let path: String = match env.get_string(&path) {
+        Ok(path) => path.into(),
+        Err(err) => {
+            log::warn!("saf: couldn't read camera result path: {err:#}");
+            return;
+        }
+    };
+    let pending = PENDING.lock().unwrap().take();
+    match pending {
+        Some(Pending::CameraImage(sender)) => {
+            let result = if path.is_empty() {
+                Ok(None)
+            } else {
+                Ok(Some(PathBuf::from(path)))
+            };
+            let _ = sender.send(result);
+        }
+        Some(other) => {
+            log::warn!("saf: received camera result for a non-camera picker");
+            send_cancel(Some(other));
+        }
+        None => log::warn!("saf: onCameraResult fired with no pending sender"),
+    }
+}
+
+fn handle_document_results(uris: &[String]) -> Result<Option<Vec<PathBuf>>> {
+    if uris.is_empty() {
+        return Ok(None);
+    }
+    uris.iter()
+        .map(|uri| {
+            handle_document_result(uri)?.ok_or_else(|| anyhow::anyhow!("empty document URI"))
+        })
+        .collect::<Result<Vec<_>>>()
+        .map(Some)
 }
 
 /// Document IDs from `ZedDocumentsProvider` are already absolute

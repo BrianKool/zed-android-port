@@ -90,6 +90,7 @@ class SelectionOverlayController(
             addAction(menu, COMMAND_CUT, "Cut")
             addAction(menu, COMMAND_COPY, "Copy")
             addAction(menu, COMMAND_PASTE, "Paste")
+            addAction(menu, COMMAND_SELECT_ALL, "Select all")
             addAction(menu, COMMAND_MORE, "More")
             return true
         }
@@ -97,7 +98,7 @@ class SelectionOverlayController(
         override fun onPrepareActionMode(mode: ActionMode, menu: Menu): Boolean = false
 
         override fun onActionItemClicked(mode: ActionMode, item: MenuItem): Boolean {
-            if (item.itemId !in COMMAND_CUT..COMMAND_MORE) return false
+            if (item.itemId !in COMMAND_CUT..COMMAND_SELECT_ALL) return false
             if (item.itemId == COMMAND_MORE) {
                 mode.finish()
             }
@@ -176,5 +177,6 @@ class SelectionOverlayController(
         private const val COMMAND_COPY = 2
         private const val COMMAND_PASTE = 3
         private const val COMMAND_MORE = 4
+        private const val COMMAND_SELECT_ALL = 5
     }
 }

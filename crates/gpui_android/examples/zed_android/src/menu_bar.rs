@@ -28,7 +28,9 @@ actions!(
         /// Starts the Android clone flow after handling an open project.
         CloneFromRepository,
         /// Starts the Android project import flow after handling an open project.
-        ImportProject
+        ImportProject,
+        /// Replaces the active project after the standard unsaved-file prompt.
+        SwapProject
     ]
 );
 
@@ -253,7 +255,8 @@ fn file_menu_items() -> Vec<MenuEntry> {
     vec![
         MenuEntry::Action("New File", Box::new(workspace::NewFile)),
         MenuEntry::Separator,
-        MenuEntry::Action("Open…", Box::new(workspace::Open::default())),
+        MenuEntry::Action("Open Project…", Box::new(workspace::Open::default())),
+        MenuEntry::Action("Swap Project…", Box::new(SwapProject)),
         MenuEntry::Action(
             "Open Recent…",
             Box::new(zed_actions::OpenRecent {

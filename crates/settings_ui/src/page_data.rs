@@ -8826,7 +8826,7 @@ fn ai_page(cx: &App) -> SettingsPage {
             }),
             SettingsPageItem::SettingItem(SettingItem {
                 title: "Thinking Display",
-                description: "How thinking blocks should be displayed by default. 'Auto' fully expands during streaming, then auto-collapses when done. 'Preview' auto-expands with a height constraint during streaming. 'Always Expanded' shows full content. 'Always Collapsed' keeps them collapsed.",
+                description: "How thinking blocks appear in Agent chats. 'Hidden' shows only public answers while retaining thinking in the thread. Other modes make thinking available for inspection.",
                 field: Box::new(SettingField {
                     organization_override: None,
                     json_path: Some("agent.thinking_display"),
@@ -8911,6 +8911,45 @@ fn ai_page(cx: &App) -> SettingsPage {
                             .agent
                             .get_or_insert_default()
                             .message_editor_min_lines = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Collapse Message Editor On Send",
+                description: "Whether sending a prompt automatically collapses the agent message editor.",
+                field: Box::new(SettingField {
+                    organization_override: None,
+                    json_path: Some("agent.collapse_message_editor_on_send"),
+                    pick: |settings_content| {
+                        settings_content
+                            .agent
+                            .as_ref()?
+                            .collapse_message_editor_on_send
+                            .as_ref()
+                    },
+                    write: |settings_content, value, _| {
+                        settings_content
+                            .agent
+                            .get_or_insert_default()
+                            .collapse_message_editor_on_send = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Agent Output Language",
+                description: "Preferred language for Codex, Claude, and other Agent answers.",
+                field: Box::new(SettingField {
+                    organization_override: None,
+                    json_path: Some("agent.output_language"),
+                    pick: |settings_content| {
+                        settings_content.agent.as_ref()?.output_language.as_ref()
+                    },
+                    write: |settings_content, value, _| {
+                        settings_content.agent.get_or_insert_default().output_language = value;
                     },
                 }),
                 metadata: None,

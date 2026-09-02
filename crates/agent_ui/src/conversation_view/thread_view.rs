@@ -16,7 +16,7 @@ use agent::{
     SandboxStatusKey, SandboxStatusRefresh, SkillLoadingIssue, SkillLoadingIssueKind,
     SkillLoadingIssuesUpdated, ThreadSandbox, VerifiedSandboxStatus,
 };
-use agent_settings::UserAgentsMd;
+use agent_settings::{AgentSettings, UserAgentsMd};
 use agent_skills::MAX_SKILL_DESCRIPTION_LEN;
 use cloud_api_types::{SubmitAgentThreadFeedbackBody, SubmitAgentThreadFeedbackCommentsBody};
 use editor::actions::OpenExcerpts;
@@ -38,7 +38,9 @@ use language_model::{
     LanguageModelProvider, LanguageModelProviderId, LanguageModelRegistry, Speed,
 };
 use notifications::status_toast::StatusToast;
-use settings::{update_settings_file, update_settings_file_with_completion};
+use settings::{
+    Settings as _, ThinkingBlockDisplay, update_settings_file, update_settings_file_with_completion,
+};
 use ui::{
     ButtonLike, CalloutBorderPosition, Checkbox, SpinnerLabel, SpinnerVariant, SplitButton,
     SplitButtonStyle, Tab, ToggleState,
@@ -52,6 +54,32 @@ use super::elicitation::{
 use super::*;
 
 const DATA_RETENTION_LEARN_MORE_URL: &str = "https://support.claude.com/en/articles/15425996-data-retention-practices-for-mythos-class-models";
+
+fn image_resource_path(resource_link: &acp::ResourceLink) -> Option<std::path::PathBuf> {
+    let uri = resource_link.uri.split('#').next()?;
+    let path = if let Ok(url) = url::Url::parse(uri) {
+        if url.scheme() != "file" {
+            return None;
+        }
+        url.to_file_path().ok()?
+    } else {
+        std::path::PathBuf::from(uri.strip_prefix("file://")?)
+    };
+
+    let extension = path.extension()?.to_str()?;
+    const RASTER_IMAGE_EXTENSIONS: &[&str] = &[
+        "png", "jpg", "jpeg", "webp", "gif", "bmp", "tif", "tiff", "ico", "pnm", "ppm", "pgm",
+        "pbm",
+    ];
+    RASTER_IMAGE_EXTENSIONS
+        .iter()
+        .any(|known| known.eq_ignore_ascii_case(extension))
+        .then_some(path)
+}
+
+fn is_image_resource_link(resource_link: &acp::ResourceLink) -> bool {
+    image_resource_path(resource_link).is_some()
+}
 
 #[derive(Default)]
 struct ThreadFeedbackState {
@@ -1712,6 +1740,8 @@ impl ThreadView {
         .detach();
 
         let side = crate::agent_sidebar_side(cx);
+        #[cfg(target_os = "android")]
+        let output_language = AgentSettings::get_global(cx).output_language;
 
         let task = cx.spawn_in(window, async move |this, cx| {
             let Some((contents, tracked_buffers)) = contents_task.await? else {
@@ -1732,7 +1762,11 @@ impl ThreadView {
             })?;
 
             this.update_in(cx, |this, _window, cx| {
-                this.set_editor_is_expanded(false, cx);
+                if AgentSettings::get_global(cx).collapse_message_editor_on_send {
+                    this.set_editor_is_collapsed(true, cx);
+                } else {
+                    this.set_editor_is_expanded(false, cx);
+                }
             })?;
 
             let _ = this.update(cx, |this, cx| {
@@ -1794,7 +1828,31 @@ impl ThreadView {
                 if is_native_command {
                     thread.send_command(contents, cx)
                 } else {
-                    thread.send(contents, cx)
+                    #[cfg(target_os = "android")]
+                    {
+                        let language_instruction = match output_language {
+                            settings::AgentOutputLanguage::Auto =>
+                                "Reply in the same language and writing system as the user's latest message unless they explicitly request another language.",
+                            settings::AgentOutputLanguage::English =>
+                                "Reply in English unless the user explicitly requests another language.",
+                            settings::AgentOutputLanguage::TraditionalChinese =>
+                                "Reply in Traditional Chinese (Taiwan), never Simplified Chinese, unless the user explicitly requests another language.",
+                            settings::AgentOutputLanguage::SimplifiedChinese =>
+                                "Reply in Simplified Chinese unless the user explicitly requests another language.",
+                        };
+                        let additional_context = format!(
+                            "Zdroid model-only instructions:\n- {language_instruction}\n- When you create or download a user-requested artifact, include its absolute file URI in the first final response. For an image, immediately embed it as Markdown with its absolute file URI and also state the exact saved path; do not wait for the user to ask where it was saved."
+                        );
+                        thread.send_with_additional_context(
+                            contents,
+                            acp::ContentBlock::Text(acp::TextContent::new(additional_context)),
+                            cx,
+                        )
+                    }
+                    #[cfg(not(target_os = "android"))]
+                    {
+                        thread.send(contents, cx)
+                    }
                 }
             })?;
 
@@ -2561,7 +2619,11 @@ impl ThreadView {
                     .get(index)
                     .and_then(|e| e.user_message())
                 {
-                    editor.set_message(user_message.chunks.clone(), window, cx);
+                    editor.set_message(
+                        acp_thread::sanitize_user_visible_contents(&user_message.chunks),
+                        window,
+                        cx,
+                    );
                 }
             })
         };
@@ -4555,13 +4617,6 @@ impl ThreadView {
                             .relative()
                             .w_full()
                             .min_h_0()
-                            .when(cfg!(target_os = "android"), |this| {
-                                this.on_mouse_down(MouseButton::Left, |_, window, _cx| {
-                                    if !window.soft_keyboard_visible() {
-                                        window.toggle_soft_keyboard();
-                                    }
-                                })
-                            })
                             .when(fills_container, |this| this.flex_1())
                             .pt_1()
                             .pr_2p5()
@@ -4600,7 +4655,7 @@ impl ThreadView {
                                                     ))
                                                     .on_click(cx.listener(|this, _, window, cx| {
                                                         this.set_editor_is_collapsed(true, cx);
-                                                        window.blur();
+                                                        this.focus_handle.focus(window, cx);
                                                         cx.stop_propagation();
                                                     })),
                                                 ),
@@ -5902,6 +5957,28 @@ impl ThreadView {
                     .separator()
                 })
                 .item(
+                    ContextMenuEntry::new("Saved Prompts")
+                        .icon(IconName::File)
+                        .icon_color(Color::Muted)
+                        .icon_size(IconSize::XSmall)
+                        .handler({
+                            let workspace = workspace.clone();
+                            let message_editor = message_editor.clone();
+                            move |window, cx| {
+                                if let Some(workspace) = workspace.upgrade() {
+                                    workspace.update(cx, |workspace, cx| {
+                                        crate::prompt_collection::PromptCollectionModal::open(
+                                            workspace,
+                                            Some(message_editor.clone()),
+                                            window,
+                                            cx,
+                                        );
+                                    });
+                                }
+                            }
+                        }),
+                )
+                .item(
                     ContextMenuEntry::new("Files & Directories")
                         .icon(IconName::File)
                         .icon_color(Color::Muted)
@@ -6001,22 +6078,55 @@ impl ThreadView {
                         }
                     })
                 })
-                .item(
-                    ContextMenuEntry::new("Image")
-                        .icon(IconName::Image)
-                        .icon_color(Color::Muted)
-                        .icon_size(IconSize::XSmall)
-                        .disabled(!supports_images)
-                        .handler({
+                .when(supports_images, |this| {
+                    this.submenu_with_colored_icon(
+                        "Image",
+                        IconName::Image,
+                        Color::Muted,
+                        {
                             let message_editor = message_editor.clone();
-                            move |window, cx| {
-                                message_editor.focus_handle(cx).focus(window, cx);
-                                message_editor.update(cx, |editor, cx| {
-                                    editor.add_images_from_picker(window, cx);
-                                });
+                            move |menu, window, _cx| {
+                                let compact = cfg!(target_os = "android")
+                                    && window.viewport_size().width.as_f32() < 700.0;
+                                let camera_label = if compact { "" } else { "Camera" };
+                                let album_label = if compact { "" } else { "Album" };
+                                menu.when(compact, |menu| menu.fixed_width(px(72.).into()))
+                                .item(
+                                    ContextMenuEntry::new(camera_label)
+                                        .icon(IconName::Camera)
+                                        .icon_color(Color::Muted)
+                                        .handler({
+                                            let message_editor = message_editor.clone();
+                                            move |window, cx| {
+                                                message_editor
+                                                    .focus_handle(cx)
+                                                    .focus(window, cx);
+                                                message_editor.update(cx, |editor, cx| {
+                                                    editor.add_image_from_camera(window, cx);
+                                                });
+                                            }
+                                        }),
+                                )
+                                .item(
+                                    ContextMenuEntry::new(album_label)
+                                        .icon(IconName::Image)
+                                        .icon_color(Color::Muted)
+                                        .handler({
+                                            let message_editor = message_editor.clone();
+                                            move |window, cx| {
+                                                message_editor
+                                                    .focus_handle(cx)
+                                                    .focus(window, cx);
+                                                message_editor.update(cx, |editor, cx| {
+                                                    editor.add_images_from_album(window, cx);
+                                                });
+                                            }
+                                        }),
+                                )
                             }
-                        }),
-                )
+                        },
+                    )
+                })
                 .item(
                     ContextMenuEntry::new("Selection")
                         .icon(IconName::CursorIBeam)
@@ -6750,6 +6860,11 @@ impl ThreadView {
                                 })
                             }
                             AssistantMessageChunk::Thought { block, .. } => {
+                                if AgentSettings::get_global(cx).thinking_display
+                                    == ThinkingBlockDisplay::Hidden
+                                {
+                                    return None;
+                                }
                                 block.markdown().and_then(|md| {
                                     let this_is_blank = md.read(cx).source().trim().is_empty();
                                     is_blank = is_blank && this_is_blank;
@@ -7978,6 +8093,9 @@ impl ThreadView {
         window: &Window,
         cx: &Context<Self>,
     ) -> AnyElement {
+        if AgentSettings::get_global(cx).thinking_display == ThinkingBlockDisplay::Hidden {
+            return Empty.into_any_element();
+        }
         let header_id = SharedString::from(format!("thinking-block-header-{}", entry_ix));
         let card_header_id = SharedString::from("inner-card-header");
 
@@ -8734,7 +8852,10 @@ impl ThreadView {
 
         let use_card_layout = needs_confirmation || is_edit || is_terminal_tool;
 
-        let has_image_content = tool_call.content.iter().any(|c| c.image().is_some());
+        let has_image_content = tool_call.content.iter().any(|content| {
+            content.image().is_some()
+                || matches!(content, ToolCallContent::ContentBlock(block) if block.resource_link().is_some_and(is_image_resource_link))
+        });
 
         let should_show_raw_input = !is_terminal_tool && !is_edit && !has_image_content;
 
@@ -8747,7 +8868,9 @@ impl ThreadView {
             .read(cx)
             .is_tool_call_expanded(&tool_call.id);
 
-        is_open |= needs_confirmation;
+        // Media is the result, not diagnostic detail. Keep image-producing
+        // tools open so the generated image appears as soon as it arrives.
+        is_open |= needs_confirmation || has_image_content;
 
         let input_output_header = |label: SharedString| {
             Label::new(label)
@@ -10830,6 +10953,7 @@ impl ThreadView {
     ) -> AnyElement {
         let uri: SharedString = resource_link.uri.clone().into();
         let is_file = resource_link.uri.strip_prefix("file://");
+        let image_path = image_resource_path(resource_link);
 
         let Some(project) = self.project.upgrade() else {
             return Empty.into_any_element();
@@ -10867,12 +10991,21 @@ impl ThreadView {
 
         let button_id = SharedString::from(format!("item-{}", uri));
 
-        div()
+        v_flex()
             .ml(rems(0.4))
             .pl_2p5()
+            .gap_2()
             .border_l_1()
             .border_color(self.tool_card_border_color(cx))
             .overflow_hidden()
+            .when_some(image_path, |this, path| {
+                this.child(
+                    img(path)
+                        .max_w_96()
+                        .max_h_96()
+                        .object_fit(ObjectFit::ScaleDown),
+                )
+            })
             .child(
                 Button::new(button_id, label)
                     .label_size(LabelSize::Small)
@@ -11020,6 +11153,10 @@ impl ThreadView {
         card_layout: bool,
         cx: &Context<Self>,
     ) -> AnyElement {
+        let location_label = location
+            .as_ref()
+            .map(|location| location.path.to_string_lossy().into_owned());
+
         v_flex()
             .gap_2()
             .map(|this| {
@@ -11032,15 +11169,26 @@ impl ThreadView {
                         .border_color(self.tool_card_border_color(cx))
                 }
             })
-            .when_some(location, |this, _loc| {
+            .when_some(location_label, |this, location_label| {
                 this.child(
-                    h_flex().w_full().justify_end().child(
-                        Button::new(("go-to-file", entry_ix), "Go to File")
-                            .label_size(LabelSize::Small)
-                            .on_click(cx.listener(move |this, _, window, cx| {
-                                this.open_tool_call_location(entry_ix, 0, window, cx);
-                            })),
-                    ),
+                    h_flex()
+                        .w_full()
+                        .min_w_0()
+                        .gap_2()
+                        .justify_between()
+                        .child(
+                            Label::new(location_label)
+                                .size(LabelSize::XSmall)
+                                .color(Color::Muted)
+                                .truncate(),
+                        )
+                        .child(
+                            Button::new(("go-to-file", entry_ix), "Open Image")
+                                .label_size(LabelSize::Small)
+                                .on_click(cx.listener(move |this, _, window, cx| {
+                                    this.open_tool_call_location(entry_ix, 0, window, cx);
+                                })),
+                        ),
                 )
             })
             .child(

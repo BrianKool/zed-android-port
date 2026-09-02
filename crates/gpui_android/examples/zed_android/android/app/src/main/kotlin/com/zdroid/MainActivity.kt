@@ -17,6 +17,7 @@ import android.os.Handler
 import android.os.Looper
 import android.os.Process
 import android.provider.DocumentsContract
+import android.provider.MediaStore
 import android.provider.OpenableColumns
 import android.provider.Settings
 import android.util.Log
@@ -79,6 +80,7 @@ class MainActivity : GameActivity(), ImeHost {
     private var voiceThreadId = ""
     private var voiceAgentName = "Agent"
     private var voiceModelName = "Current model"
+    private var pendingCameraCapture: File? = null
     private data class PendingVoiceResponse(val kind: String, val text: String, val epoch: Long)
     private val pendingVoiceEvents = ArrayDeque<PendingVoiceResponse>()
     private val voiceEventLock = Any()
@@ -487,6 +489,13 @@ class MainActivity : GameActivity(), ImeHost {
     private var imeShown: Boolean = false
     private var textInputActive: Boolean = false
 
+    /// A window-focus cycle must not infer IME visibility from the presence of
+    /// a GPUI text input target. Editors keep that target while the keyboard is
+    /// dismissed and while the app is in the background. Remember the actual
+    /// pre-focus-loss visibility instead, then consume it on the matching
+    /// regain so returning to the app cannot open a previously closed IME.
+    private var restoreImeAfterFocusRegain: Boolean = false
+
     /// Set right before we call `imm.hideSoftInputFromWindow` from
     /// our own code (hideIme / toggleIme). The WindowInsets listener
     /// consults this to distinguish "we asked the IME to close"
@@ -686,7 +695,6 @@ class MainActivity : GameActivity(), ImeHost {
         runOnUiThread {
             if (imeHostView == null) return@runOnUiThread
             if (imeShown) {
-                textInputActive = false
                 Log.i("zdroid_ime", "toggleIme: hiding (manual dismiss)")
                 programmaticHidePending = true
                 // Modern hide path — see hideIme rationale. Sidesteps
@@ -697,8 +705,11 @@ class MainActivity : GameActivity(), ImeHost {
                 setImeShown(false)
                 setImeManuallyDismissed(true)
             } else {
+                if (!textInputActive) {
+                    Log.i("zdroid_ime", "toggleIme: ignored because no text input owns focus")
+                    return@runOnUiThread
+                }
                 Log.i("zdroid_ime", "toggleIme: showing (clearing manual-dismiss)")
-                textInputActive = true
                 requestImeShow(clearManualDismiss = true)
             }
         }
@@ -801,17 +812,26 @@ class MainActivity : GameActivity(), ImeHost {
         selectionEnd: Int,
         composingStart: Int,
         composingEnd: Int,
+        revision: Long,
     ) {
-        imeTextState = ImeTextState(
+        val state = ImeTextState(
             text = text,
             windowStart = windowStart,
             selectionStart = selectionStart,
             selectionEnd = selectionEnd,
             composingStart = composingStart,
             composingEnd = composingEnd,
+            revision = revision,
         )
         runOnUiThread {
             val host = imeHostView ?: return@runOnUiThread
+            val current = imeTextState
+            if (current != null && state.revision < current.revision) {
+                Log.i("zdroid_ime", "updateImeTextState: rejected stale revision=${state.revision} current=${current.revision}")
+                return@runOnUiThread
+            }
+            imeTextState = state
+            if (!host.reconcileTextState(state)) return@runOnUiThread
             val imm = getSystemService(Context.INPUT_METHOD_SERVICE)
                 as android.view.inputmethod.InputMethodManager
             imm.updateSelection(host, selectionStart, selectionEnd, composingStart, composingEnd)
@@ -1161,6 +1181,14 @@ class MainActivity : GameActivity(), ImeHost {
 
     /** Keep GPUI below the status bar and above the soft keyboard/navigation bar. */
     private fun applyViewportInsets(topInset: Int, bottomInset: Int) {
+        // SurfaceView buffer resizing is asynchronous with respect to both
+        // SurfaceFlinger and GameActivity's APP_CMD_WINDOW_RESIZED callback.
+        // Resizing it on every IME animation frame can therefore present a
+        // smaller old buffer stretched across the previous view bounds for one
+        // frame. That was the whole-GPUI "giant text" flash. Keep the graphics
+        // surface stable and resize only GPUI's logical content viewport.
+        NativeBridge.nativeSetViewportBottomInset(bottomInset.coerceAtLeast(0))
+
         val surface = findSurfaceView(window.decorView) ?: return
         val params = surface.layoutParams
         if (params is ViewGroup.MarginLayoutParams) {
@@ -1168,17 +1196,17 @@ class MainActivity : GameActivity(), ImeHost {
                 params.topMargin == topInset &&
                 params.leftMargin == 0 &&
                 params.rightMargin == 0 &&
-                params.bottomMargin == bottomInset
+                params.bottomMargin == 0
             ) return
             params.leftMargin = 0
             params.topMargin = topInset
             params.rightMargin = 0
-            params.bottomMargin = bottomInset
+            params.bottomMargin = 0
             surface.layoutParams = params
             surface.requestLayout()
             Log.i(
                 "zdroid_ime",
-                "GPUI viewport vertical insets top=$topInset bottom=$bottomInset",
+                "GPUI surface top inset=$topInset; logical bottom inset=$bottomInset",
             )
         } else {
             Log.w("zdroid_ime", "SurfaceView has no margin layout params; viewport resize skipped")
@@ -1497,6 +1525,10 @@ class MainActivity : GameActivity(), ImeHost {
 
     override fun onWindowFocusChanged(hasFocus: Boolean) {
         super.onWindowFocusChanged(hasFocus)
+        if (!hasFocus) {
+            restoreImeAfterFocusRegain = restoreImeAfterFocusRegain ||
+                (imeShown && textInputActive && !imeManuallyDismissed)
+        }
         when {
             hasFocus && initialNotificationStage == 1 -> beginLegacyNotificationPermissionPrompt()
             !hasFocus && initialNotificationStage == 2 -> {
@@ -1522,8 +1554,16 @@ class MainActivity : GameActivity(), ImeHost {
         if (hasFocus && trackpadModeActive) {
             cursorOverlay?.move(cursorX, cursorY)
         }
-        if (hasFocus && textInputActive && !imeManuallyDismissed) {
-            imeHostView?.postDelayed({ requestImeShow(clearManualDismiss = false) }, 120L)
+        if (hasFocus) {
+            val shouldRestoreIme = restoreImeAfterFocusRegain
+            restoreImeAfterFocusRegain = false
+            if (shouldRestoreIme && textInputActive && !imeManuallyDismissed) {
+                imeHostView?.postDelayed({
+                    if (textInputActive && !imeManuallyDismissed && hasWindowFocus()) {
+                        requestImeShow(clearManualDismiss = false)
+                    }
+                }, 120L)
+            }
         }
         applyCursorVisibility()
     }
@@ -1726,30 +1766,83 @@ class MainActivity : GameActivity(), ImeHost {
     }
 
     @Suppress("unused") // called from Rust via JNI
-    fun launchOpenDocument() {
-        Log.i(TAG, "launchOpenDocument() invoked")
+    fun launchOpenDocument(imagesOnly: Boolean, multiple: Boolean) {
+        Log.i(TAG, "launchOpenDocument(imagesOnly=$imagesOnly multiple=$multiple) invoked")
         runOnUiThread {
-            val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
-                addCategory(Intent.CATEGORY_OPENABLE)
-                type = "*/*"
-                addFlags(
-                    Intent.FLAG_GRANT_READ_URI_PERMISSION or
-                        Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION
-                )
-                putExtra(
-                    DocumentsContract.EXTRA_INITIAL_URI,
-                    DocumentsContract.buildRootUri(
-                        "com.android.externalstorage.documents",
-                        "primary"
+            val usePhotoPicker = imagesOnly && Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU
+            val intent = if (usePhotoPicker) {
+                Intent(MediaStore.ACTION_PICK_IMAGES).apply {
+                    type = "image/*"
+                    if (multiple) {
+                        putExtra(
+                            MediaStore.EXTRA_PICK_IMAGES_MAX,
+                            MediaStore.getPickImagesMaxLimit(),
+                        )
+                    }
+                }
+            } else {
+                Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+                    addCategory(Intent.CATEGORY_OPENABLE)
+                    type = if (imagesOnly) "image/*" else "*/*"
+                    putExtra(Intent.EXTRA_ALLOW_MULTIPLE, multiple)
+                    addFlags(
+                        Intent.FLAG_GRANT_READ_URI_PERMISSION or
+                            Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION
                     )
-                )
+                    putExtra(
+                        DocumentsContract.EXTRA_INITIAL_URI,
+                        DocumentsContract.buildRootUri(
+                            "com.android.externalstorage.documents",
+                            "primary"
+                        )
+                    )
+                }
             }
             try {
-                startActivityForResult(intent, REQ_OPEN_DOCUMENT)
-                Log.i(TAG, "startActivityForResult OPEN_DOCUMENT dispatched")
+                val requestCode = if (usePhotoPicker) REQ_OPEN_IMAGES else REQ_OPEN_DOCUMENT
+                startActivityForResult(intent, requestCode)
+                Log.i(TAG, "startActivityForResult document picker dispatched req=$requestCode")
             } catch (t: Throwable) {
-                Log.e(TAG, "OPEN_DOCUMENT dispatch threw", t)
-                onPickerResult("")
+                Log.e(TAG, "document picker dispatch threw", t)
+                onPickerResults(emptyArray())
+            }
+        }
+    }
+
+    @Suppress("unused") // called from Rust via JNI
+    fun launchCameraCapture() {
+        runOnUiThread {
+            try {
+                val captureDirectory = File(cacheDir, "camera")
+                check(captureDirectory.exists() || captureDirectory.mkdirs()) {
+                    "Could not create the camera cache directory"
+                }
+                val captureFile = File.createTempFile("zdroid-camera-", ".jpg", captureDirectory)
+                val captureUri =
+                    FileProvider.getUriForFile(this, "com.zdroid.files", captureFile)
+                val intent = Intent(MediaStore.ACTION_IMAGE_CAPTURE).apply {
+                    putExtra(MediaStore.EXTRA_OUTPUT, captureUri)
+                    clipData = ClipData.newRawUri("Zdroid camera output", captureUri)
+                    addFlags(
+                        Intent.FLAG_GRANT_READ_URI_PERMISSION or
+                            Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+                    )
+                }
+                if (intent.resolveActivity(packageManager) == null) {
+                    captureFile.delete()
+                    Toast.makeText(this, "No camera app is available.", Toast.LENGTH_LONG).show()
+                    onCameraResult("")
+                    return@runOnUiThread
+                }
+                pendingCameraCapture?.delete()
+                pendingCameraCapture = captureFile
+                startActivityForResult(intent, REQ_CAPTURE_IMAGE)
+            } catch (error: Throwable) {
+                Log.e(TAG, "camera capture dispatch threw", error)
+                pendingCameraCapture?.delete()
+                pendingCameraCapture = null
+                Toast.makeText(this, "Could not open the camera.", Toast.LENGTH_LONG).show()
+                onCameraResult("")
             }
         }
     }
@@ -1996,8 +2089,26 @@ class MainActivity : GameActivity(), ImeHost {
         if (
             requestCode != REQ_OPEN_TREE &&
             requestCode != REQ_OPEN_DOCUMENT &&
-            requestCode != REQ_CREATE_DOCUMENT
+            requestCode != REQ_OPEN_IMAGES &&
+            requestCode != REQ_CREATE_DOCUMENT &&
+            requestCode != REQ_CAPTURE_IMAGE
         ) {
+            return
+        }
+        if (requestCode == REQ_CAPTURE_IMAGE) {
+            val captureFile = pendingCameraCapture
+            pendingCameraCapture = null
+            if (
+                resultCode == Activity.RESULT_OK &&
+                captureFile != null &&
+                captureFile.isFile &&
+                captureFile.length() > 0L
+            ) {
+                onCameraResult(captureFile.absolutePath)
+            } else {
+                captureFile?.delete()
+                onCameraResult("")
+            }
             return
         }
         if (resultCode != Activity.RESULT_OK) {
@@ -2006,7 +2117,23 @@ class MainActivity : GameActivity(), ImeHost {
                 openTreeImportsForeignProviders = false
                 openTreeForceImport = false
             }
-            onPickerResult("")
+            if (requestCode == REQ_OPEN_IMAGES) {
+                onPickerResults(emptyArray())
+            } else {
+                onPickerResult("")
+            }
+            return
+        }
+        if (requestCode == REQ_OPEN_IMAGES) {
+            val uris = buildList {
+                data?.data?.let(::add)
+                data?.clipData?.let { clip ->
+                    for (index in 0 until clip.itemCount) {
+                        add(clip.getItemAt(index).uri)
+                    }
+                }
+            }.distinct()
+            importAndReturnDocuments(uris)
             return
         }
         val uri: Uri? = data?.data
@@ -2082,6 +2209,41 @@ class MainActivity : GameActivity(), ImeHost {
                 AgentForegroundService.finishTask(this, taskId, taskDescription, successful)
             }
         }, "zdroid-saf-file-import").start()
+    }
+
+    private fun importAndReturnDocuments(documentUris: List<Uri>) {
+        if (documentUris.isEmpty()) {
+            onPickerResults(emptyArray())
+            return
+        }
+        showProjectImportOverlay("Importing images into Zdroid...")
+        val taskId = "saf-image-import-${System.nanoTime()}"
+        val taskDescription = "Importing selected images"
+        AgentForegroundService.startTask(this, taskId, taskDescription)
+        Thread({
+            var successful = false
+            try {
+                val results = documentUris.map { uri ->
+                    val imported = importDocumentFile(uri)
+                    "content://com.zdroid.documents/document/${Uri.encode(imported.absolutePath)}"
+                }
+                onPickerResults(results.toTypedArray())
+                successful = true
+            } catch (t: Throwable) {
+                Log.e(TAG, "Failed to import selected images", t)
+                runOnUiThread {
+                    Toast.makeText(
+                        this,
+                        "Could not import images: ${t.message ?: "unknown error"}",
+                        Toast.LENGTH_LONG,
+                    ).show()
+                }
+                onPickerResults(emptyArray())
+            } finally {
+                hideProjectImportOverlay()
+                AgentForegroundService.finishTask(this, taskId, taskDescription, successful)
+            }
+        }, "zdroid-saf-image-import").start()
     }
 
     /** Import a foreign SAF tree into Zdroid's private home, then return it
@@ -2212,6 +2374,8 @@ class MainActivity : GameActivity(), ImeHost {
     }
 
     private external fun onPickerResult(uriString: String)
+    private external fun onPickerResults(uriStrings: Array<String>)
+    private external fun onCameraResult(path: String)
 
     companion object {
         // Coalesce rapid full-text ACP updates without adding perceptible speech latency.
@@ -2230,6 +2394,8 @@ class MainActivity : GameActivity(), ImeHost {
         private const val REQ_NOTIFICATION_PERMISSION = 0xA4
         private const val REQ_OPEN_DOCUMENT = 0xA5
         private const val REQ_VOICE_PERMISSION = 0xA6
+        private const val REQ_OPEN_IMAGES = 0xA7
+        private const val REQ_CAPTURE_IMAGE = 0xA8
         /// Software cursor side length in dp. Scaled by display
         /// density at instantiation time to give the sprite a
         /// consistent visual size across devices.

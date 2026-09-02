@@ -209,6 +209,11 @@ pub trait Platform: 'static {
         &self,
         options: PathPromptOptions,
     ) -> oneshot::Receiver<Result<Option<Vec<PathBuf>>>>;
+    fn prompt_for_camera_image(&self) -> oneshot::Receiver<Result<Option<PathBuf>>> {
+        let (sender, receiver) = oneshot::channel();
+        let _ = sender.send(Ok(None));
+        receiver
+    }
     fn prompt_for_new_path(
         &self,
         directory: &Path,

@@ -25,6 +25,7 @@ mod mode_selector;
 mod model_selector;
 mod model_selector_popover;
 mod profile_selector;
+mod prompt_collection;
 mod terminal_codegen;
 mod terminal_inline_assistant;
 pub mod terminal_thread_metadata_store;
@@ -527,6 +528,11 @@ pub struct ManageProfiles {
     pub customize_tools: Option<AgentProfileId>,
 }
 
+/// Opens the persistent Prompt Collection manager.
+#[derive(PartialEq, Clone, Default, Debug, Deserialize, JsonSchema, Action)]
+#[action(namespace = agent)]
+pub struct ManagePromptCollection;
+
 impl ManageProfiles {
     pub fn customize_tools(profile_id: AgentProfileId) -> Self {
         Self {
@@ -659,6 +665,8 @@ pub fn init(
     })
     .detach();
     cx.observe_new(ManageProfilesModal::register).detach();
+    cx.observe_new(prompt_collection::PromptCollectionModal::register)
+        .detach();
     cx.observe_new(|workspace: &mut Workspace, _window, _cx| {
         workspace.register_action(
             |workspace: &mut Workspace,
@@ -1014,6 +1022,8 @@ mod tests {
             cancel_generation_on_terminal_stop: true,
             use_modifier_to_send: true,
             message_editor_min_lines: 1,
+            collapse_message_editor_on_send: false,
+            output_language: Default::default(),
             tool_permissions: Default::default(),
             sandbox_permissions: Default::default(),
             show_turn_stats: false,

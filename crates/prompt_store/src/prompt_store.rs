@@ -157,6 +157,7 @@ impl std::fmt::Display for PromptId {
 pub struct PromptStore {
     env: heed::Env,
     metadata_cache: RwLock<MetadataCache>,
+    metadata: Database<SerdeJson<PromptId>, SerdeJson<PromptMetadata>>,
     bodies: Database<SerdeJson<PromptId>, Str>,
 }
 
@@ -239,6 +240,7 @@ impl PromptStore {
             Ok(PromptStore {
                 env: db_env,
                 metadata_cache: RwLock::new(metadata_cache),
+                metadata,
                 bodies,
             })
         })
@@ -326,6 +328,52 @@ impl PromptStore {
     pub fn all_prompt_metadata(&self) -> Vec<PromptMetadata> {
         self.metadata_cache.read().metadata.clone()
     }
+
+    pub fn save(
+        &self,
+        id: Option<UserPromptId>,
+        title: SharedString,
+        body: String,
+        cx: &App,
+    ) -> Task<Result<PromptId>> {
+        let id = PromptId::from(id.unwrap_or_else(UserPromptId::new));
+        let metadata = PromptMetadata {
+            id,
+            title: Some(title),
+            default: false,
+            saved_at: Utc::now(),
+        };
+        let env = self.env.clone();
+        let metadata_db = self.metadata;
+        let bodies = self.bodies;
+        cx.background_spawn(async move {
+            let mut txn = env.write_txn()?;
+            metadata_db.put(&mut txn, &id, &metadata)?;
+            bodies.put(&mut txn, &id, &body)?;
+            txn.commit()?;
+            Ok(id)
+        })
+    }
+
+    pub fn refresh_metadata(&self) -> Result<()> {
+        let txn = self.env.read_txn()?;
+        *self.metadata_cache.write() = MetadataCache::from_db(self.metadata, &txn)?;
+        Ok(())
+    }
+
+    pub fn delete(&self, id: UserPromptId, cx: &App) -> Task<Result<()>> {
+        let id = PromptId::from(id);
+        let env = self.env.clone();
+        let metadata = self.metadata;
+        let bodies = self.bodies;
+        cx.background_spawn(async move {
+            let mut txn = env.write_txn()?;
+            metadata.delete(&mut txn, &id)?;
+            bodies.delete(&mut txn, &id)?;
+            txn.commit()?;
+            Ok(())
+        })
+    }
 }
 
 /// Deprecated: Legacy V1 prompt ID format, used only for migrating data from old databases. Use `PromptId` instead.
@@ -391,5 +439,75 @@ mod tests {
             }),
             "Built-in prompt should always be in cache"
         );
+    }
+
+    #[gpui::test]
+    async fn test_user_prompt_crud_and_metadata_refresh(cx: &mut TestAppContext) {
+        cx.executor().allow_parking();
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let store = cx
+            .update(|cx| PromptStore::new(temp_dir.path().join("prompts-db"), cx))
+            .await
+            .unwrap();
+        let store = cx.new(|_| store);
+
+        let prompt_id = store
+            .update(cx, |store, cx| {
+                store.save(None, "Release checklist".into(), "Run the tests".into(), cx)
+            })
+            .await
+            .unwrap();
+        let user_id = prompt_id.as_user().unwrap();
+        store
+            .update(cx, |store, _| store.refresh_metadata())
+            .unwrap();
+
+        assert!(store.read_with(cx, |store, _| {
+            store
+                .all_prompt_metadata()
+                .iter()
+                .any(|metadata| metadata.id == prompt_id)
+        }));
+        assert_eq!(
+            store
+                .update(cx, |store, cx| store.load(prompt_id, cx))
+                .await
+                .unwrap(),
+            "Run the tests"
+        );
+
+        store
+            .update(cx, |store, cx| {
+                store.save(
+                    Some(user_id),
+                    "Release checklist".into(),
+                    "Run tests and inspect the APK".into(),
+                    cx,
+                )
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            store
+                .update(cx, |store, cx| store.load(prompt_id, cx))
+                .await
+                .unwrap(),
+            "Run tests and inspect the APK"
+        );
+
+        store
+            .update(cx, |store, cx| store.delete(user_id, cx))
+            .await
+            .unwrap();
+        store
+            .update(cx, |store, _| store.refresh_metadata())
+            .unwrap();
+        assert!(!store.read_with(cx, |store, _| {
+            store
+                .all_prompt_metadata()
+                .iter()
+                .any(|metadata| metadata.id == prompt_id)
+        }));
     }
 }

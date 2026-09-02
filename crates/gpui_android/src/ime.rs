@@ -227,26 +227,51 @@ fn call_activity_restart_ime(
 /// corresponds to one `InputConnection` method and translates to one
 /// `PlatformInputHandler` call (or hardware-key path for sendKeyEvent).
 pub(crate) enum ImeEvent {
+    ConnectionOpened {
+        connection_id: u64,
+        revision: u64,
+    },
     /// `commitText(text, newCursorPosition)`. Final text the IME wants
     /// inserted at the cursor (or replacing any active composition).
     CommitText {
+        connection_id: u64,
         text: String,
         new_cursor_position: i32,
+        revision: u64,
     },
     /// `setComposingText(text, newCursorPosition)`. In-progress
     /// composition (CJK, gesture typing, prediction).
     SetComposingText {
+        connection_id: u64,
         text: String,
         new_cursor_position: i32,
+        revision: u64,
     },
     /// `finishComposingText()`. End of composition without further
     /// edits.
-    FinishComposingText,
+    FinishComposingText {
+        connection_id: u64,
+        revision: u64,
+    },
+    SetComposingRegion {
+        connection_id: u64,
+        start: usize,
+        end: usize,
+        revision: u64,
+    },
+    SetSelection {
+        connection_id: u64,
+        start: usize,
+        end: usize,
+        revision: u64,
+    },
     /// `deleteSurroundingText(before, after)`. Backspace / delete span
     /// around the cursor.
     DeleteSurroundingText {
+        connection_id: u64,
         before_length: i32,
         after_length: i32,
+        revision: u64,
     },
     /// `sendKeyEvent(KeyEvent)`. Hardware-style key delivery from the
     /// IME (Enter, arrows, etc.). Routed through the existing
@@ -320,24 +345,61 @@ pub(crate) fn dispatch_escape(window_id: u64) {
 
 fn debug_event(event: &ImeEvent) -> String {
     match event {
+        ImeEvent::ConnectionOpened {
+            connection_id,
+            revision,
+        } => format!("ConnectionOpened connection={connection_id} revision={revision}"),
         ImeEvent::CommitText {
+            connection_id,
             text,
             new_cursor_position,
+            revision,
         } => {
-            format!("CommitText text={text:?} cursor={new_cursor_position}")
+            format!(
+                "CommitText connection={connection_id} text={text:?} cursor={new_cursor_position} revision={revision}"
+            )
         }
         ImeEvent::SetComposingText {
+            connection_id,
             text,
             new_cursor_position,
+            revision,
         } => {
-            format!("SetComposingText text={text:?} cursor={new_cursor_position}")
+            format!(
+                "SetComposingText connection={connection_id} text={text:?} cursor={new_cursor_position} revision={revision}"
+            )
         }
-        ImeEvent::FinishComposingText => "FinishComposingText".to_string(),
+        ImeEvent::FinishComposingText {
+            connection_id,
+            revision,
+        } => {
+            format!("FinishComposingText connection={connection_id} revision={revision}")
+        }
+        ImeEvent::SetComposingRegion {
+            connection_id,
+            start,
+            end,
+            revision,
+        } => format!(
+            "SetComposingRegion connection={connection_id} range={start}..{end} revision={revision}"
+        ),
+        ImeEvent::SetSelection {
+            connection_id,
+            start,
+            end,
+            revision,
+        } => format!(
+            "SetSelection connection={connection_id} range={start}..{end} revision={revision}"
+        ),
         ImeEvent::DeleteSurroundingText {
+            connection_id,
             before_length,
             after_length,
+            revision,
         } => {
-            format!("DeleteSurroundingText before={before_length} after={after_length}")
+            format!(
+                "DeleteSurroundingText connection={connection_id} before={before_length} after={after_length} revision={revision}"
+            )
         }
         ImeEvent::KeyEvent {
             action,
@@ -412,23 +474,9 @@ fn set_composition(window_ptr: &AndroidWindowStatePtr, new_text: &str) {
     // terminals don't implement it, so we fall back to the cursor
     // position when no prior composition exists.
     let prev_start = state.ime_composition_start;
-    let recently_finished = state.ime_recently_finished_composition.take();
-    let replacement_range = if prev_start.is_none() {
-        let handler = state.input_handler.as_mut().expect("checked is_some above");
-        recently_finished_replacement_range(
-            recently_finished.as_ref(),
-            new_text,
-            handler
-                .selected_text_range(false)
-                .map(|selection| selection.range),
-        )
-    } else {
-        None
-    };
-    let start = match (prev_start, replacement_range.as_ref()) {
-        (Some(start), _) => start,
-        (None, Some(range)) => range.start,
-        (None, None) => {
+    let start = match prev_start {
+        Some(start) => start,
+        None => {
             let handler = state.input_handler.as_mut().expect("checked is_some above");
             handler
                 .selected_text_range(false)
@@ -446,33 +494,56 @@ fn set_composition(window_ptr: &AndroidWindowStatePtr, new_text: &str) {
     // past the cursor (the +67 char editor-buffer bug). None means
     // "replace the entire active marked region with new_text" for
     // editor, and "set composition overlay to new_text" for terminal.
-    // Samsung IMEs can, however, finish a composition and immediately
-    // restart it with cumulative text (`droid-` -> `droid-m`). In that
-    // case there is no marked range left, so replace the just-finished
-    // absolute range rather than appending the cumulative value.
     let selected_range = Some(new_len..new_len);
     {
         let handler = state.input_handler.as_mut().expect("checked is_some above");
-        handler.replace_and_mark_text_in_range(replacement_range, new_text, selected_range);
+        handler.replace_and_mark_text_in_range(None, new_text, selected_range);
     }
 
     state.ime_composition_start = Some(start);
     state.ime_composition_text = Some(new_text.to_string());
 }
 
-fn recently_finished_replacement_range(
-    recently_finished: Option<&(usize, String)>,
-    committed_text: &str,
-    selection: Option<std::ops::Range<usize>>,
-) -> Option<std::ops::Range<usize>> {
-    let (start, finished_text) = recently_finished?;
-    let finished_len = finished_text.encode_utf16().count();
-    let cursor = start + finished_len;
-    let selection = selection?;
-    (selection.start == cursor
-        && selection.end == cursor
-        && committed_text.starts_with(finished_text))
-    .then_some(*start..cursor)
+fn set_composing_region(window_ptr: &AndroidWindowStatePtr, start: usize, end: usize) {
+    let mut state = window_ptr.state.borrow_mut();
+    let Some(handler) = state.input_handler.as_mut() else {
+        return;
+    };
+    let text_length = handler.text_length_utf16().unwrap_or(end);
+    let start = start.min(text_length);
+    let end = end.min(text_length);
+    let range = start.min(end)..start.max(end);
+    if range.is_empty() {
+        handler.unmark_text();
+        state.ime_composition_start = None;
+        state.ime_composition_text = None;
+        return;
+    }
+
+    let mut adjusted = None;
+    let Some(text) = handler.text_for_range(range.clone(), &mut adjusted) else {
+        return;
+    };
+    let actual_range = adjusted.unwrap_or(range);
+    let selection = handler
+        .selected_text_range(false)
+        .map(|selection| selection.range)
+        .unwrap_or(actual_range.end..actual_range.end);
+    let relative_selection = selection.start.clamp(actual_range.start, actual_range.end)
+        - actual_range.start
+        ..selection.end.clamp(actual_range.start, actual_range.end) - actual_range.start;
+
+    // setComposingRegion identifies an existing absolute document span. Clear
+    // any old mark first so gpui interprets Some(range) as absolute rather
+    // than relative to the previous marked span.
+    handler.unmark_text();
+    handler.replace_and_mark_text_in_range(
+        Some(actual_range.clone()),
+        &text,
+        Some(relative_selection),
+    );
+    state.ime_composition_start = Some(actual_range.start);
+    state.ime_composition_text = Some(text);
 }
 
 /// Finalize the active composition. Behavior diverges based on what
@@ -536,23 +607,13 @@ fn commit_composition(window_ptr: &AndroidWindowStatePtr, replacement_text: Opti
             // `unmark_text` BEFORE here is harmful for editor
             // because it clears marked_ranges so the replace
             // can't use them.
-            let recently_finished = state.ime_recently_finished_composition.take();
-            let handler = state.input_handler.as_mut().expect("checked is_some above");
-            let replacement_range = if prev_text.is_none() {
-                recently_finished_replacement_range(
-                    recently_finished.as_ref(),
-                    text,
-                    handler
-                        .selected_text_range(false)
-                        .map(|selection| selection.range),
-                )
-            } else {
-                None
-            };
-            handler.replace_text_in_range(replacement_range, text);
+            state
+                .input_handler
+                .as_mut()
+                .expect("checked is_some above")
+                .replace_text_in_range(None, text);
         }
         None => {
-            let mut recently_finished = None;
             if marked_is_in_buffer {
                 // Editor: text already in buffer, just drop the
                 // composition highlight.
@@ -561,9 +622,6 @@ fn commit_composition(window_ptr: &AndroidWindowStatePtr, replacement_text: Opti
                     .as_mut()
                     .expect("checked is_some above")
                     .unmark_text();
-                if let (Some(start), Some(text)) = (prev_start, prev_text.clone()) {
-                    recently_finished = Some((start, text));
-                }
             } else if let Some(text) = prev_text.as_deref() {
                 // Terminal: marked text lives only in the overlay.
                 // Replace_text_in_range delivers it to the PTY
@@ -574,7 +632,6 @@ fn commit_composition(window_ptr: &AndroidWindowStatePtr, replacement_text: Opti
                     .expect("checked is_some above")
                     .replace_text_in_range(None, text);
             }
-            state.ime_recently_finished_composition = recently_finished;
         }
     }
 
@@ -610,11 +667,13 @@ pub(crate) fn notify_text_state(window_ptr: &AndroidWindowStatePtr) {
     let sel_end: usize;
     let text: String;
     let actual_window_start: usize;
+    let revision: u64;
     {
         let mut state = window_ptr.state.borrow_mut();
         android_app = state.android_app.clone();
         extra_window_id = state.extra_window_id;
         let comp_start_opt = state.ime_composition_start;
+        revision = state.ime_revision;
         let comp_text_len = state
             .ime_composition_text
             .as_ref()
@@ -650,6 +709,7 @@ pub(crate) fn notify_text_state(window_ptr: &AndroidWindowStatePtr) {
         sel_end as i32,
         comp_start_i32,
         comp_end_i32,
+        revision as i64,
     ) {
         log::warn!("ime::notify_text_state failed: {err:#}");
     }
@@ -664,6 +724,7 @@ fn call_activity_update_text_state(
     sel_end: i32,
     comp_start: i32,
     comp_end: i32,
+    revision: i64,
 ) -> anyhow::Result<()> {
     let vm_ptr = android_app.vm_as_ptr();
     let activity_ptr = android_app.activity_as_ptr();
@@ -682,6 +743,7 @@ fn call_activity_update_text_state(
         sel_end.into(),
         comp_start.into(),
         comp_end.into(),
+        revision.into(),
     ];
     match extra_window_id {
         Some(id) => {
@@ -691,7 +753,7 @@ fn call_activity_update_text_state(
             env.call_method(
                 activity_ref.as_obj(),
                 "updateImeTextState",
-                "(Ljava/lang/String;IIIII)V",
+                "(Ljava/lang/String;IIIIIJ)V",
                 &args,
             )
             .context("call ExtraWindowActivity.updateImeTextState")?;
@@ -701,7 +763,7 @@ fn call_activity_update_text_state(
             env.call_method(
                 &activity,
                 "updateImeTextState",
-                "(Ljava/lang/String;IIIII)V",
+                "(Ljava/lang/String;IIIIIJ)V",
                 &args,
             )
             .context("call MainActivity.updateImeTextState")?;
@@ -768,7 +830,74 @@ fn call_activity_update_selection_ui(
 
 fn apply_event(window_ptr: &AndroidWindowStatePtr, event: ImeEvent) {
     log::debug!("ime::apply_event {:?}", debug_event(&event));
+    if let ImeEvent::ConnectionOpened {
+        connection_id,
+        revision,
+    } = &event
+    {
+        let mut state = window_ptr.state.borrow_mut();
+        if *connection_id < state.ime_connection_id {
+            log::info!(
+                "ime: rejected stale connection open id={connection_id}, active={}",
+                state.ime_connection_id
+            );
+            return;
+        }
+        state.ime_connection_id = *connection_id;
+        state.ime_revision = state.ime_revision.max(*revision);
+        state.ime_composition_start = None;
+        state.ime_composition_text = None;
+        if let Some(handler) = state.input_handler.as_mut() {
+            handler.unmark_text();
+        }
+        return;
+    }
+
+    let edit_identity = match &event {
+        ImeEvent::CommitText {
+            connection_id,
+            revision,
+            ..
+        }
+        | ImeEvent::SetComposingText {
+            connection_id,
+            revision,
+            ..
+        }
+        | ImeEvent::FinishComposingText {
+            connection_id,
+            revision,
+        }
+        | ImeEvent::SetComposingRegion {
+            connection_id,
+            revision,
+            ..
+        }
+        | ImeEvent::SetSelection {
+            connection_id,
+            revision,
+            ..
+        }
+        | ImeEvent::DeleteSurroundingText {
+            connection_id,
+            revision,
+            ..
+        } => Some((*connection_id, *revision)),
+        _ => None,
+    };
+    if let Some((connection_id, revision)) = edit_identity {
+        let state = window_ptr.state.borrow();
+        if connection_id != state.ime_connection_id || revision <= state.ime_revision {
+            log::info!(
+                "ime: rejected stale edit connection={connection_id} revision={revision}; active_connection={} active_revision={}",
+                state.ime_connection_id,
+                state.ime_revision
+            );
+            return;
+        }
+    }
     let needs_mirror_push = match event {
+        ImeEvent::ConnectionOpened { .. } => unreachable!(),
         ImeEvent::CommitText { text, .. } => {
             commit_composition(window_ptr, Some(&text));
             true
@@ -777,7 +906,22 @@ fn apply_event(window_ptr: &AndroidWindowStatePtr, event: ImeEvent) {
             set_composition(window_ptr, &text);
             true
         }
-        ImeEvent::FinishComposingText => {
+        ImeEvent::SetComposingRegion { start, end, .. } => {
+            set_composing_region(window_ptr, start, end);
+            true
+        }
+        ImeEvent::SetSelection { start, end, .. } => {
+            let mut state = window_ptr.state.borrow_mut();
+            let Some(handler) = state.input_handler.as_mut() else {
+                return;
+            };
+            let text_length = handler.text_length_utf16().unwrap_or(end);
+            let start = start.min(text_length);
+            let end = end.min(text_length);
+            handler.select_text_range(start.min(end)..start.max(end));
+            true
+        }
+        ImeEvent::FinishComposingText { .. } => {
             // Only push mirror state if there was an active composition
             // to clear. Without this guard, Gboard fires
             // `finishComposingText` defensively after each
@@ -792,9 +936,9 @@ fn apply_event(window_ptr: &AndroidWindowStatePtr, event: ImeEvent) {
         ImeEvent::DeleteSurroundingText {
             before_length,
             after_length,
+            ..
         } => {
             let mut state = window_ptr.state.borrow_mut();
-            state.ime_recently_finished_composition = None;
             let Some(handler) = state.input_handler.as_mut() else {
                 return;
             };
@@ -815,10 +959,6 @@ fn apply_event(window_ptr: &AndroidWindowStatePtr, event: ImeEvent) {
             meta_state,
             repeat_count,
         } => {
-            window_ptr
-                .state
-                .borrow_mut()
-                .ime_recently_finished_composition = None;
             if let Some(input) =
                 crate::events::translate_extra_key_event(action, keycode, meta_state, repeat_count)
             {
@@ -831,10 +971,6 @@ fn apply_event(window_ptr: &AndroidWindowStatePtr, event: ImeEvent) {
             true
         }
         ImeEvent::EditorAction { action_id } => {
-            window_ptr
-                .state
-                .borrow_mut()
-                .ime_recently_finished_composition = None;
             // Soft keyboards deliver Enter either as
             // sendKeyEvent(KEYCODE_ENTER) (handled in the KeyEvent arm) or
             // as performEditorAction, depending on the keyboard and the
@@ -860,7 +996,6 @@ fn apply_event(window_ptr: &AndroidWindowStatePtr, event: ImeEvent) {
         }
         ImeEvent::SelectionAdjust { endpoint, x, y } => {
             let mut state = window_ptr.state.borrow_mut();
-            state.ime_recently_finished_composition = None;
             let scale = state.scale_factor;
             let Some(handler) = state.input_handler.as_mut() else {
                 return;
@@ -882,14 +1017,11 @@ fn apply_event(window_ptr: &AndroidWindowStatePtr, event: ImeEvent) {
             true
         }
         ImeEvent::SelectionCommand { command } => {
-            window_ptr
-                .state
-                .borrow_mut()
-                .ime_recently_finished_composition = None;
             const CUT: i32 = 1;
             const COPY: i32 = 2;
             const PASTE: i32 = 3;
             const MORE: i32 = 4;
+            const SELECT_ALL: i32 = 5;
             if command == MORE {
                 let (x, y, scale) = {
                     let state = window_ptr.state.borrow();
@@ -944,6 +1076,11 @@ fn apply_event(window_ptr: &AndroidWindowStatePtr, event: ImeEvent) {
                             handler.replace_text_in_range(None, &text);
                         }
                     }
+                    SELECT_ALL => {
+                        if let Some(length) = handler.text_length_utf16() {
+                            handler.select_text_range(0..length);
+                        }
+                    }
                     _ => {}
                 }
                 true
@@ -951,6 +1088,10 @@ fn apply_event(window_ptr: &AndroidWindowStatePtr, event: ImeEvent) {
         }
     };
 
+    if let Some((_, revision)) = edit_identity {
+        let mut state = window_ptr.state.borrow_mut();
+        state.ime_revision = state.ime_revision.max(revision);
+    }
     if needs_mirror_push {
         notify_text_state(window_ptr);
     }
@@ -1042,19 +1183,40 @@ fn call_activity_void(
 // --------------------------------------------------------------------
 
 #[unsafe(no_mangle)]
+pub extern "system" fn Java_com_zdroid_NativeBridge_nativeImeConnectionOpened<'local>(
+    _env: JNIEnv<'local>,
+    _bridge: JObject<'local>,
+    window_id: i64,
+    connection_id: i64,
+    revision: i64,
+) {
+    dispatch_event(
+        window_id as u64,
+        ImeEvent::ConnectionOpened {
+            connection_id: connection_id.max(0) as u64,
+            revision: revision.max(0) as u64,
+        },
+    );
+}
+
+#[unsafe(no_mangle)]
 pub extern "system" fn Java_com_zdroid_NativeBridge_nativeImeCommitText<'local>(
     mut env: JNIEnv<'local>,
     _bridge: JObject<'local>,
     window_id: i64,
+    connection_id: i64,
     text: JString<'local>,
     new_cursor_position: i32,
+    revision: i64,
 ) {
     let text: String = env.get_string(&text).map(|s| s.into()).unwrap_or_default();
     dispatch_event(
         window_id as u64,
         ImeEvent::CommitText {
+            connection_id: connection_id.max(0) as u64,
             text,
             new_cursor_position,
+            revision: revision.max(0) as u64,
         },
     );
 }
@@ -1064,15 +1226,61 @@ pub extern "system" fn Java_com_zdroid_NativeBridge_nativeImeSetComposingText<'l
     mut env: JNIEnv<'local>,
     _bridge: JObject<'local>,
     window_id: i64,
+    connection_id: i64,
     text: JString<'local>,
     new_cursor_position: i32,
+    revision: i64,
 ) {
     let text: String = env.get_string(&text).map(|s| s.into()).unwrap_or_default();
     dispatch_event(
         window_id as u64,
         ImeEvent::SetComposingText {
+            connection_id: connection_id.max(0) as u64,
             text,
             new_cursor_position,
+            revision: revision.max(0) as u64,
+        },
+    );
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_com_zdroid_NativeBridge_nativeImeSetComposingRegion<'local>(
+    _env: JNIEnv<'local>,
+    _bridge: JObject<'local>,
+    window_id: i64,
+    connection_id: i64,
+    start: i32,
+    end: i32,
+    revision: i64,
+) {
+    dispatch_event(
+        window_id as u64,
+        ImeEvent::SetComposingRegion {
+            connection_id: connection_id.max(0) as u64,
+            start: start.max(0) as usize,
+            end: end.max(0) as usize,
+            revision: revision.max(0) as u64,
+        },
+    );
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_com_zdroid_NativeBridge_nativeImeSetSelection<'local>(
+    _env: JNIEnv<'local>,
+    _bridge: JObject<'local>,
+    window_id: i64,
+    connection_id: i64,
+    start: i32,
+    end: i32,
+    revision: i64,
+) {
+    dispatch_event(
+        window_id as u64,
+        ImeEvent::SetSelection {
+            connection_id: connection_id.max(0) as u64,
+            start: start.max(0) as usize,
+            end: end.max(0) as usize,
+            revision: revision.max(0) as u64,
         },
     );
 }
@@ -1082,8 +1290,16 @@ pub extern "system" fn Java_com_zdroid_NativeBridge_nativeImeFinishComposingText
     _env: JNIEnv<'local>,
     _bridge: JObject<'local>,
     window_id: i64,
+    connection_id: i64,
+    revision: i64,
 ) {
-    dispatch_event(window_id as u64, ImeEvent::FinishComposingText);
+    dispatch_event(
+        window_id as u64,
+        ImeEvent::FinishComposingText {
+            connection_id: connection_id.max(0) as u64,
+            revision: revision.max(0) as u64,
+        },
+    );
 }
 
 #[unsafe(no_mangle)]
@@ -1091,14 +1307,18 @@ pub extern "system" fn Java_com_zdroid_NativeBridge_nativeImeDeleteSurroundingTe
     _env: JNIEnv<'local>,
     _bridge: JObject<'local>,
     window_id: i64,
+    connection_id: i64,
     before_length: i32,
     after_length: i32,
+    revision: i64,
 ) {
     dispatch_event(
         window_id as u64,
         ImeEvent::DeleteSurroundingText {
+            connection_id: connection_id.max(0) as u64,
             before_length,
             after_length,
+            revision: revision.max(0) as u64,
         },
     );
 }
@@ -1183,54 +1403,4 @@ pub extern "system" fn Java_com_zdroid_NativeBridge_nativeSetSoftKeyboardVisible
     visible: jni::sys::jboolean,
 ) {
     SOFT_KEYBOARD_VISIBLE.store(visible != 0, Ordering::Release);
-}
-
-#[cfg(test)]
-mod tests {
-    use super::recently_finished_replacement_range;
-
-    #[test]
-    fn cumulative_commit_replaces_just_finished_composition() {
-        let finished = Some((4, "A_".to_string()));
-        assert_eq!(
-            recently_finished_replacement_range(finished.as_ref(), "A_B", Some(6..6)),
-            Some(4..6)
-        );
-    }
-
-    #[test]
-    fn ordinary_follow_up_commit_is_not_rewritten() {
-        let finished = Some((4, "A_".to_string()));
-        assert_eq!(
-            recently_finished_replacement_range(finished.as_ref(), "B", Some(6..6)),
-            None
-        );
-    }
-
-    #[test]
-    fn moved_cursor_does_not_rewrite_old_composition() {
-        let finished = Some((4, "A_".to_string()));
-        assert_eq!(
-            recently_finished_replacement_range(finished.as_ref(), "A_B", Some(2..2)),
-            None
-        );
-    }
-
-    #[test]
-    fn cumulative_restarted_composition_replaces_just_finished_text() {
-        let finished = Some((0, "droid-".to_string()));
-        assert_eq!(
-            recently_finished_replacement_range(finished.as_ref(), "droid-m", Some(6..6),),
-            Some(0..6),
-        );
-    }
-
-    #[test]
-    fn intentional_repeated_text_is_not_treated_as_cumulative_composition() {
-        let finished = Some((0, "go".to_string()));
-        assert_eq!(
-            recently_finished_replacement_range(finished.as_ref(), "go", Some(4..4)),
-            None,
-        );
-    }
 }

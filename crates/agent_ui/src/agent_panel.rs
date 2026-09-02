@@ -107,7 +107,7 @@ use ui::{
 use util::ResultExt as _;
 use workspace::{
     CollaboratorId, DraggedSelection, DraggedTab, MultiWorkspace, PathList, SerializedPathList,
-    ToggleWorkspaceSidebar, ToggleZoom, ToolbarItemView, Workspace, WorkspaceId,
+    ToggleZoom, ToolbarItemView, Workspace, WorkspaceId,
     dock::{DockPosition, Panel, PanelEvent},
     item::{ItemEvent, ItemHandle},
 };
@@ -2890,11 +2890,32 @@ impl AgentPanel {
             .with_handle(self.company_room_menu_handle.clone())
             .menu({
                 let panel = cx.entity().downgrade();
+                let workspace = self.workspace.clone();
                 let message_editor = self.company_room_input.clone();
                 let session_id = session.id;
                 move |window, cx| {
                     Some(ContextMenu::build(window, cx, |menu, _window, _cx| {
                         menu.item(
+                            ContextMenuEntry::new("Saved Prompts")
+                                .icon(IconName::File)
+                                .handler({
+                                    let workspace = workspace.clone();
+                                    let message_editor = message_editor.clone();
+                                    move |window, cx| {
+                                        if let Some(workspace) = workspace.upgrade() {
+                                            workspace.update(cx, |workspace, cx| {
+                                                crate::prompt_collection::PromptCollectionModal::open(
+                                                    workspace,
+                                                    Some(message_editor.clone()),
+                                                    window,
+                                                    cx,
+                                                );
+                                            });
+                                        }
+                                    }
+                                }),
+                        )
+                        .item(
                             ContextMenuEntry::new("Files & Directories")
                                 .icon(IconName::File)
                                 .handler({
@@ -2930,18 +2951,46 @@ impl AgentPanel {
                                     }
                                 }),
                         )
-                        .item(
-                            ContextMenuEntry::new("Image")
-                                .icon(IconName::Image)
-                                .handler({
-                                    let message_editor = message_editor.clone();
-                                    move |window, cx| {
-                                        message_editor.update(cx, |editor, cx| {
-                                            editor.add_images_from_picker(window, cx);
-                                        });
-                                    }
-                                }),
-                        )
+                        .submenu_with_icon("Image", IconName::Image, {
+                            let message_editor = message_editor.clone();
+                            move |menu, window, _cx| {
+                                let compact = cfg!(target_os = "android")
+                                    && window.viewport_size().width.as_f32() < 700.0;
+                                let camera_label = if compact { "" } else { "Camera" };
+                                let album_label = if compact { "" } else { "Album" };
+                                menu.when(compact, |menu| menu.fixed_width(px(72.).into()))
+                                .item(
+                                    ContextMenuEntry::new(camera_label)
+                                        .icon(IconName::Camera)
+                                        .handler({
+                                            let message_editor = message_editor.clone();
+                                            move |window, cx| {
+                                                message_editor
+                                                    .focus_handle(cx)
+                                                    .focus(window, cx);
+                                                message_editor.update(cx, |editor, cx| {
+                                                    editor.add_image_from_camera(window, cx);
+                                                });
+                                            }
+                                        }),
+                                )
+                                .item(
+                                    ContextMenuEntry::new(album_label)
+                                        .icon(IconName::Image)
+                                        .handler({
+                                            let message_editor = message_editor.clone();
+                                            move |window, cx| {
+                                                message_editor
+                                                    .focus_handle(cx)
+                                                    .focus(window, cx);
+                                                message_editor.update(cx, |editor, cx| {
+                                                    editor.add_images_from_album(window, cx);
+                                                });
+                                            }
+                                        }),
+                                )
+                            }
+                        })
                         .item(
                             ContextMenuEntry::new("Branch Diff")
                                 .icon(IconName::GitBranch)
@@ -7729,12 +7778,6 @@ impl Panel for AgentPanel {
         self.is_active = active;
         if active {
             self.ensure_thread_initialized(window, cx);
-        } else if cfg!(target_os = "android") && self.zoomed {
-            // A hidden Android dock cannot safely retain a zoom layer while its
-            // compact message editor is also hidden. Reopening would otherwise
-            // focus an invisible editor and leave the panel impossible to reveal.
-            self.zoomed = false;
-            cx.emit(PanelEvent::ZoomOut);
         }
     }
 
@@ -8464,7 +8507,8 @@ impl AgentPanel {
 
                             menu = menu
                                 .separator()
-                                .action("Profiles", Box::new(ManageProfiles::default()));
+                                .header("Prompt Collection")
+                                .action("Manage Prompts", Box::new(crate::ManagePromptCollection));
                         }
 
                         if !showing_terminal {
@@ -8513,10 +8557,12 @@ impl AgentPanel {
 
                         menu = menu
                             .separator()
-                            .action("Settings", Box::new(OpenSettings))
-                            .separator()
-                            .action("Toggle Threads Sidebar", Box::new(ToggleWorkspaceSidebar));
-
+                            .header("Settings")
+                            .action("Agent Settings", Box::new(OpenSettings));
+                        if !showing_terminal {
+                            menu =
+                                menu.action("Agent Profiles", Box::new(ManageProfiles::default()));
+                        }
                         if has_auth_methods || supports_logout {
                             menu = menu.separator()
                         }
@@ -8919,6 +8965,29 @@ impl AgentPanel {
                 }))
         };
 
+        let search_button = matches!(mode, ToolbarMode::ActiveThread).then(|| {
+            div()
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .child(
+                    IconButton::new("search-active-conversation", IconName::MagnifyingGlass)
+                        .icon_size(IconSize::Small)
+                        .tooltip(Tooltip::text("Search Conversation"))
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            cx.stop_propagation();
+                            let Some(conversation) = this.active_conversation_view().cloned()
+                            else {
+                                return;
+                            };
+                            let Some(thread_view) = conversation.read(cx).root_thread_view() else {
+                                return;
+                            };
+                            thread_view.update(cx, |thread_view, cx| {
+                                thread_view.toggle_search(&crate::ToggleSearch, window, cx);
+                            });
+                        })),
+                )
+        });
+
         let back_to_company_task_button = self.active_company_worker_session(cx).map(|session| {
             Button::new("back-to-company-task", "Back to Task")
                 .label_size(LabelSize::Small)
@@ -9029,6 +9098,7 @@ impl AgentPanel {
                             this.child(button)
                         })
                         .when_some(refresh_agent_button(cx), |this, button| this.child(button))
+                        .when_some(search_button, |this, button| this.child(button))
                         .child(history_button(cx))
                         .when(can_create_entries, |this| this.child(new_thread_menu))
                         .child(full_screen_button)

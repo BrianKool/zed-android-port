@@ -4,8 +4,7 @@ use acp_thread::MentionUri;
 use agent_client_protocol::schema::v1 as acp;
 use editor::Editor;
 use gpui::{
-    Animation, AnimationExt, AnyView, Context, IntoElement, TaskExt, WeakEntity, Window,
-    pulsating_between,
+    Animation, AnimationExt, Context, IntoElement, TaskExt, WeakEntity, Window, pulsating_between,
 };
 use language::Buffer;
 use rope::Point;
@@ -26,7 +25,6 @@ pub struct MentionCrease {
     is_toggled: bool,
     is_loading: bool,
     tooltip: Option<SharedString>,
-    image_preview: Option<Box<dyn Fn(&mut Window, &mut App) -> AnyView + 'static>>,
 }
 
 impl MentionCrease {
@@ -44,7 +42,6 @@ impl MentionCrease {
             is_toggled: false,
             is_loading: false,
             tooltip: None,
-            image_preview: None,
         }
     }
 
@@ -72,14 +69,6 @@ impl MentionCrease {
         self.tooltip = Some(tooltip.into());
         self
     }
-
-    pub fn image_preview(
-        mut self,
-        builder: impl Fn(&mut Window, &mut App) -> AnyView + 'static,
-    ) -> Self {
-        self.image_preview = Some(Box::new(builder));
-        self
-    }
 }
 
 impl RenderOnce for MentionCrease {
@@ -89,7 +78,6 @@ impl RenderOnce for MentionCrease {
         let buffer_font = settings.buffer_font.clone();
         let is_loading = self.is_loading;
         let tooltip = self.tooltip;
-        let image_preview = self.image_preview;
 
         let button_height = DefiniteLength::Absolute(AbsoluteLength::Pixels(
             px(window.line_height().into()) - px(1.),
@@ -137,13 +125,9 @@ impl RenderOnce for MentionCrease {
                     }),
             )
             .map(|button| {
-                if let Some(image_preview) = image_preview {
-                    button.hoverable_tooltip(image_preview)
-                } else {
-                    button.when_some(tooltip, |this, tooltip_text| {
-                        this.tooltip(Tooltip::text(tooltip_text))
-                    })
-                }
+                button.when_some(tooltip, |this, tooltip_text| {
+                    this.tooltip(Tooltip::text(tooltip_text))
+                })
             })
     }
 }

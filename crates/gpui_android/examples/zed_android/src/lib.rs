@@ -36,10 +36,11 @@ use reqwest_client::ReqwestClient;
 use session::{AppSession, Session};
 use settings::{Settings as _, SettingsStore};
 use util::ResultExt as _;
+use workspace::notifications::DetachAndPromptErr as _;
 use workspace::{
-    AppState, CloseIntent, CloseProject, MultiWorkspace, OpenOptions, SerializedWorkspaceLocation,
-    SessionWorkspace, Workspace, WorkspaceDb, WorkspaceStore, open_new,
-    workspace_windows_for_location,
+    AppState, CloseIntent, CloseProject, MultiWorkspace, OpenOptions, RemovalIntent,
+    SerializedWorkspaceLocation, SessionWorkspace, Workspace, WorkspaceDb, WorkspaceStore,
+    open_new, workspace_windows_for_location,
 };
 use zdroid_runtime::{
     HealthStatus, RuntimeId, RuntimeProvider, adapters,
@@ -2407,6 +2408,65 @@ fn boot(cx: &mut App, data_path: &std::path::Path, dns_resolver: AndroidDnsResol
                 );
             }
         });
+
+        workspace.register_action({
+            move |_workspace: &mut Workspace, _: &menu_bar::SwapProject, window, cx| {
+                let Some(multi_workspace) = window.window_handle().downcast::<MultiWorkspace>()
+                else {
+                    let _ = window.prompt(
+                        PromptLevel::Critical,
+                        "Swap Project is unavailable in this window.",
+                        None,
+                        &["OK"],
+                        cx,
+                    );
+                    return;
+                };
+                let current_workspace = cx.entity();
+                let picker = cx.prompt_for_paths(gpui::PathPromptOptions {
+                    files: false,
+                    directories: true,
+                    multiple: false,
+                    prompt: Some("Swap Project".into()),
+                });
+                cx.spawn_in(window, async move |_, cx| {
+                    let Some(paths) = picker.await?? else {
+                        return anyhow::Ok(());
+                    };
+
+                    let remove_task =
+                        multi_workspace.update(cx, |multi_workspace, window, cx| {
+                            multi_workspace.remove(
+                                [current_workspace],
+                                RemovalIntent::CloseProject,
+                                window,
+                                cx,
+                            )
+                        })?;
+                    let removed = remove_task.await?;
+                    if !removed {
+                        return anyhow::Ok(());
+                    }
+
+                    let open_task = multi_workspace.update(cx, |multi_workspace, window, cx| {
+                        multi_workspace.open_project(
+                            paths,
+                            workspace::OpenMode::Activate,
+                            window,
+                            cx,
+                        )
+                    })?;
+                    open_task.await?;
+                    anyhow::Ok(())
+                })
+                .detach_and_prompt_err(
+                    "Could not swap project",
+                    window,
+                    cx,
+                    |_, _, _| None,
+                );
+            }
+        });
         workspace.register_action({
             let app_state = observe_app_state.clone();
             move |workspace: &mut Workspace, _: &menu_bar::ImportProject, window, cx| {
@@ -2715,10 +2775,10 @@ fn boot(cx: &mut App, data_path: &std::path::Path, dns_resolver: AndroidDnsResol
         });
 
         let paths = cx.prompt_for_paths(gpui::PathPromptOptions {
-            files: true,
+            files: false,
             directories: true,
             multiple: false,
-            prompt: None,
+            prompt: Some("Open Project".into()),
         });
         cx.spawn(async move |cx| {
             let picked = match paths.await {

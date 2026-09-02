@@ -99,6 +99,7 @@ class ExtraWindowActivity : AppCompatActivity(), ImeHost {
     /// before touching `InputMethodManager`.
     private var imeShown: Boolean = false
     private var textInputActive: Boolean = false
+    private var restoreImeAfterFocusRegain: Boolean = false
     private var programmaticHidePending: Boolean = false
     private var programmaticShowPending: Boolean = false
     private var lastImeInsetBottom: Int = 0
@@ -444,7 +445,6 @@ class ExtraWindowActivity : AppCompatActivity(), ImeHost {
         runOnUiThread {
             if (imeHostView == null) return@runOnUiThread
             if (imeShown) {
-                textInputActive = false
                 Log.i(TAG_IME, "toggleIme[w=$extraWindowId]: hiding (manual dismiss)")
                 programmaticHidePending = true
                 WindowInsetsControllerCompat(window, window.decorView)
@@ -452,8 +452,11 @@ class ExtraWindowActivity : AppCompatActivity(), ImeHost {
                 setImeShown(false)
                 setImeManuallyDismissed(true)
             } else {
+                if (!textInputActive) {
+                    Log.i(TAG_IME, "toggleIme[w=$extraWindowId]: ignored without focused input")
+                    return@runOnUiThread
+                }
                 Log.i(TAG_IME, "toggleIme[w=$extraWindowId]: showing (clearing manual-dismiss)")
-                textInputActive = true
                 requestImeShow(clearManualDismiss = true)
             }
         }
@@ -497,17 +500,26 @@ class ExtraWindowActivity : AppCompatActivity(), ImeHost {
         selectionEnd: Int,
         composingStart: Int,
         composingEnd: Int,
+        revision: Long,
     ) {
-        imeTextState = ImeTextState(
+        val state = ImeTextState(
             text = text,
             windowStart = windowStart,
             selectionStart = selectionStart,
             selectionEnd = selectionEnd,
             composingStart = composingStart,
             composingEnd = composingEnd,
+            revision = revision,
         )
         runOnUiThread {
             val host = imeHostView ?: return@runOnUiThread
+            val current = imeTextState
+            if (current != null && state.revision < current.revision) {
+                Log.i(TAG_IME, "updateImeTextState[w=$extraWindowId]: rejected stale revision=${state.revision} current=${current.revision}")
+                return@runOnUiThread
+            }
+            imeTextState = state
+            if (!host.reconcileTextState(state)) return@runOnUiThread
             val imm = getSystemService(Context.INPUT_METHOD_SERVICE)
                 as android.view.inputmethod.InputMethodManager
             imm.updateSelection(host, selectionStart, selectionEnd, composingStart, composingEnd)
@@ -528,6 +540,10 @@ class ExtraWindowActivity : AppCompatActivity(), ImeHost {
 
     override fun onWindowFocusChanged(hasFocus: Boolean) {
         super.onWindowFocusChanged(hasFocus)
+        if (!hasFocus) {
+            restoreImeAfterFocusRegain = restoreImeAfterFocusRegain ||
+                (imeShown && textInputActive && !imeManuallyDismissed)
+        }
         // Keep DeX's system cursor available for moving and resizing both
         // the main app window and auxiliary Zdroid windows.
         window.decorView.releasePointerCapture()
@@ -538,8 +554,16 @@ class ExtraWindowActivity : AppCompatActivity(), ImeHost {
             ensureCursorOverlay()
             cursorOverlay?.move(cursorX, cursorY)
         }
-        if (hasFocus && textInputActive && !imeManuallyDismissed) {
-            imeHostView?.postDelayed({ requestImeShow(clearManualDismiss = false) }, 120L)
+        if (hasFocus) {
+            val shouldRestoreIme = restoreImeAfterFocusRegain
+            restoreImeAfterFocusRegain = false
+            if (shouldRestoreIme && textInputActive && !imeManuallyDismissed) {
+                imeHostView?.postDelayed({
+                    if (textInputActive && !imeManuallyDismissed && hasWindowFocus()) {
+                        requestImeShow(clearManualDismiss = false)
+                    }
+                }, 120L)
+            }
         }
         applyCursorVisibility()
     }

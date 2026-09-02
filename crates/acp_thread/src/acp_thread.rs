@@ -2719,6 +2719,9 @@ impl AcpThread {
         indented: bool,
         cx: &mut Context<Self>,
     ) {
+        let Some(chunk) = sanitize_user_visible_content(chunk) else {
+            return;
+        };
         let language_registry = self.project.read(cx).languages().clone();
         let path_style = self.project.read(cx).path_style(cx);
         let entries_len = self.entries.len();
@@ -3653,7 +3656,22 @@ impl AcpThread {
         message: Vec<acp::ContentBlock>,
         cx: &mut Context<Self>,
     ) -> BoxFuture<'static, Result<Option<acp::PromptResponse>>> {
-        self.send_inner(message, true, cx)
+        self.send_inner(message.clone(), message, true, cx)
+    }
+
+    /// Sends a user-visible message with additional model-only context.
+    ///
+    /// The additional context is included in the protocol request, but is not
+    /// persisted in the user message or rendered in the conversation.
+    pub fn send_with_additional_context(
+        &mut self,
+        message: Vec<acp::ContentBlock>,
+        additional_context: acp::ContentBlock,
+        cx: &mut Context<Self>,
+    ) -> BoxFuture<'static, Result<Option<acp::PromptResponse>>> {
+        let mut request_message = message.clone();
+        request_message.push(additional_context);
+        self.send_inner(message, request_message, true, cx)
     }
 
     /// Sends a prompt without displaying a user-message bubble for it.
@@ -3665,22 +3683,23 @@ impl AcpThread {
         message: Vec<acp::ContentBlock>,
         cx: &mut Context<Self>,
     ) -> BoxFuture<'static, Result<Option<acp::PromptResponse>>> {
-        self.send_inner(message, false, cx)
+        self.send_inner(message.clone(), message, false, cx)
     }
 
     fn send_inner(
         &mut self,
-        message: Vec<acp::ContentBlock>,
+        display_message: Vec<acp::ContentBlock>,
+        request_message: Vec<acp::ContentBlock>,
         push_user_message: bool,
         cx: &mut Context<Self>,
     ) -> BoxFuture<'static, Result<Option<acp::PromptResponse>>> {
         let block = ContentBlock::new_combined(
-            message.clone(),
+            display_message.clone(),
             self.project.read(cx).languages().clone(),
             self.project.read(cx).path_style(cx),
             cx,
         );
-        let request = acp::PromptRequest::new(self.session_id.clone(), message.clone());
+        let request = acp::PromptRequest::new(self.session_id.clone(), request_message);
         let git_store = self.project.read(cx).git_store().clone();
 
         let client_user_message_ids = self.connection.client_user_message_ids(cx);
@@ -3697,7 +3716,7 @@ impl AcpThread {
                             client_id: client_id.clone(),
                             is_optimistic: true,
                             content: block,
-                            chunks: message,
+                            chunks: display_message,
                             checkpoint: None,
                             indented: false,
                         }),
@@ -4790,6 +4809,47 @@ impl AcpThread {
     }
 }
 
+const ZDROID_MODEL_CONTEXT_PREFIX: &str = "Zdroid model-only instructions:";
+const ZDROID_LEGACY_LANGUAGE_MARKER: &str = "\n\n<!-- Zdroid response language:";
+
+fn sanitize_user_visible_content(mut chunk: acp::ContentBlock) -> Option<acp::ContentBlock> {
+    let acp::ContentBlock::Text(text) = &mut chunk else {
+        return Some(chunk);
+    };
+
+    if text
+        .text
+        .trim_start()
+        .starts_with(ZDROID_MODEL_CONTEXT_PREFIX)
+    {
+        return None;
+    }
+
+    if let Some(marker) = text.text.find(ZDROID_LEGACY_LANGUAGE_MARKER) {
+        text.text.truncate(marker);
+    }
+    if let Some(marker) = text.text.find("\n\nZdroid model-only instructions:") {
+        text.text.truncate(marker);
+    }
+
+    if text.text.trim().is_empty() {
+        None
+    } else {
+        Some(chunk)
+    }
+}
+
+/// Removes Zdroid-owned model context from content before it is displayed in
+/// a user-message editor. This also cleans conversations persisted by older
+/// builds that appended the language instruction to the visible prompt.
+pub fn sanitize_user_visible_contents(chunks: &[acp::ContentBlock]) -> Vec<acp::ContentBlock> {
+    chunks
+        .iter()
+        .cloned()
+        .filter_map(sanitize_user_visible_content)
+        .collect()
+}
+
 fn markdown_for_raw_output(
     raw_output: &serde_json::Value,
     language_registry: &Arc<LanguageRegistry>,
@@ -4857,6 +4917,37 @@ mod tests {
         time::Duration,
     };
     use util::{path, path_list::PathList};
+
+    #[test]
+    fn user_visible_content_strips_legacy_zdroid_language_marker() {
+        let chunks = vec![acp::ContentBlock::Text(acp::TextContent::new(
+            "Generate an image\n\n<!-- Zdroid response language: reply in English -->",
+        ))];
+
+        let sanitized = sanitize_user_visible_contents(&chunks);
+        assert_eq!(sanitized.len(), 1);
+        assert!(matches!(
+            &sanitized[0],
+            acp::ContentBlock::Text(text) if text.text == "Generate an image"
+        ));
+    }
+
+    #[test]
+    fn user_visible_content_drops_model_only_context_block() {
+        let chunks = vec![
+            acp::ContentBlock::Text(acp::TextContent::new("Generate an image")),
+            acp::ContentBlock::Text(acp::TextContent::new(
+                "Zdroid model-only instructions:\n- Reply in English.",
+            )),
+        ];
+
+        let sanitized = sanitize_user_visible_contents(&chunks);
+        assert_eq!(sanitized.len(), 1);
+        assert!(matches!(
+            &sanitized[0],
+            acp::ContentBlock::Text(text) if text.text == "Generate an image"
+        ));
+    }
 
     #[test]
     fn command_category_meta_round_trips() {
